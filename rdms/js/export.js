@@ -29,25 +29,73 @@ export async function exportResults(raceNumber, options = {}) {
 
   if (!race) throw new Error(`Race ${raceNumber} not found`);
 
+  const laneCount = config?.lane_count || 6;
+
+  // Snapshot draws keyed by the actual boat lane. Source of truth for
+  // team name/code at export time, no matter which grid row the operator
+  // typed the results into.
+  const drawsByLane = {};
+  lanes.forEach(lr => {
+    if (lr.lane_number) {
+      drawsByLane[lr.lane_number] = { team_code: lr.team_code || '', team_name: lr.team_name || '' };
+    }
+  });
+
   // Pre-export validation (matches VBA ValidateResults)
   const hasInput = lanes.some(l => l.raw_time || l.remarks);
   if (!hasInput) {
     throw new Error('No results input detected. Cannot export empty results.');
   }
 
-  // Check rank mismatch (Joyi vs computed) — blocks export like VBA
+  // Lane_input validation — every result row needs a valid, unique, in-range lane.
+  // Without this, blank lane_input silently fell back to row index in the output
+  // and produced wrong team mappings.
+  const laneErrors = [];
+  const seenLanes = new Set();
+  const resultRows = lanes.filter(l => l.raw_time || l.remarks);
+  resultRows.forEach((lr, idx) => {
+    const laneStr = (lr.lane_input ?? '').toString().trim();
+    if (laneStr === '') {
+      laneErrors.push(`Row ${idx + 1}: lane number is required`);
+      return;
+    }
+    const lane = parseInt(laneStr, 10);
+    if (!Number.isInteger(lane) || lane < 1 || lane > laneCount) {
+      laneErrors.push(`Row ${idx + 1}: lane "${laneStr}" out of range (1–${laneCount})`);
+      return;
+    }
+    if (seenLanes.has(lane)) {
+      laneErrors.push(`Row ${idx + 1}: lane ${lane} used more than once`);
+      return;
+    }
+    seenLanes.add(lane);
+  });
+  if (laneErrors.length > 0) {
+    throw new Error(`Cannot export: ${laneErrors.join('; ')}.`);
+  }
+
+  // Rank mismatch check uses lane_input lookup for correct team mapping.
   const mismatches = lanes.filter(l =>
     l.joyi_rank != null && l.computed_position != null && l.joyi_rank !== l.computed_position
   );
   if (mismatches.length > 0) {
-    const details = mismatches.map(l => `Lane ${l.lane_number}: position ${l.computed_position} != Joyi rank ${l.joyi_rank}`).join(', ');
+    const details = mismatches.map(l => {
+      const laneNum = parseInt(l.lane_input, 10) || l.lane_number;
+      return `Lane ${laneNum}: position ${l.computed_position} != Joyi rank ${l.joyi_rank}`;
+    }).join(', ');
     throw new Error(`Rank mismatch detected: ${details}. Resolve before exporting.`);
   }
 
-  // Check each team with a name has time or remark
-  const activeLanes = lanes.slice(0, config?.lane_count || 6);
+  // Every drawn team (lane 1..N with a team_name) must be referenced by some
+  // result row's lane_input. If a team's lane isn't in the entered results,
+  // the operator forgot to log that boat.
+  const referencedLanes = new Set(
+    resultRows.map(l => parseInt(l.lane_input, 10)).filter(Number.isInteger)
+  );
+  const activeLanes = lanes.slice(0, laneCount);
   const missingResults = activeLanes.filter(l =>
-    l.team_name && l.team_name !== '---' && l.team_name !== '' && !l.raw_time && !l.remarks
+    l.team_name && l.team_name !== '---' && l.team_name !== '' &&
+    !referencedLanes.has(l.lane_number)
   );
   if (missingResults.length > 0) {
     const details = missingResults.map(l => `Lane ${l.lane_number} (${l.team_name})`).join(', ');
@@ -67,9 +115,13 @@ export async function exportResults(raceNumber, options = {}) {
     newVersion = prevVersion; // re-export, same version
   }
 
-  // Sort lanes by position for output
-  const sorted = [...lanes].sort((a, b) => {
-    if (a.computed_position == null && b.computed_position == null) return a.lane_number - b.lane_number;
+  // Output rows come from rows the operator actually filled in, sorted by
+  // computed_position. Lane and team come from lane_input + draws snapshot,
+  // not the underlying row's lane_number (which is just storage key).
+  const sorted = [...resultRows].sort((a, b) => {
+    if (a.computed_position == null && b.computed_position == null) {
+      return (parseInt(a.lane_input, 10) || 0) - (parseInt(b.lane_input, 10) || 0);
+    }
     if (a.computed_position == null) return 1;
     if (b.computed_position == null) return -1;
     return a.computed_position - b.computed_position;
@@ -97,13 +149,16 @@ export async function exportResults(raceNumber, options = {}) {
     if (lr.penalty_time) remarksDisplay.push(`TP=${lr.penalty_time}s`);
     if (lr.remarks) remarksDisplay.push(lr.remarks);
 
+    const lane = parseInt(lr.lane_input, 10) || null;
+    const draw = lane ? drawsByLane[lane] : null;
+
     wsData.push([
-      lr.lane_number,
+      lane || '',
       timeToDisplay(lr.raw_time, timeMode),
       lr.remarks && ['DSQ', 'DQ'].includes(lr.remarks) ? lr.remarks : (lr.computed_position ?? ''),
       remarksDisplay.join(', '),
-      lr.team_name || '',
-      lr.team_code || '',
+      draw?.team_name || '',
+      draw?.team_code || '',
     ]);
   });
 
