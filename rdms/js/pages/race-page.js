@@ -28,6 +28,10 @@ let p1InputHandler = null;
 // Used so the output table's team column follows the user-entered lane_input,
 // not the row index. See "lane input bug" in the audit.
 let drawsByLane = {};
+// Whether the operator has explicitly opted in to applying the batch P1
+// override to computed positions. Off by default — capturing P1 (via FINISH
+// or manual entry) only shows the delta until the operator flips this on.
+let batchOverrideEnabled = false;
 
 export async function mountRacePage(container, params) {
   // Defensive: clean up any previous mount that wasn't properly unmounted
@@ -166,6 +170,11 @@ export async function mountRacePage(container, params) {
           <div class="form-label">Difference</div>
           <span id="batchDelta" style="font-family:monospace; font-size:14px;">0.00.00</span>
         </div>
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer; user-select:none;"
+               title="If on, every row's effective time is shifted by Difference before ranking.">
+          <input type="checkbox" id="batchOverrideToggle" style="margin:0;">
+          <span style="font-size:13px;">Apply batch adjustment</span>
+        </label>
       </div>
     </details>
 
@@ -248,6 +257,7 @@ export function unmountRacePage() {
   raceNumber = null;
   raceData = null;
   batchDeltaMs = 0;
+  batchOverrideEnabled = false;
   drawsByLane = {};
 
   // Clean up window handlers
@@ -399,8 +409,11 @@ function recalculate() {
     row.display_time = timeToDisplay(row.raw_time, timeMode);
   });
 
-  // Compute rankings
-  computeRankings(data, timeMode, batchDeltaMs);
+  // Compute rankings. The batch delta is only applied when the operator
+  // has explicitly opted in via the "Apply batch adjustment" toggle —
+  // capturing P1 alone shouldn't silently re-rank everyone.
+  const appliedDeltaMs = batchOverrideEnabled ? batchDeltaMs : 0;
+  computeRankings(data, timeMode, appliedDeltaMs);
 
   const laneCount = configData?.lane_count || 6;
 
@@ -955,5 +968,15 @@ function attachHandlers() {
       }
     };
     p1Input.addEventListener('input', p1InputHandler);
+  }
+
+  // Apply batch adjustment toggle — only re-rank when explicitly opted in.
+  const toggleEl = document.getElementById('batchOverrideToggle');
+  if (toggleEl) {
+    toggleEl.checked = batchOverrideEnabled;
+    toggleEl.addEventListener('change', () => {
+      batchOverrideEnabled = toggleEl.checked;
+      recalculate();
+    });
   }
 }
