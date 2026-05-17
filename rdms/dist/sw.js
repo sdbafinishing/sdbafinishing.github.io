@@ -3,22 +3,10 @@
  * Cache-first strategy for app shell. All data is in IndexedDB.
  */
 const CACHE_NAME = 'rdms-v1';
-const PRECACHE_URLS = [
-  './',
-  './index.html',
-  './manifest.json',
-  './css/theme.css',
-  './css/grid.css',
-  './css/app.css',
-];
 
-// Install: precache app shell
+// Install: skip precache (Vite hashes filenames), cache on first fetch instead
 self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => {
-      return cache.addAll(PRECACHE_URLS);
-    }).then(() => self.skipWaiting())
-  );
+  self.skipWaiting();
 });
 
 // Activate: clean old caches

@@ -65,13 +65,12 @@
     </div>
   `}function Dp(e){for(const[r,t]of Object.entries(Ac)){const n=e.querySelector(`[data-field="${r}"]`);if(!n)continue;const a=n.querySelector(".signal-dot");t?(n.style.borderColor="#10b981",n.style.background="rgba(16,185,129,0.08)",a&&(a.style.background="#10b981")):(n.style.borderColor="#ef4444",n.style.background="rgba(239,68,68,0.08)",a&&(a.style.background="#ef4444"))}}function Ip(){hn&&qa&&hn.ref("race_status").off("value",qa),hn&&Ya&&hn.ref("alertTrigger").off("value",Ya),qa=null,Ya=null,delete window._signalAlert}let Ri=null,Is=!1,Fc="";async function Op(e,r){const{isLocal:t}=await qr(async()=>{const{isLocal:i}=await Promise.resolve().then(()=>kp);return{isLocal:i}},void 0,import.meta.url),{getRole:n}=await qr(async()=>{const{getRole:i}=await Promise.resolve().then(()=>pp);return{getRole:i}},void 0,import.meta.url);Is=t()||n()!=="viewer"||!!window._isAuthenticated;try{const i=await qr(()=>Promise.resolve().then(()=>tT),void 0,import.meta.url);Is=t()||window._rdmsAuthenticated===!0}catch{}t()&&(Is=!0);const a=(r==null?void 0:r[0])||null;!Is&&!t()?Pp(e,a):await Bp(e,a)}function Np(){Ri&&(clearInterval(Ri),Ri=null),delete window._dbSortBy,delete window._openStation,delete window._dashForceSignal,delete window._dashForceSignalCustom,delete window._switchStationMode,Fc="",Ip()}function Pp(e,r){const t=r||"view-only",n={finisher:{icon:"sports_score",label:"Finishing Station",canToggle:"FinishingReady"},"race-control":{icon:"sports",label:"Race Control",canToggle:"RaceControlReady"},starter:{icon:"flag",label:"Starter Station",canToggle:"StarterReady"},"view-only":{icon:"visibility",label:"View Only",canToggle:null}},a=n[t]||n["view-only"],i=sessionStorage.getItem("rdms-audio-unlocked")==="1";e.innerHTML=`
     <!-- Splash overlay — unlocks audio on tap, then reveals controls -->
-    <div id="splashOverlay" style="
-      ${i?"display:none;":""}
+    ${i?"":`<div id="splashOverlay" style="
       position:fixed; inset:0; z-index:9000;
       background:var(--brand-dark);
       display:flex; flex-direction:column; align-items:center; justify-content:center;
       cursor:pointer; -webkit-tap-highlight-color:transparent;
-    ">
+    ">`}
       <div style="text-align:center; color:#fff;">
         <i class="material-icons" style="font-size:64px; opacity:0.8; margin-bottom:16px;">${a.icon}</i>
         <h1 style="font-size:24px; font-weight:700; margin-bottom:8px;">SDBA RDMS</h1>
@@ -86,17 +85,26 @@
         </div>
         <p style="font-size:11px; opacity:0.4; margin-top:16px;">This enables alert sounds</p>
       </div>
-    </div>
+    ${i?"":"</div>"}
 
     <!-- Main content (hidden behind splash until tap) -->
     <div id="publicContent" style="max-width:500px; margin:0 auto; padding:8px; ${i?"":"visibility:hidden;"}">
 
-      <!-- Station Mode Selector -->
-      <div style="display:flex; gap:6px; justify-content:center; margin-bottom:16px; flex-wrap:wrap;">
+      <!-- Station Mode Selector (large buttons like original home.html) -->
+      <div style="display:flex; flex-direction:column; gap:12px; margin-bottom:20px;">
         ${Object.entries(n).map(([f,u])=>`
-          <a href="#/dashboard/${f}" class="btn ${f===t?"btn-primary":"btn-outline"}"
-             style="font-size:11px; padding:6px 10px;">
-            <i class="material-icons" style="font-size:14px;">${u.icon}</i> ${u.label}
+          <a href="#/dashboard/${f}" style="
+            display:flex; align-items:center; justify-content:center; gap:12px;
+            width:100%; padding:24px 16px;
+            background:${f===t?"var(--accent)":"var(--bg-card)"};
+            color:${f===t?"#fff":"var(--text-primary)"};
+            border:${f===t?"2px solid var(--accent)":"2px solid var(--border)"};
+            border-radius:16px; text-decoration:none;
+            font-size:20px; font-weight:600;
+            transition:all 0.2s;
+          ">
+            <i class="material-icons" style="font-size:28px;">${u.icon}</i>
+            ${u.label}
           </a>
         `).join("")}
       </div>

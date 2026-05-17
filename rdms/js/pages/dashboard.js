@@ -69,13 +69,12 @@ function renderPublicDashboard(container, stationMode) {
 
   container.innerHTML = `
     <!-- Splash overlay — unlocks audio on tap, then reveals controls -->
-    <div id="splashOverlay" style="
-      ${audioUnlocked ? 'display:none;' : ''}
+    ${audioUnlocked ? '' : `<div id="splashOverlay" style="
       position:fixed; inset:0; z-index:9000;
       background:var(--brand-dark);
       display:flex; flex-direction:column; align-items:center; justify-content:center;
       cursor:pointer; -webkit-tap-highlight-color:transparent;
-    ">
+    ">`}
       <div style="text-align:center; color:#fff;">
         <i class="material-icons" style="font-size:64px; opacity:0.8; margin-bottom:16px;">${modeInfo.icon}</i>
         <h1 style="font-size:24px; font-weight:700; margin-bottom:8px;">SDBA RDMS</h1>
@@ -90,17 +89,26 @@ function renderPublicDashboard(container, stationMode) {
         </div>
         <p style="font-size:11px; opacity:0.4; margin-top:16px;">This enables alert sounds</p>
       </div>
-    </div>
+    ${audioUnlocked ? '' : '</div>'}
 
     <!-- Main content (hidden behind splash until tap) -->
     <div id="publicContent" style="max-width:500px; margin:0 auto; padding:8px; ${audioUnlocked ? '' : 'visibility:hidden;'}">
 
-      <!-- Station Mode Selector -->
-      <div style="display:flex; gap:6px; justify-content:center; margin-bottom:16px; flex-wrap:wrap;">
+      <!-- Station Mode Selector (large buttons like original home.html) -->
+      <div style="display:flex; flex-direction:column; gap:12px; margin-bottom:20px;">
         ${Object.entries(modeLabels).map(([key, info]) => `
-          <a href="#/dashboard/${key}" class="btn ${key === mode ? 'btn-primary' : 'btn-outline'}"
-             style="font-size:11px; padding:6px 10px;">
-            <i class="material-icons" style="font-size:14px;">${info.icon}</i> ${info.label}
+          <a href="#/dashboard/${key}" style="
+            display:flex; align-items:center; justify-content:center; gap:12px;
+            width:100%; padding:24px 16px;
+            background:${key === mode ? 'var(--accent)' : 'var(--bg-card)'};
+            color:${key === mode ? '#fff' : 'var(--text-primary)'};
+            border:${key === mode ? '2px solid var(--accent)' : '2px solid var(--border)'};
+            border-radius:16px; text-decoration:none;
+            font-size:20px; font-weight:600;
+            transition:all 0.2s;
+          ">
+            <i class="material-icons" style="font-size:28px;">${info.icon}</i>
+            ${info.label}
           </a>
         `).join('')}
       </div>
