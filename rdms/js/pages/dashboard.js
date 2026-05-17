@@ -385,7 +385,14 @@ function renderCurrentNext(races) {
   const el = document.getElementById('currentNextCard');
   if (!el) return;
 
-  const started = races.filter(r => r.status === 'started').sort((a, b) => a.race_number - b.race_number);
+  // Current = most recently started (multiple started races possible; want the latest).
+  // Tie-break by race_number desc.
+  const started = races.filter(r => r.status === 'started').sort((a, b) => {
+    const ta = a.start_time ? new Date(a.start_time).getTime() : 0;
+    const tb = b.start_time ? new Date(b.start_time).getTime() : 0;
+    if (tb !== ta) return tb - ta;
+    return b.race_number - a.race_number;
+  });
   const pending = races.filter(r => r.status === 'pending').sort((a, b) => a.race_number - b.race_number);
 
   let html = '';

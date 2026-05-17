@@ -93,6 +93,20 @@ export class ExcelGrid {
           if (col.placeholder) cellEl.placeholder = col.placeholder;
           if (col.maxLength) cellEl.maxLength = col.maxLength;
 
+          // Optional datalist suggestions: free-text input + dropdown hint of common values.
+          if (col.suggestions?.length) {
+            const listId = `dl-${col.key}-${r}-${c}`;
+            cellEl.setAttribute('list', listId);
+            const dl = document.createElement('datalist');
+            dl.id = listId;
+            col.suggestions.forEach(s => {
+              const opt = document.createElement('option');
+              opt.value = s;
+              dl.appendChild(opt);
+            });
+            td.appendChild(dl);
+          }
+
           // Auto-select on focus
           cellEl.addEventListener('focus', () => {
             cellEl.select();

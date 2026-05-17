@@ -87,6 +87,30 @@ export function validateRace(race, laneResults, config) {
     errors.push('Race has no start time recorded');
   }
 
+  // 1b. Lane number validation — every row with any data must declare a valid,
+  // in-range, unique lane in lane_input. Blank lane was previously silently
+  // falling back to row index in the output, producing wrong team mappings.
+  const seenLanes = new Set();
+  activeLanes.forEach((lr, idx) => {
+    const hasData = lr.raw_time || lr.remarks;
+    if (!hasData) return;
+    const laneStr = (lr.lane_input ?? '').toString().trim();
+    if (laneStr === '') {
+      errors.push(`Row ${idx + 1}: lane number is required when a time or remark is entered`);
+      return;
+    }
+    const lane = parseInt(laneStr, 10);
+    if (!Number.isInteger(lane) || lane < 1 || lane > config.lane_count) {
+      errors.push(`Row ${idx + 1}: lane "${laneStr}" is out of range (1–${config.lane_count})`);
+      return;
+    }
+    if (seenLanes.has(lane)) {
+      errors.push(`Row ${idx + 1}: lane ${lane} is used more than once`);
+      return;
+    }
+    seenLanes.add(lane);
+  });
+
   // 2. Each active lane with a team must have time OR remark
   activeLanes.forEach(lr => {
     if (lr.team_name && lr.team_name !== '---' && lr.team_name !== '') {

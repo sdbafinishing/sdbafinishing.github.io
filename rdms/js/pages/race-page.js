@@ -9,7 +9,7 @@ import { timeToMs, msToTime, timeToDisplay, isValidTime, nowISO, nowDisplay, iso
 import { broadcastChange } from '../app.js';
 import { showExportModal } from '../export.js';
 import { sendToWhatsApp } from '../whatsapp.js';
-import { promptNextRaceSignal } from '../next-race-signal.js';
+import { promptNextRaceSignal, signalNextRace } from '../next-race-signal.js';
 import { parseJoyiFile, importJoyiToDb } from '../import.js';
 import { printResult, printDraw, openFileFromFolder } from '../print.js';
 import { hasPermission } from '../rbac.js';
@@ -24,6 +24,10 @@ let saveDebounceTimer = null;
 let batchDebounceTimer = null;
 let joyiChangeHandler = null;
 let p1InputHandler = null;
+// Immutable per-mount snapshot of the original draws (lane_number → team info).
+// Used so the output table's team column follows the user-entered lane_input,
+// not the row index. See "lane input bug" in the audit.
+let drawsByLane = {};
 
 export async function mountRacePage(container, params) {
   // Defensive: clean up any previous mount that wasn't properly unmounted
@@ -46,6 +50,19 @@ export async function mountRacePage(container, params) {
   const laneCount = configData?.lane_count || 6;
   const timeMode = configData?.time_format_mode || 'mss00';
   const laneResults = await getLaneResults(raceNumber);
+
+  // Snapshot draws keyed by the actual boat lane. Output uses this so changing
+  // lane_input remaps the team correctly (previously the row index won).
+  drawsByLane = {};
+  laneResults.forEach(lr => {
+    if (lr.lane_number) {
+      drawsByLane[lr.lane_number] = {
+        team_code: lr.team_code || '',
+        team_name: lr.team_name || '',
+        joyi_rank: lr.joyi_rank ?? null,
+      };
+    }
+  });
 
   container.innerHTML = `
     <!-- Race Header -->
@@ -213,6 +230,7 @@ export function unmountRacePage() {
   raceNumber = null;
   raceData = null;
   batchDeltaMs = 0;
+  drawsByLane = {};
 
   // Clean up window handlers
   delete window._startRace;
@@ -235,14 +253,9 @@ function buildGridColumns(timeMode, canEdit = true) {
     { key: 'penalty_time', label: 'TP (s)', editable: canEdit, type: 'input', width: 60, placeholder: '' },
     { key: 'display_time', label: 'Format', editable: false, type: 'computed', width: 80, format: (v) => v || '' },
     { key: 'computed_position', label: 'Place', editable: false, type: 'computed', width: 50, format: (v) => v ?? '' },
-    { key: 'remarks', label: 'Remarks', editable: canEdit, type: 'select', width: 80,
-      options: [
-        { value: '', label: '' },
-        { value: 'DNF', label: 'DNF' },
-        { value: 'DSQ', label: 'DSQ' },
-        { value: 'DNS', label: 'DNS' },
-        { value: 'DQ', label: 'DQ' },
-      ]
+    { key: 'remarks', label: 'Remarks', editable: canEdit, type: 'input', width: 100, maxLength: 40,
+      placeholder: '',
+      suggestions: ['DNF', 'DSQ', 'DNS', 'DQ'],
     },
     { key: 'validation', label: 'Valid?', editable: false, type: 'computed', width: 50,
       format: (v) => {
@@ -382,13 +395,22 @@ function renderOutput(data) {
     if (r.penalty_time) remarksDisplay.push(`TP=${r.penalty_time}s`);
     if (r.remarks) remarksDisplay.push(r.remarks);
 
+    // Resolve the actual lane the user typed, and look up the team from the
+    // immutable draws snapshot. Do NOT fall back to row index — a blank
+    // lane_input means the operator left it blank, and that should be visible.
+    const laneVal = parseInt(r.lane_input, 10);
+    const laneDisplay = laneVal >= 1 && laneVal <= (configData?.lane_count || 6) ? laneVal : '';
+    const draw = laneVal ? drawsByLane[laneVal] : null;
+    const teamName = draw?.team_name || '';
+    const teamCode = draw?.team_code || '';
+
     return `<tr>
-      <td>${r.lane_input || r.lane_number}</td>
+      <td>${laneDisplay}</td>
       <td>${timeToDisplay(r.raw_time, timeMode)}</td>
       <td class="cell-position ${posClass}">${r.remarks && ['DSQ', 'DQ'].includes(r.remarks) ? r.remarks : (r.computed_position ?? '')}</td>
       <td>${remarksDisplay.join(', ')}</td>
-      <td class="team-name">${r.team_name || ''}</td>
-      <td>${r.team_code || ''}</td>
+      <td class="team-name">${teamName}</td>
+      <td>${teamCode}</td>
     </tr>`;
   }).join('');
 
@@ -497,6 +519,13 @@ function attachHandlers() {
     document.getElementById('raceStatus').className = 'badge badge-started';
     document.getElementById('startBtn').innerHTML = '<i class="material-icons">replay</i> RESTART RACE';
     startTimer();
+
+    // Refresh validation panel so "Race has no start time" clears.
+    recalculate();
+
+    // Force-signal this race as "next" on the mobile app, in case it was
+    // missed by the export flow of the prior race.
+    signalNextRace(raceNumber).catch(() => {});
   };
 
   window._cancelRace = async () => {
