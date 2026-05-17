@@ -6,48 +6,52 @@
 import { getAllRaces, getAllDivisions, getDivisionRounds, getDivisionProgressions,
          getLaneResults, getAllRaceRelationships } from '../db.js';
 import { showToast } from '../utils.js';
+import { mountMultiSelect } from '../components/multi-select.js';
+
+let fcDivSelect = null;
+let fcTeamSelect = null;
+let fcRacesByTeamCode = null;
 
 export async function mountFlowchartPage(container) {
   const divisions = await getAllDivisions();
   const races = await getAllRaces();
   const raceMap = Object.fromEntries(races.map(r => [r.race_number, r]));
 
-  // Build all teams list for search
-  const allTeams = new Set();
+  // Build unique team list keyed by team_code with team_name as the display.
+  // Also remember which races each team_code appears in, so the team filter
+  // can highlight those races without re-scanning lane_results every render.
+  const teamMap = new Map(); // team_code → team_name
+  fcRacesByTeamCode = new Map(); // team_code → Set<race_number>
   for (const r of races) {
     const lanes = await getLaneResults(r.race_number);
     lanes.forEach(l => {
-      if (l.team_name && l.team_name !== '---' && l.team_name !== '' && !/^R\d+[BP]\d+$/i.test(l.team_name)) {
-        allTeams.add(l.team_name);
-      }
-      if (l.team_code) allTeams.add(l.team_code);
+      if (!l.team_code) return;
+      const name = (l.team_name && l.team_name !== '---' && l.team_name !== '' && !/^R\d+[BP]\d+$/i.test(l.team_name))
+        ? l.team_name : (l.team_code);
+      if (!teamMap.has(l.team_code)) teamMap.set(l.team_code, name);
+      if (!fcRacesByTeamCode.has(l.team_code)) fcRacesByTeamCode.set(l.team_code, new Set());
+      fcRacesByTeamCode.get(l.team_code).add(r.race_number);
     });
   }
+
+  const teamOptions = [...teamMap.entries()]
+    .map(([code, name]) => ({ value: code, label: name, sublabel: code }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+
+  const divOptions = divisions.map(d => ({
+    value: d.id,
+    label: d.div_short_ref || d.division_name || `Div ${d.id}`,
+    sublabel: d.division_name && d.div_short_ref && d.division_name !== d.div_short_ref ? d.division_name : '',
+  }));
 
   container.innerHTML = `
     <h4 style="font-size:18px; font-weight:600; margin-bottom:16px;">Race Flowchart</h4>
 
     <!-- Filters -->
     <div style="display:flex; gap:12px; margin-bottom:16px; flex-wrap:wrap; align-items:center;">
-      <div class="form-group" style="margin:0;">
-        <select class="form-select" id="fcDivFilter" style="min-width:180px;"
-                onchange="window._fcRender()">
-          <option value="all">All Divisions</option>
-          ${divisions.map(d => `<option value="${d.id}">
-            ${d.div_short_ref || d.division_name}
-          </option>`).join('')}
-        </select>
-      </div>
-      <div class="form-group" style="margin:0;">
-        <input class="form-input" id="fcTeamSearch" type="text" list="fcTeamList"
-               placeholder="Search team name or code..."
-               style="min-width:220px;"
-               oninput="window._fcRender()">
-        <datalist id="fcTeamList">
-          ${[...allTeams].sort().map(t => `<option value="${t}">`).join('')}
-        </datalist>
-      </div>
-      <button class="btn btn-ghost" onclick="document.getElementById('fcTeamSearch').value=''; window._fcRender();">
+      <div id="fcDivPickerWrap"></div>
+      <div id="fcTeamPickerWrap"></div>
+      <button class="btn btn-ghost" id="fcClearBtn">
         <i class="material-icons" style="font-size:16px;">clear</i> Clear
       </button>
     </div>
@@ -68,11 +72,35 @@ export async function mountFlowchartPage(container) {
     </div>
   `;
 
-  window._fcRender = () => renderFlowchart(divisions, races, raceMap);
+  fcDivSelect = mountMultiSelect(document.getElementById('fcDivPickerWrap'), {
+    options: divOptions,
+    placeholder: 'All divisions',
+    allLabel: 'All divisions',
+    searchPlaceholder: 'Filter divisions…',
+    onChange: () => renderFlowchart(divisions, races, raceMap),
+  });
+
+  fcTeamSelect = mountMultiSelect(document.getElementById('fcTeamPickerWrap'), {
+    options: teamOptions,
+    placeholder: 'Highlight teams…',
+    allLabel: `All teams (${teamOptions.length})`,
+    searchPlaceholder: 'Search code or name…',
+    onChange: () => renderFlowchart(divisions, races, raceMap),
+  });
+
+  document.getElementById('fcClearBtn').addEventListener('click', () => {
+    fcDivSelect.setSelected([]);
+    fcTeamSelect.setSelected([]);
+    renderFlowchart(divisions, races, raceMap);
+  });
+
   renderFlowchart(divisions, races, raceMap);
 }
 
 export function unmountFlowchartPage() {
+  if (fcDivSelect) { fcDivSelect.destroy(); fcDivSelect = null; }
+  if (fcTeamSelect) { fcTeamSelect.destroy(); fcTeamSelect = null; }
+  fcRacesByTeamCode = null;
   delete window._fcRender;
 }
 
@@ -80,13 +108,23 @@ async function renderFlowchart(divisions, races, raceMap) {
   const container = document.getElementById('flowchartContainer');
   if (!container) return;
 
-  const divFilter = document.getElementById('fcDivFilter')?.value || 'all';
-  const teamSearch = (document.getElementById('fcTeamSearch')?.value || '').toLowerCase().trim();
+  // Multi-select state: empty = no filter (show all).
+  const selectedDivIds = new Set((fcDivSelect?.getSelected() || []).map(Number));
+  const selectedTeamCodes = new Set(fcTeamSelect?.getSelected() || []);
+
+  // Highlight any race that contains *any* selected team.
+  const highlightedRaces = new Set();
+  if (selectedTeamCodes.size > 0 && fcRacesByTeamCode) {
+    selectedTeamCodes.forEach(code => {
+      const raceSet = fcRacesByTeamCode.get(code);
+      if (raceSet) raceSet.forEach(rn => highlightedRaces.add(rn));
+    });
+  }
 
   // Filter divisions
-  const filteredDivs = divFilter === 'all'
+  const filteredDivs = selectedDivIds.size === 0
     ? divisions
-    : divisions.filter(d => d.id === parseInt(divFilter));
+    : divisions.filter(d => selectedDivIds.has(d.id));
 
   if (filteredDivs.length === 0) {
     container.innerHTML = '<p style="color:var(--text-tertiary); text-align:center; padding:40px;">No divisions to display.</p>';
@@ -159,13 +197,9 @@ async function renderFlowchart(divisions, races, raceMap) {
             else if (race.status === 'started') { fillColor = 'var(--info-bg)'; strokeColor = 'var(--info)'; }
           }
 
-          // Team highlight
-          let highlight = false;
-          if (teamSearch && race) {
-            // Check if this race has the searched team — would need lane data
-            // For now, highlight is based on title match
-            highlight = (race.race_title || '').toLowerCase().includes(teamSearch);
-          }
+          // Team highlight — driven by the precomputed team→races map so we
+          // catch the actual lane assignments, not just title text matches.
+          const highlight = selectedTeamCodes.size > 0 && highlightedRaces.has(raceNum);
 
           svgContent += `<rect x="${x}" y="${y}" width="${nodeW}" height="${nodeH}" rx="6" fill="${fillColor}" stroke="${highlight ? 'var(--accent)' : strokeColor}" stroke-width="${highlight ? 2.5 : 1}"/>`;
           svgContent += `<text x="${x + 8}" y="${y + 18}" font-size="12" font-weight="600" fill="var(--text-primary)">Race ${raceNum}</text>`;

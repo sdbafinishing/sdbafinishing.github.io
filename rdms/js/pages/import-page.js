@@ -10,6 +10,7 @@ import { backupAfterSetup } from '../backup.js';
 import { showToast } from '../utils.js';
 import { broadcastChange } from '../app.js';
 import { listSourceSubfolder, isSourceConnected, requestSourceFolder } from '../file-access.js';
+import { startJoyiWatch, stopJoyiWatch, getJoyiWatchStatus, isJoyiWatchEnabled } from '../joyi-watch.js';
 
 export async function mountImportPage(container) {
   container.innerHTML = `
@@ -153,9 +154,26 @@ function renderDrawImport(container) {
 }
 
 function renderJoyiImport(container) {
+  const watchStatus = getJoyiWatchStatus();
   container.innerHTML = `
     <div class="card" style="margin-top:16px;">
-      <div class="section-header">Import Joyi Race Results</div>
+      <div class="section-header">Auto-Import Joyi Results</div>
+      <p style="font-size:13px; color:var(--text-secondary); margin-bottom:12px;">
+        Watch the connected source folder's <code>{event_ref}_Joyi/</code> subfolder
+        and auto-import any new or updated <code>.xls</code> result file. Requires
+        the source folder to be connected (folder icon in navbar).
+      </p>
+      <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+        <button class="btn ${watchStatus.enabled ? 'btn-danger' : 'btn-primary'}" id="joyiWatchToggle">
+          <i class="material-icons">${watchStatus.enabled ? 'pause_circle' : 'play_circle'}</i>
+          ${watchStatus.enabled ? 'Stop watching' : 'Start watching'}
+        </button>
+        <div id="joyiWatchStatus" style="font-size:12px; color:var(--text-tertiary);"></div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px;">
+      <div class="section-header">Manual Import Joyi Results</div>
       <p style="font-size:13px; color:var(--text-secondary); margin-bottom:16px;">
         Drop Joyi .xls result files here. Race number is detected from filename
         (e.g. <code>2026TN.9.xls</code> → Race 9).
@@ -176,6 +194,30 @@ function renderJoyiImport(container) {
   `;
 
   setupDropZone('joyiDropZone', 'joyiFileInput', handleJoyiFiles);
+
+  const refreshStatus = (st) => {
+    const el = document.getElementById('joyiWatchStatus');
+    if (!el) return;
+    if (!st.enabled) {
+      el.textContent = 'Not running.';
+      return;
+    }
+    const lastTxt = st.lastScanAt ? new Date(st.lastScanAt).toLocaleTimeString() : '—';
+    const errTxt = st.lastError ? ` · last error: ${st.lastError}` : '';
+    el.textContent = `Watching ${st.folderPath || '?'} · ${st.knownFiles} files known · last scan ${lastTxt} · imported ${st.importedSinceStart} since start${errTxt}`;
+  };
+  refreshStatus(getJoyiWatchStatus());
+
+  document.getElementById('joyiWatchToggle').addEventListener('click', async () => {
+    const st = getJoyiWatchStatus();
+    if (st.enabled) {
+      stopJoyiWatch();
+    } else {
+      await startJoyiWatch(refreshStatus);
+    }
+    // Re-render to swap button state.
+    renderJoyiImport(container);
+  });
 }
 
 function setupDropZone(zoneId, inputId, handler) {
