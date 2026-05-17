@@ -8,7 +8,7 @@ import { requestSourceFolder, isSourceConnected } from './file-access.js';
 import { needsDriveFallback, initDriveApi, requestDriveAccess, isDriveApiConnected } from './drive-api.js';
 import './rbac.js'; // Initialize RBAC (exposes window._hasPermission)
 import { startSyncService } from './sync.js';
-import { initWebVersion, showEventPicker } from './web-init.js';
+import { initWebVersion, showEventPicker, getWebSupabase } from './web-init.js';
 import { mountDashboard, unmountDashboard } from './pages/dashboard.js';
 import { mountSetup, unmountSetup } from './pages/setup.js';
 import { mountRacePage, unmountRacePage } from './pages/race-page.js';
@@ -344,6 +344,14 @@ async function init() {
           <p style="color:var(--text-tertiary); margin-top:8px;">Web config (Supabase keys) not set. Contact the administrator.</p>
         </div>`;
       return;
+    }
+
+    // Wire the Supabase client into the auth module so login() can use it.
+    // Also restores an existing session if one is already saved.
+    const authResult = await initAuth(getWebSupabase());
+    if (authResult?.authenticated) {
+      isAuthenticated = true;
+      window._rdmsAuthenticated = true;
     }
   }
 
