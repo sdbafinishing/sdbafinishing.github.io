@@ -53,6 +53,14 @@ export async function mountRacePage(container, params) {
     return;
   }
 
+  // Walk the actual race set to find adjacent races — race numbers can have
+  // gaps and the highest race number isn't always laneCount * something.
+  // Without this, the "Race N+1 →" link points at a race that doesn't
+  // exist and dead-ends with "Race N+1 not found".
+  const allRaceNums = (await getAllRaces()).map(r => r.race_number).sort((a, b) => a - b);
+  const prevRaceNum = [...allRaceNums].reverse().find(n => n < raceNumber) ?? null;
+  const nextRaceNum = allRaceNums.find(n => n > raceNumber) ?? null;
+
   const laneCount = configData?.lane_count || 6;
   const timeMode = configData?.time_format_mode || 'mss00';
   const laneResults = await getLaneResults(raceNumber);
@@ -123,10 +131,12 @@ export async function mountRacePage(container, params) {
     </div>
 
     <!-- Navigation — odd/even tint on the prev/next buttons matches the
-         race-table striping so the operator can tell parity at a glance. -->
+         race-table striping so the operator can tell parity at a glance.
+         Buttons only render when the adjacent race actually exists in
+         the loaded set — no more "Race N not found" dead-ends. -->
     <div style="display:flex; gap:6px; margin-bottom:6px; flex-wrap:wrap; align-items:center;">
-      ${raceNumber > 1 ? `<a href="#/race/${raceNumber - 1}" class="btn btn-outline btn-sm" style="${(raceNumber - 1) % 2 === 1 ? 'background: rgba(250, 204, 21, 0.12);' : ''}"><i class="material-icons" style="font-size:16px;">chevron_left</i> Race ${raceNumber - 1}</a>` : ''}
-      <a href="#/race/${raceNumber + 1}" class="btn btn-outline btn-sm" style="${(raceNumber + 1) % 2 === 1 ? 'background: rgba(250, 204, 21, 0.12);' : ''}">Race ${raceNumber + 1} <i class="material-icons" style="font-size:16px;">chevron_right</i></a>
+      ${prevRaceNum != null ? `<a href="#/race/${prevRaceNum}" class="btn btn-outline btn-sm" style="${prevRaceNum % 2 === 1 ? 'background: rgba(250, 204, 21, 0.12);' : ''}"><i class="material-icons" style="font-size:16px;">chevron_left</i> Race ${prevRaceNum}</a>` : ''}
+      ${nextRaceNum != null ? `<a href="#/race/${nextRaceNum}" class="btn btn-outline btn-sm" style="${nextRaceNum % 2 === 1 ? 'background: rgba(250, 204, 21, 0.12);' : ''}">Race ${nextRaceNum} <i class="material-icons" style="font-size:16px;">chevron_right</i></a>` : ''}
       <span style="border-left:1px solid var(--border); height:20px; margin:0 4px;"></span>
       <button class="btn btn-ghost btn-sm" onclick="window._printDraw()" title="Print draw"><i class="material-icons" style="font-size:16px;">description</i> Print Draw</button>
       <button class="btn btn-ghost btn-sm" onclick="window._openDraw()" title="Open draw file"><i class="material-icons" style="font-size:16px;">folder_open</i> Open Draw</button>
@@ -463,13 +473,15 @@ function recalculate() {
     }
   });
 
-  // Check input order (times should be ascending for finishing order input)
-  const withTimes = data.filter(r => r.effective_time_ms != null);
+  // Check input order — compare PRE-penalty raw times. TP doesn't change
+  // who crossed the line first; operators enter by actual finish order.
+  const withTimes = data
+    .map(r => ({ r, rawMs: r.raw_time ? timeToMs(r.raw_time, timeMode) : null }))
+    .filter(x => x.rawMs != null);
   for (let i = 0; i < withTimes.length - 1; i++) {
-    if (withTimes[i].effective_time_ms > withTimes[i + 1].effective_time_ms) {
-      // Not in order — mark second one
-      const idx = data.indexOf(withTimes[i + 1]);
-      data[idx].validation = -2;
+    if (withTimes[i].rawMs > withTimes[i + 1].rawMs) {
+      const idx = data.indexOf(withTimes[i + 1].r);
+      if (idx >= 0) data[idx].validation = -2;
     }
   }
 
@@ -480,13 +492,32 @@ function recalculate() {
   // rows are incomplete or invalid without scanning the panel.
   applyRowValidationStyles(data);
 
-  // Hide the running clock once the operator starts logging results or after
-  // a Joyi import populates raw_time — the focus should be on data, not the
-  // clock at that point. Show again only when the race restarts (no times yet).
+  // Hide the running clock (and the Stop pill next to it) once the operator
+  // starts logging results or after a Joyi import populates raw_time —
+  // attention shifts to the data at that point. Show again only when the
+  // race restarts (no times yet).
+  const hasResults = data.some(r => r.raw_time);
   const timerEl = document.getElementById('raceTimer');
-  if (timerEl) {
-    const hasResults = data.some(r => r.raw_time);
-    timerEl.style.display = hasResults ? 'none' : '';
+  if (timerEl) timerEl.style.display = hasResults ? 'none' : '';
+  const stopBtn = document.getElementById('stopCounterBtn');
+  if (stopBtn) {
+    const timerRunning = !!timerInterval;
+    // Stop pill is only meaningful when the timer is actively running AND
+    // hasn't been auto-hidden behind the results entry.
+    stopBtn.style.display = (timerRunning && !hasResults) ? '' : 'none';
+  }
+
+  // Batch override toggle: disabled when P1 input is empty (or was cleared).
+  // If the toggle was on and P1 just got cleared, flip it off to match.
+  const toggleEl = document.getElementById('batchOverrideToggle');
+  const p1Val = document.getElementById('batchP1Time')?.value?.trim();
+  if (toggleEl) {
+    const enabled = !!p1Val;
+    toggleEl.disabled = !enabled;
+    if (!enabled && batchOverrideEnabled) {
+      batchOverrideEnabled = false;
+      toggleEl.checked = false;
+    }
   }
 
   // Update output table

@@ -405,6 +405,11 @@
 .race-table tbody tr:nth-child(odd) td {
   background: rgba(250, 204, 21, 0.10);
 }
+/* Division group header — used by the dashboard "By Division" view. Wins
+   over the nth-child striping so the header reads as a band. */
+.race-table tbody tr.div-group-header td {
+  background: var(--bg-input) !important;
+}
 .race-table tr:hover td {
   background: var(--bg-card-hover);
 }

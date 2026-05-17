@@ -432,24 +432,29 @@ function renderAlerts(races) {
   const el = document.getElementById('alertsPanel');
   if (!el) return;
 
+  // Group by alert category and collapse to one line per category — a long
+  // list of identical-shape rows just adds noise on a busy race day.
   const alerts = [];
-  const exportedNotSent = races.filter(r => r.export_time && !r.send_time && r.status !== 'cancelled');
-  exportedNotSent.forEach(r => {
-    alerts.push({ type: 'warning', msg: `Race ${r.race_number}: exported but NOT sent` });
-  });
+  const fmt = (nums) => nums.length === 1 ? `Race ${nums[0]}` : `Races ${nums.join(', ')}`;
+
+  const exportedNotSent = races
+    .filter(r => r.export_time && !r.send_time && r.status !== 'cancelled')
+    .map(r => r.race_number);
+  if (exportedNotSent.length > 0) {
+    alerts.push({ type: 'warning', msg: `${fmt(exportedNotSent)}: exported but NOT sent` });
+  }
 
   const now = Date.now();
-  races.filter(r => r.status === 'started' && r.start_time).forEach(r => {
-    const elapsed = now - new Date(r.start_time).getTime();
-    if (elapsed > 10 * 60 * 1000) {
-      alerts.push({ type: 'danger', msg: `Race ${r.race_number}: started ${Math.floor(elapsed / 60000)} min ago, not exported` });
-    }
-  });
+  const startedNotExported = races
+    .filter(r => r.status === 'started' && r.start_time && (now - new Date(r.start_time).getTime()) > 10 * 60 * 1000)
+    .map(r => r.race_number);
+  if (startedNotExported.length > 0) {
+    alerts.push({ type: 'danger', msg: `${fmt(startedNotExported)}: started > 10 min ago, not exported` });
+  }
 
-  const noDraw = races.filter(r => !r.teams_loaded && r.status === 'pending');
+  const noDraw = races.filter(r => !r.teams_loaded && r.status === 'pending').map(r => r.race_number);
   if (noDraw.length > 0) {
-    const nums = noDraw.map(r => r.race_number).join(', ');
-    alerts.push({ type: 'info', msg: `Races ${nums}: draws not yet imported` });
+    alerts.push({ type: 'info', msg: `${fmt(noDraw)}: draws not yet imported` });
   }
 
   if (alerts.length === 0) { el.innerHTML = ''; return; }
@@ -596,29 +601,16 @@ async function renderRaces(sortMode = 'race', racesArg, divisionsArg) {
   const body = document.getElementById('raceProgressBody');
   if (!body) return;
 
-  let sorted = [...races];
-  if (sortMode === 'division') {
-    sorted.sort((a, b) => {
-      const da = a.division_id || 999;
-      const db_val = b.division_id || 999;
-      if (da !== db_val) return da - db_val;
-      return a.race_number - b.race_number;
-    });
-  } else {
-    sorted.sort((a, b) => a.race_number - b.race_number);
-  }
-
   const statusIcon = (val, field) => {
     if (!val) return '<i class="material-icons status-icon pending">radio_button_unchecked</i>';
     if (field === 'draw') return '<i class="material-icons status-icon done">check_circle</i>';
     return `<i class="material-icons status-icon done">check_circle</i> <span style="font-size:11px; color:var(--text-tertiary);">${isoToTime(val)}</span>`;
   };
 
-  body.innerHTML = sorted.map(r => {
+  const renderRaceRow = (r) => {
     const div = r.division_id ? divMap[r.division_id] : null;
     const divColor = div ? div.colour_hex || '#9ca3af' : '#9ca3af';
     const divName = div ? (div.div_short_ref || div.division_name || '') : '';
-
     return `
       <tr>
         <td><strong>${r.race_number}</strong></td>
@@ -626,7 +618,7 @@ async function renderRaces(sortMode = 'race', racesArg, divisionsArg) {
         <td><span class="division-color" style="background:${divColor};"></span>${divName}</td>
         <td style="font-size:12px; color:var(--text-tertiary);">${r.race_time || ''}</td>
         <td style="text-align:center;">${statusIcon(r.teams_loaded, 'draw')}</td>
-        <td style="text-align:center;">${statusIcon(r.start_time)}</td>
+        <td style="text-align:center;">${statusIcon(r.restart_time || r.start_time)}</td>
         <td style="text-align:center;">${r.status === 'cancelled' ? '<span class="badge badge-cancelled">CANCEL</span>' : statusIcon(r.joyi_imported || (r.start_time && r.status !== 'started' && r.status !== 'pending') ? 'yes' : null, 'draw')}</td>
         <td style="text-align:center;">${statusIcon(r.export_time)}${r.export_version > 1 ? ` <span style="font-size:10px; color:var(--warning);">v${r.export_version}</span>` : ''}</td>
         <td style="text-align:center;">${statusIcon(r.send_time)}</td>
@@ -634,5 +626,49 @@ async function renderRaces(sortMode = 'race', racesArg, divisionsArg) {
         <td><a href="#/race/${r.race_number}" style="color:var(--accent); font-size:12px;">Open</a></td>
       </tr>
     `;
-  }).join('');
+  };
+
+  if (sortMode === 'division') {
+    // Real grouped view: one header row per division (in division_id order),
+    // then its races (in race_number order), with an "Unassigned" bucket at
+    // the end for races without a division_id.
+    const byDiv = new Map();        // div_id -> race[]
+    const unassigned = [];
+    for (const r of races) {
+      if (r.division_id) {
+        if (!byDiv.has(r.division_id)) byDiv.set(r.division_id, []);
+        byDiv.get(r.division_id).push(r);
+      } else {
+        unassigned.push(r);
+      }
+    }
+    // Sort each bucket by race_number; sort divisions by id.
+    const sortedDivIds = [...byDiv.keys()].sort((a, b) => a - b);
+
+    const groupHeader = (label, colour) => `
+      <tr class="div-group-header" style="background:var(--bg-input);">
+        <td colspan="11" style="padding:8px 10px; font-weight:600; font-size:13px; border-top:2px solid var(--border);">
+          <span style="display:inline-block; width:10px; height:10px; border-radius:2px; background:${colour}; margin-right:8px; vertical-align:middle;"></span>
+          ${label}
+        </td>
+      </tr>
+    `;
+
+    const parts = [];
+    for (const divId of sortedDivIds) {
+      const div = divMap[divId];
+      const label = div ? (div.div_short_ref ? `${div.div_short_ref} — ${div.division_name || ''}` : (div.division_name || `Division ${divId}`)) : `Division ${divId}`;
+      const colour = div?.colour_hex || '#9ca3af';
+      parts.push(groupHeader(label, colour));
+      byDiv.get(divId).sort((a, b) => a.race_number - b.race_number).forEach(r => parts.push(renderRaceRow(r)));
+    }
+    if (unassigned.length > 0) {
+      parts.push(groupHeader('Unassigned', '#9ca3af'));
+      unassigned.sort((a, b) => a.race_number - b.race_number).forEach(r => parts.push(renderRaceRow(r)));
+    }
+    body.innerHTML = parts.join('');
+  } else {
+    const sorted = [...races].sort((a, b) => a.race_number - b.race_number);
+    body.innerHTML = sorted.map(renderRaceRow).join('');
+  }
 }

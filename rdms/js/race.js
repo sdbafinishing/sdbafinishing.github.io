@@ -137,10 +137,14 @@ export function validateRace(race, laneResults, config) {
     }
   });
 
-  // 5. Input order validation (G21 equivalent — times should be ascending)
-  const withTimes = activeLanes.filter(lr => lr.effective_time_ms != null);
+  // 5. Input order validation — compare PRE-penalty raw times. A boat that
+  // finished earlier but later got a TP shouldn't be flagged as "out of
+  // order"; the operator entered them by actual crossing order.
+  const withTimes = activeLanes
+    .map(lr => ({ lr, rawMs: lr.raw_time ? timeToMs(lr.raw_time, timeMode) : null }))
+    .filter(x => x.rawMs != null);
   for (let i = 0; i < withTimes.length - 1; i++) {
-    if (withTimes[i].effective_time_ms > withTimes[i + 1].effective_time_ms) {
+    if (withTimes[i].rawMs > withTimes[i + 1].rawMs) {
       warnings.push(`Input row ${i + 1}: time is slower than row ${i + 2} — check input order`);
     }
   }
