@@ -9,7 +9,7 @@
 import { getAllRaces, getConfig, getAllDivisions } from '../db.js';
 import { isoToTime, showToast } from '../utils.js';
 import { getSignalStatus, forceSignalRace } from '../next-race-signal.js';
-import { renderSignalPanel, cleanupSignalPanel, openStationTab } from './signal-panel.js';
+import { renderSignalPanel, cleanupSignalPanel } from './signal-panel.js';
 
 let refreshInterval = null;
 let isAuthenticatedUser = false;
@@ -18,20 +18,23 @@ let lastRaceHash = ''; // Change detection — skip re-render if data unchanged
 export async function mountDashboard(container, params) {
   // Detect auth state
   const { isLocal } = await import('../auth.js');
-  const { getRole } = await import('../rbac.js');
-  isAuthenticatedUser = isLocal() || getRole() !== 'viewer' || !!window._isAuthenticated;
-
-  // Check if user is actually authenticated (not just default)
-  try {
-    const appModule = await import('../app.js');
-    isAuthenticatedUser = isLocal() || window._rdmsAuthenticated === true;
-  } catch {}
-  // Simple check: local is always full, web checks auth flag
-  if (isLocal()) isAuthenticatedUser = true;
+  // Local is always authenticated (admin). Web checks auth flag.
+  isAuthenticatedUser = isLocal() || window._rdmsAuthenticated === true;
 
   const stationMode = params?.[0] || null; // 'finisher', 'starter', 'race-control', or null
 
   if (!isAuthenticatedUser && !isLocal()) {
+    // Hide all nav elements except Dashboard for public users
+    document.querySelectorAll('.nav-link').forEach(link => {
+      link.style.display = link.getAttribute('data-page') === 'dashboard' ? '' : 'none';
+    });
+    const navFolders = document.getElementById('navFolders');
+    if (navFolders) navFolders.style.display = 'none';
+    const navClock = document.getElementById('navClock');
+    if (navClock) navClock.style.display = 'none';
+    const navEvent = document.getElementById('navEventName');
+    if (navEvent) navEvent.style.display = 'none';
+
     renderPublicDashboard(container, stationMode);
   } else {
     await renderFullDashboard(container, stationMode);
@@ -56,131 +59,175 @@ export function unmountDashboard() {
 
 function renderPublicDashboard(container, stationMode) {
   const mode = stationMode || 'view-only';
-  const modeLabels = {
-    'finisher': { icon: 'sports_score', label: 'Finishing Station', canToggle: 'FinishingReady' },
-    'race-control': { icon: 'sports', label: 'Race Control', canToggle: 'RaceControlReady' },
-    'starter': { icon: 'flag', label: 'Starter Station', canToggle: 'StarterReady' },
-    'view-only': { icon: 'visibility', label: 'View Only', canToggle: null },
-  };
-  const modeInfo = modeLabels[mode] || modeLabels['view-only'];
+  // Order: Race Control → Starter → Finish → View Only
+  const modeLabels = new Map([
+    ['race-control', { icon: 'sports', label: 'Race Ctrl', canToggle: 'RaceControlReady' }],
+    ['starter', { icon: 'flag', label: 'Starter', canToggle: 'StarterReady' }],
+    ['finisher', { icon: 'sports_score', label: 'Finish', canToggle: 'FinishingReady' }],
+    ['view-only', { icon: 'visibility', label: 'View', canToggle: null }],
+  ]);
+  const modeInfo = modeLabels.get(mode) || modeLabels.get('view-only');
 
-  // Check if audio has been unlocked this session
+  // No station mode selected → show mode picker (like original home.html)
+  if (!stationMode) {
+    return renderModePicker(container, modeLabels);
+  }
+
+  // Station mode selected → show status boxes + back button
   const audioUnlocked = sessionStorage.getItem('rdms-audio-unlocked') === '1';
 
   container.innerHTML = `
-    <!-- Splash overlay — unlocks audio on tap, then reveals controls -->
-    ${audioUnlocked ? '' : `<div id="splashOverlay" style="
-      position:fixed; inset:0; z-index:9000;
-      background:var(--brand-dark);
+    ${audioUnlocked ? '' : `
+    <div id="splashOverlay" style="
+      position:fixed; inset:0; z-index:9000; background:var(--brand-dark);
       display:flex; flex-direction:column; align-items:center; justify-content:center;
       cursor:pointer; -webkit-tap-highlight-color:transparent;
-    ">`}
+    ">
       <div style="text-align:center; color:#fff;">
-        <i class="material-icons" style="font-size:64px; opacity:0.8; margin-bottom:16px;">${modeInfo.icon}</i>
-        <h1 style="font-size:24px; font-weight:700; margin-bottom:8px;">SDBA RDMS</h1>
-        <p style="font-size:16px; opacity:0.7; margin-bottom:32px;">${modeInfo.label}</p>
-        <div style="
-          display:inline-flex; align-items:center; gap:8px;
-          padding:16px 40px; border-radius:12px;
-          background:var(--accent); color:#fff;
-          font-size:18px; font-weight:600;
-        ">
+        <i class="material-icons" style="font-size:48px; opacity:0.8; margin-bottom:12px;">${modeInfo.icon}</i>
+        <h1 style="font-size:22px; font-weight:700; margin-bottom:4px;">SDBA RDMS</h1>
+        <p style="font-size:14px; opacity:0.6; margin-bottom:24px;">${modeInfo.label}</p>
+        <div style="display:inline-flex; align-items:center; gap:8px; padding:14px 36px; border-radius:12px; background:var(--accent); color:#fff; font-size:16px; font-weight:600;">
           <i class="material-icons">touch_app</i> Tap to Enter
         </div>
-        <p style="font-size:11px; opacity:0.4; margin-top:16px;">This enables alert sounds</p>
+        <p style="font-size:10px; opacity:0.3; margin-top:12px;">Enables alert sounds</p>
       </div>
-    ${audioUnlocked ? '' : '</div>'}
+    </div>`}
 
-    <!-- Main content (hidden behind splash until tap) -->
-    <div id="publicContent" style="max-width:500px; margin:0 auto; padding:8px; ${audioUnlocked ? '' : 'visibility:hidden;'}">
-
-      <!-- Station Mode Selector (large buttons like original home.html) -->
-      <div style="display:flex; flex-direction:column; gap:12px; margin-bottom:20px;">
-        ${Object.entries(modeLabels).map(([key, info]) => `
-          <a href="#/dashboard/${key}" style="
-            display:flex; align-items:center; justify-content:center; gap:12px;
-            width:100%; padding:24px 16px;
-            background:${key === mode ? 'var(--accent)' : 'var(--bg-card)'};
-            color:${key === mode ? '#fff' : 'var(--text-primary)'};
-            border:${key === mode ? '2px solid var(--accent)' : '2px solid var(--border)'};
-            border-radius:16px; text-decoration:none;
-            font-size:20px; font-weight:600;
-            transition:all 0.2s;
-          ">
-            <i class="material-icons" style="font-size:28px;">${info.icon}</i>
-            ${info.label}
-          </a>
-        `).join('')}
+    <div id="publicContent" style="
+      max-width:500px; margin:0 auto; padding:8px;
+      display:flex; flex-direction:column; height:calc(100vh - var(--navbar-height) - 16px);
+      ${audioUnlocked ? '' : 'visibility:hidden;'}
+    ">
+      <!-- Back button + mode label -->
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+        <a href="#/dashboard" style="display:flex; align-items:center; gap:4px; color:var(--accent); text-decoration:none; font-size:13px; font-weight:500;">
+          <i class="material-icons" style="font-size:18px;">arrow_back</i> Back
+        </a>
+        <span style="margin-left:auto; font-size:13px; color:var(--text-tertiary);">
+          <i class="material-icons" style="font-size:16px; vertical-align:middle;">${modeInfo.icon}</i>
+          ${modeInfo.label}
+        </span>
       </div>
 
-      <!-- Digital Flag Status (mobile-friendly large boxes) -->
-      <div id="publicSignalPanel"></div>
+      <!-- STATUS BOXES (hero) -->
+      <div id="publicSignalPanel" style="flex:1; display:flex; flex-direction:column; gap:10px; min-height:0;"></div>
 
-      <!-- Current Race Number -->
-      <div class="card" style="text-align:center; padding:20px; margin-top:16px;">
-        <div style="font-size:12px; color:var(--text-tertiary); text-transform:uppercase; letter-spacing:1px;">Current Race</div>
-        <div id="publicCurrentRace" style="font-size:64px; font-weight:700; font-variant-numeric:tabular-nums; color:var(--text-primary); line-height:1.1; margin:8px 0;">
-          —
+      <!-- Race + Clock footer -->
+      <div style="display:flex; align-items:center; justify-content:space-between; padding:8px 0; border-top:1px solid var(--border); margin-top:8px;">
+        <div>
+          <span style="font-size:10px; color:var(--text-tertiary); text-transform:uppercase;">Race</span>
+          <span id="publicCurrentRace" style="font-size:24px; font-weight:700; font-variant-numeric:tabular-nums; color:var(--text-primary); margin-left:4px;">—</span>
+          <span id="publicRaceTitle" style="font-size:11px; color:var(--text-secondary); margin-left:6px;"></span>
         </div>
-        <div id="publicRaceTitle" style="font-size:14px; color:var(--text-secondary);"></div>
-      </div>
-
-      <!-- Clock -->
-      <div style="text-align:center; margin-top:16px;">
-        <span id="publicClock" style="font-size:32px; font-weight:600; font-variant-numeric:tabular-nums; color:var(--text-primary);"></span>
+        <span id="publicClock" style="font-size:16px; font-weight:500; font-variant-numeric:tabular-nums; color:var(--text-tertiary);"></span>
       </div>
     </div>
   `;
 
-  // Splash tap handler — unlock audio + reveal controls
+  // Splash handler
   const splash = document.getElementById('splashOverlay');
-  if (splash && !audioUnlocked) {
+  if (splash) {
     splash.addEventListener('click', () => {
-      // Play silent audio to unlock browser audio policy
-      try {
-        const audio = new Audio('https://raw.githubusercontent.com/sdbafinishing/sdbafinishing.github.io/main/Assets/silent.mp3');
-        audio.play().catch(() => {});
-      } catch {}
-
+      try { new Audio('https://raw.githubusercontent.com/sdbafinishing/sdbafinishing.github.io/main/Assets/silent.mp3').play().catch(() => {}); } catch {}
       sessionStorage.setItem('rdms-audio-unlocked', '1');
       splash.style.opacity = '0';
       splash.style.transition = 'opacity 0.3s';
-      setTimeout(() => {
-        splash.style.display = 'none';
-        document.getElementById('publicContent').style.visibility = 'visible';
-      }, 300);
+      setTimeout(() => { splash.remove(); document.getElementById('publicContent').style.visibility = 'visible'; }, 300);
     }, { once: true });
   }
 
-  // Render signal panel in station mode
+  // Render signal panel + style boxes
   renderSignalPanel('publicSignalPanel', mode);
-
-  // Style the signal panel boxes for mobile (large, full-width)
   setTimeout(() => {
     const panel = document.getElementById('publicSignalPanel');
-    if (panel) {
-      panel.querySelectorAll('.signal-box').forEach(box => {
-        box.style.padding = '20px 16px';
-        box.style.borderRadius = '16px';
-        box.style.minHeight = '100px';
+    if (!panel) return;
+    panel.querySelectorAll('.signal-box').forEach(box => {
+      const field = box.getAttribute('data-field');
+      const isClickable = modeInfo.canToggle === field;
+      Object.assign(box.style, {
+        flex: '1', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+        borderRadius: '16px', padding: '16px', fontSize: '14px', minHeight: '0',
+        borderWidth: isClickable ? '3px' : '2px', opacity: isClickable ? '1' : '0.7',
       });
-      const innerDiv = panel.querySelector('div');
-      if (innerDiv) innerDiv.style.cssText = 'display:flex; flex-direction:column; gap:12px;';
-    }
+      const dot = box.querySelector('.signal-dot');
+      if (dot) { dot.style.width = '24px'; dot.style.height = '24px'; dot.style.marginTop = '8px'; }
+      if (isClickable) {
+        const lbl = document.createElement('div');
+        lbl.style.cssText = 'font-size:10px; margin-top:6px; opacity:0.5; text-transform:uppercase; letter-spacing:1px;';
+        lbl.textContent = 'tap to toggle';
+        box.appendChild(lbl);
+      }
+    });
+    const inner = panel.querySelector('div');
+    if (inner) inner.style.cssText = 'display:flex; flex-direction:column; gap:10px; flex:1;';
   }, 100);
 
-  // Update current race from config (if Supabase connected, use realtime)
   updatePublicRaceNumber();
-
-  // Clock
   const clockEl = document.getElementById('publicClock');
-  function updateClock() {
-    if (!clockEl) return;
-    const now = new Date();
-    clockEl.textContent = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`;
+  const tick = () => { if (!clockEl) return; const n = new Date(); clockEl.textContent = `${String(n.getHours()).padStart(2,'0')}:${String(n.getMinutes()).padStart(2,'0')}`; };
+  tick();
+  refreshInterval = setInterval(tick, 10000);
+}
+
+/**
+ * Mode picker — big buttons like original home.html
+ */
+function renderModePicker(container, modeLabels) {
+  const audioUnlocked = sessionStorage.getItem('rdms-audio-unlocked') === '1';
+
+  container.innerHTML = `
+    ${audioUnlocked ? '' : `
+    <div id="splashOverlay" style="
+      position:fixed; inset:0; z-index:9000; background:var(--brand-dark);
+      display:flex; flex-direction:column; align-items:center; justify-content:center;
+      cursor:pointer; -webkit-tap-highlight-color:transparent;
+    ">
+      <div style="text-align:center; color:#fff;">
+        <h1 style="font-size:24px; font-weight:700; margin-bottom:8px;">Dragon Boat Race Status</h1>
+        <p style="font-size:14px; opacity:0.6; margin-bottom:24px;">Select your station</p>
+        <div style="display:inline-flex; align-items:center; gap:8px; padding:14px 36px; border-radius:12px; background:var(--accent); color:#fff; font-size:16px; font-weight:600;">
+          <i class="material-icons">touch_app</i> Tap to Enter
+        </div>
+        <p style="font-size:10px; opacity:0.3; margin-top:12px;">Enables alert sounds</p>
+      </div>
+    </div>`}
+
+    <div id="publicContent" style="
+      max-width:400px; margin:0 auto; padding:16px;
+      display:flex; flex-direction:column; justify-content:center;
+      min-height:calc(100vh - var(--navbar-height) - 32px);
+      ${audioUnlocked ? '' : 'visibility:hidden;'}
+    ">
+      <h2 style="text-align:center; font-size:20px; font-weight:700; margin-bottom:20px; color:var(--text-primary);">
+        Dragon Boat Race Status
+      </h2>
+      ${[...modeLabels.entries()].map(([key, info]) => `
+        <a href="#/dashboard/${key}" style="
+          display:flex; align-items:center; justify-content:center; gap:12px;
+          width:100%; padding:28px 16px; margin-bottom:12px;
+          background:var(--bg-card); color:var(--text-primary);
+          border:2px solid var(--border); border-radius:16px; text-decoration:none;
+          font-size:22px; font-weight:600; transition:all 0.15s;
+        " onmouseenter="this.style.borderColor='var(--accent)'" onmouseleave="this.style.borderColor='var(--border)'">
+          <i class="material-icons" style="font-size:32px;">${info.icon}</i>
+          ${info.label === 'Race Ctrl' ? 'Race Control' : info.label === 'Finish' ? 'Finish Mode' : info.label === 'View' ? 'View Only' : info.label + ' Mode'}
+        </a>
+      `).join('')}
+    </div>
+  `;
+
+  // Splash handler
+  const splash = document.getElementById('splashOverlay');
+  if (splash) {
+    splash.addEventListener('click', () => {
+      try { new Audio('https://raw.githubusercontent.com/sdbafinishing/sdbafinishing.github.io/main/Assets/silent.mp3').play().catch(() => {}); } catch {}
+      sessionStorage.setItem('rdms-audio-unlocked', '1');
+      splash.style.opacity = '0';
+      splash.style.transition = 'opacity 0.3s';
+      setTimeout(() => { splash.remove(); document.getElementById('publicContent').style.visibility = 'visible'; }, 300);
+    }, { once: true });
   }
-  updateClock();
-  refreshInterval = setInterval(updateClock, 1000);
 }
 
 async function updatePublicRaceNumber() {

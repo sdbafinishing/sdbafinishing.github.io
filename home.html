@@ -1,26 +1,10 @@
 <!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SDBA Race Status</title>
-    <link rel="icon" type="image/x-icon" href="favicon.ico">
-    <style>
-        body { font-family: Arial, sans-serif; text-align: center; }
-        .btn { width: 200px; height: 100px; margin: 20px auto;; font-size: 18px; margin: 10px; cursor: pointer; }
-    </style>
-</head>
-
-<body>
-    <div style="text-align: center;">
-        <h1>Dragon Boat Race Status</h1>
-        <button class="btn" onclick="window.location.href='race-control.html'">🎤<br />Race Control Mode</button>
-        <br>
-        <button class="btn" onclick="window.location.href='starter.html'">🔫<br />Starter Mode</button>
-        <br>
-        <button class="btn" onclick="window.location.href='finisher.html'">🏁<br />Finish Mode</button>
-        <br>
-        <button class="btn" onclick="window.location.href='view-only.html'">👀<br />View Only Mode</button>
-    </div>
-</body>
-</html>
+<html><head>
+<meta http-equiv="refresh" content="0;url=rdms/">
+<script>
+  var mode = document.location.pathname.replace(/.*\//, '').replace('.html', '');
+  var map = { 'home': '', 'finisher': 'finisher', 'starter': 'starter', 'race-control': 'race-control', 'view-only': 'view-only' };
+  var target = map[mode] || '';
+  window.location.replace('rdms/#/dashboard' + (target ? '/' + target : ''));
+</script>
+</head><body>Redirecting to <a href="rdms/">RDMS</a>...</body></html>

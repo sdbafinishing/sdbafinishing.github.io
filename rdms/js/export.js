@@ -187,6 +187,10 @@ export async function showExportModal(raceNumber, onComplete) {
   }
 
   // Show re-export vs revision modal
+  // Remove any existing orphaned modal first
+  const existingModal = document.getElementById('exportModal');
+  if (existingModal) existingModal.remove();
+
   const modal = document.createElement('div');
   modal.id = 'exportModal';
   modal.style.cssText = 'position:fixed; inset:0; background:var(--bg-overlay); z-index:9998; display:flex; align-items:center; justify-content:center;';

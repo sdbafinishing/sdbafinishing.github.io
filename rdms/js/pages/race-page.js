@@ -20,8 +20,15 @@ let raceData = null;
 let configData = null;
 let timerInterval = null;
 let batchDeltaMs = 0;
+let saveDebounceTimer = null;
+let batchDebounceTimer = null;
+let joyiChangeHandler = null;
+let p1InputHandler = null;
 
 export async function mountRacePage(container, params) {
+  // Defensive: clean up any previous mount that wasn't properly unmounted
+  unmountRacePage();
+
   raceNumber = parseInt(params[0], 10);
   if (!raceNumber || raceNumber < 1) {
     container.innerHTML = '<div class="card"><p>Invalid race number.</p></div>';
@@ -181,16 +188,33 @@ export async function mountRacePage(container, params) {
 }
 
 export function unmountRacePage() {
-  if (timerInterval) {
-    clearInterval(timerInterval);
-    timerInterval = null;
+  // Clear all timers
+  if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+  clearTimeout(saveDebounceTimer); saveDebounceTimer = null;
+  clearTimeout(batchDebounceTimer); batchDebounceTimer = null;
+
+  // Destroy grid
+  if (grid) { grid.destroy(); grid = null; }
+
+  // Remove event listeners that were added in attachHandlers
+  const joyiInput = document.getElementById('joyiFileInput');
+  if (joyiInput && joyiChangeHandler) {
+    joyiInput.removeEventListener('change', joyiChangeHandler);
   }
-  if (grid) {
-    grid.destroy();
-    grid = null;
+  joyiChangeHandler = null;
+
+  const p1Input = document.getElementById('batchP1Time');
+  if (p1Input && p1InputHandler) {
+    p1Input.removeEventListener('input', p1InputHandler);
   }
+  p1InputHandler = null;
+
+  // Clear state
   raceNumber = null;
   raceData = null;
+  batchDeltaMs = 0;
+
+  // Clean up window handlers
   delete window._startRace;
   delete window._cancelRace;
   delete window._finishBackup;
@@ -253,8 +277,6 @@ function buildGridData(laneResults, laneCount) {
   return data;
 }
 
-let saveDebounce = null;
-
 function onCellChange(rowIndex, colKey, newValue, rowData) {
   const timeMode = configData?.time_format_mode || 'mss00';
 
@@ -267,8 +289,8 @@ function onCellChange(rowIndex, colKey, newValue, rowData) {
   recalculate();
 
   // Debounced save to IndexedDB
-  clearTimeout(saveDebounce);
-  saveDebounce = setTimeout(() => persistCurrentRow(rowIndex), 200);
+  clearTimeout(saveDebounceTimer);
+  saveDebounceTimer = setTimeout(() => persistCurrentRow(rowIndex), 200);
 }
 
 function recalculate() {
@@ -584,10 +606,10 @@ function attachHandlers() {
     openFileFromFolder('12 Output_Results', raceNumber);
   };
 
-  // Joyi import
+  // Joyi import — store handler ref for cleanup in unmount
   const joyiInput = document.getElementById('joyiFileInput');
   if (joyiInput) {
-    joyiInput.addEventListener('change', async () => {
+    joyiChangeHandler = async () => {
       const file = joyiInput.files[0];
       if (!file) return;
       try {
@@ -596,7 +618,6 @@ function attachHandlers() {
           if (!confirm(`This Joyi file is for Race ${parsed.raceNumber}, but you're on Race ${raceNumber}. Import anyway?`)) return;
         }
         await importJoyiToDb({ ...parsed, raceNumber });
-        // Reload lane results into grid
         const freshLanes = await getLaneResults(raceNumber);
         const newGridData = buildGridData(freshLanes, configData?.lane_count || 6);
         for (let i = 0; i < newGridData.length; i++) {
@@ -610,24 +631,26 @@ function attachHandlers() {
         showToast(`Joyi import failed: ${err.message}`, 'error');
       }
       joyiInput.value = '';
-    });
+    };
+    joyiInput.addEventListener('change', joyiChangeHandler);
   }
 
-  // Batch adjustment live update (debounced)
+  // Batch adjustment — store handler ref for cleanup in unmount
   const p1Input = document.getElementById('batchP1Time');
-  let batchDebounce = null;
   if (p1Input) {
-    p1Input.addEventListener('input', () => {
+    p1InputHandler = () => {
       const timeMode = configData?.time_format_mode || 'mss00';
-      const data = grid.getData();
+      const data = grid?.getData();
+      if (!data) return;
       const firstTime = data.find(r => r.raw_time)?.raw_time;
       if (p1Input.value && firstTime) {
         batchDeltaMs = calcBatchDelta(p1Input.value, firstTime, timeMode);
         const deltaDisplay = timeToDisplay(msToTime(Math.abs(batchDeltaMs), timeMode), timeMode);
         document.getElementById('batchDelta').textContent = (batchDeltaMs >= 0 ? '+' : '-') + deltaDisplay;
-        clearTimeout(batchDebounce);
-        batchDebounce = setTimeout(recalculate, 200);
+        clearTimeout(batchDebounceTimer);
+        batchDebounceTimer = setTimeout(recalculate, 200);
       }
-    });
+    };
+    p1Input.addEventListener('input', p1InputHandler);
   }
 }

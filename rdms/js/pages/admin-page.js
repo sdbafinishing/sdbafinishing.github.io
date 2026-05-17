@@ -94,16 +94,18 @@ export async function mountAdminPage(container) {
 }
 
 export function unmountAdminPage() {
-  TABLE_NAMES.forEach(() => {
-    delete window._adminLoadTable;
-    delete window._adminRefresh;
-    delete window._adminExportJson;
-    delete window._adminClearTable;
-    delete window._adminEditRow;
-    delete window._adminDeleteRow;
-    delete window._adminCancelEdit;
-    delete window._adminSaveEdit;
-  });
+  delete window._adminLoadTable;
+  delete window._adminRefresh;
+  delete window._adminExportJson;
+  delete window._adminClearTable;
+  delete window._adminEditRow;
+  delete window._adminDeleteRow;
+  delete window._adminCancelEdit;
+  delete window._adminSaveEdit;
+  delete window._adminBackupAll;
+  delete window._adminRestoreAll;
+  editingTable = null;
+  editingKey = null;
 }
 
 async function loadTable(tableName) {
