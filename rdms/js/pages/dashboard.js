@@ -351,7 +351,7 @@ async function renderDashboard() {
   const divisions = await getAllDivisions();
 
   renderSummary(races);
-  renderCurrentNext(races);
+  await renderCurrentNext(races);
   renderDelayTracking(races);
   await renderNextRacePanel();
   renderAlerts(races);
@@ -381,7 +381,7 @@ function renderSummary(races) {
   `;
 }
 
-function renderCurrentNext(races) {
+async function renderCurrentNext(races) {
   const el = document.getElementById('currentNextCard');
   if (!el) return;
 
@@ -395,28 +395,32 @@ function renderCurrentNext(races) {
   });
   const pending = races.filter(r => r.status === 'pending').sort((a, b) => a.race_number - b.race_number);
 
-  let html = '';
-  if (started.length > 0) {
-    const current = started[0];
-    html += `
-      <div style="display:flex; align-items:center; gap:12px; padding:12px 16px; border-bottom:1px solid var(--border);">
-        <span class="badge badge-started">CURRENT</span>
-        <strong>Race ${current.race_number}</strong> — ${current.race_title || 'Untitled'}
-        <span style="color:var(--text-tertiary); margin-left:auto;">Started ${isoToTime(current.start_time)}</span>
-        <a href="#/race/${current.race_number}" class="btn btn-primary" style="padding:4px 12px; font-size:12px;">Open</a>
+  // Need divisions for the colour swatch.
+  const divisions = await getAllDivisions();
+  const divMap = Object.fromEntries(divisions.map(d => [d.id, d]));
+
+  // Helper: tinted background for odd race numbers, division swatch up front.
+  function renderRow(r, badgeText, badgeCls, rightText, openCls) {
+    const div = r.division_id ? divMap[r.division_id] : null;
+    const divColour = div?.colour_hex || '#9ca3af';
+    const tint = r.race_number % 2 === 1 ? 'background: rgba(250, 204, 21, 0.10);' : '';
+    return `
+      <div style="display:flex; align-items:center; gap:12px; padding:12px 16px; border-bottom:1px solid var(--border); ${tint}">
+        <span class="badge ${badgeCls}">${badgeText}</span>
+        <span title="${div?.div_short_ref || div?.division_name || ''}" style="display:inline-block; width:8px; height:24px; border-radius:2px; background:${divColour}; flex-shrink:0;"></span>
+        <strong>Race ${r.race_number}</strong> — ${r.race_title || 'Untitled'}
+        <span style="color:var(--text-tertiary); margin-left:auto;">${rightText}</span>
+        <a href="#/race/${r.race_number}" class="btn ${openCls}" style="padding:4px 12px; font-size:12px;">Open</a>
       </div>
     `;
   }
+
+  let html = '';
+  if (started.length > 0) {
+    html += renderRow(started[0], 'CURRENT', 'badge-started', `Started ${isoToTime(started[0].start_time)}`, 'btn-primary');
+  }
   if (pending.length > 0) {
-    const next = pending[0];
-    html += `
-      <div style="display:flex; align-items:center; gap:12px; padding:12px 16px;">
-        <span class="badge badge-pending">NEXT UP</span>
-        <strong>Race ${next.race_number}</strong> — ${next.race_title || 'Untitled'}
-        <span style="color:var(--text-tertiary); margin-left:auto;">Sched: ${next.race_time || '—'}</span>
-        <a href="#/race/${next.race_number}" class="btn btn-outline" style="padding:4px 12px; font-size:12px;">Open</a>
-      </div>
-    `;
+    html += renderRow(pending[0], 'NEXT UP', 'badge-pending', `Sched: ${pending[0].race_time || '—'}`, 'btn-outline');
   }
   if (!html) {
     html = '<div style="padding:16px; text-align:center; color:var(--text-tertiary);">No races loaded. Go to Setup → Import Draws.</div>';

@@ -118,10 +118,11 @@ export async function mountRacePage(container, params) {
       </div>
     </div>
 
-    <!-- Navigation -->
+    <!-- Navigation — odd/even tint on the prev/next buttons matches the
+         race-table striping so the operator can tell parity at a glance. -->
     <div style="display:flex; gap:6px; margin-bottom:6px; flex-wrap:wrap; align-items:center;">
-      ${raceNumber > 1 ? `<a href="#/race/${raceNumber - 1}" class="btn btn-outline btn-sm"><i class="material-icons" style="font-size:16px;">chevron_left</i> Race ${raceNumber - 1}</a>` : ''}
-      <a href="#/race/${raceNumber + 1}" class="btn btn-outline btn-sm">Race ${raceNumber + 1} <i class="material-icons" style="font-size:16px;">chevron_right</i></a>
+      ${raceNumber > 1 ? `<a href="#/race/${raceNumber - 1}" class="btn btn-outline btn-sm" style="${(raceNumber - 1) % 2 === 1 ? 'background: rgba(250, 204, 21, 0.12);' : ''}"><i class="material-icons" style="font-size:16px;">chevron_left</i> Race ${raceNumber - 1}</a>` : ''}
+      <a href="#/race/${raceNumber + 1}" class="btn btn-outline btn-sm" style="${(raceNumber + 1) % 2 === 1 ? 'background: rgba(250, 204, 21, 0.12);' : ''}">Race ${raceNumber + 1} <i class="material-icons" style="font-size:16px;">chevron_right</i></a>
       <span style="border-left:1px solid var(--border); height:20px; margin:0 4px;"></span>
       <button class="btn btn-ghost btn-sm" onclick="window._printDraw()" title="Print draw"><i class="material-icons" style="font-size:16px;">description</i> Print Draw</button>
       <button class="btn btn-ghost btn-sm" onclick="window._openDraw()" title="Open draw file"><i class="material-icons" style="font-size:16px;">folder_open</i> Open Draw</button>

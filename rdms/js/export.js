@@ -115,17 +115,22 @@ export async function exportResults(raceNumber, options = {}) {
     newVersion = prevVersion; // re-export, same version
   }
 
-  // Output rows come from rows the operator actually filled in, sorted by
-  // computed_position. Lane and team come from lane_input + draws snapshot,
-  // not the underlying row's lane_number (which is just storage key).
-  const sorted = [...resultRows].sort((a, b) => {
-    if (a.computed_position == null && b.computed_position == null) {
-      return (parseInt(a.lane_input, 10) || 0) - (parseInt(b.lane_input, 10) || 0);
+  // Output rows by lane (1..laneCount), matching the on-screen Results
+  // Output table and the original .xls draw layout — operators expect the
+  // exported file's lane order to mirror the draw's lane order. We index
+  // the input rows by lane_input and walk lanes in sequence.
+  const inputByLane = {};
+  resultRows.forEach(r => {
+    const lane = parseInt(r.lane_input, 10);
+    if (Number.isInteger(lane) && lane >= 1 && lane <= laneCount) {
+      inputByLane[lane] = r;
     }
-    if (a.computed_position == null) return 1;
-    if (b.computed_position == null) return -1;
-    return a.computed_position - b.computed_position;
   });
+  const sorted = [];
+  for (let lane = 1; lane <= laneCount; lane++) {
+    const r = inputByLane[lane];
+    if (r) sorted.push(r);
+  }
 
   // Build worksheet
   const wsData = [];
