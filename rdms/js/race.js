@@ -82,9 +82,10 @@ export function validateRace(race, laneResults, config) {
   const timeMode = config.time_format_mode || 'mss00';
   const activeLanes = laneResults.slice(0, config.lane_count);
 
-  // 1. Race must have start_time
+  // 1. Race has no start time — warn, don't block. The operator might legitimately
+  // export a race they didn't time (e.g. results imported from Joyi only).
   if (!race.start_time) {
-    errors.push('Race has no start time recorded');
+    warnings.push('Race has no start time recorded');
   }
 
   // 1b. Lane number validation — every row with any data must declare a valid,
