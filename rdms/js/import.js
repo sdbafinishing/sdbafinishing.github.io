@@ -4,7 +4,7 @@
  */
 import * as XLSX from 'xlsx';
 import { getConfig, getRace, saveRace, bulkSaveLaneResults, bulkSaveRaces, addImportLog } from './db.js';
-import { sanitiseTitle, extractRaceNumber, extractJoyiRaceNumber, joyiTimeToRaw, showToast } from './utils.js';
+import { sanitiseTitle, extractRaceNumber, extractJoyiRaceNumber, joyiTimeToRaw, msToTime, showToast } from './utils.js';
 
 /**
  * Parse a draw .xls file and return structured data.
@@ -196,6 +196,106 @@ export async function importMultipleDrawFiles(files) {
  * @param {File} file - The Joyi .xls File object
  * @returns {Object} { raceNumber, results[] }
  */
+/**
+ * Parse a Joyi .jyd file (UTF-8 XML, native Joyi finish format).
+ *
+ * The .jyd carries the same finishing data as the .xls Joyi export but as
+ * structured XML. RealScore is in milliseconds. Players are listed in lane
+ * order; we sort by Rank so the import path can treat results[i] as the
+ * i-th finisher (matching parseJoyiFile's output shape).
+ *
+ * @param {File} file - The Joyi .jyd File object
+ * @returns {Object} { raceNumber, results[], filename, jyd: <raw parsed for downstream overlay use> }
+ */
+export async function parseJydFile(file) {
+  const text = await file.text();
+  const doc = new DOMParser().parseFromString(text, 'application/xml');
+
+  const parseErr = doc.querySelector('parsererror');
+  if (parseErr) throw new Error(`Invalid .jyd XML: ${parseErr.textContent.slice(0, 100)}`);
+
+  const magic = doc.querySelector('FileInfo > Magic')?.textContent;
+  if (magic !== 'JoyiFinishFile') {
+    throw new Error(`Not a Joyi finish file. Magic = "${magic || 'missing'}"`);
+  }
+
+  let raceNumber = parseInt(doc.querySelector('Game > Heat')?.textContent, 10);
+  if (!raceNumber) raceNumber = extractJoyiRaceNumber(file.name);
+  if (!raceNumber) throw new Error(`Cannot determine race number from .jyd "${file.name}"`);
+
+  const config = await getConfig();
+  const timeMode = config?.time_format_mode || 'mss00';
+
+  // Parse all Players.
+  const players = [...doc.querySelectorAll('Players > Player')].map(p => {
+    const t = (sel) => p.querySelector(sel)?.textContent || '';
+    return {
+      lane: parseInt(t('Lane'), 10),
+      rank: parseInt(t('Rank'), 10),
+      realScoreMs: parseInt(t('RealScore'), 10),
+      name: t('Name').trim(),
+      code: t('No').trim(),
+    };
+  }).filter(p => Number.isInteger(p.lane) && p.lane >= 1);
+
+  // Sort by Rank so results[i] = (i+1)-th finisher. Players without a real
+  // rank (NaN) drop to the end.
+  players.sort((a, b) => {
+    const ra = Number.isFinite(a.rank) ? a.rank : 9999;
+    const rb = Number.isFinite(b.rank) ? b.rank : 9999;
+    return ra - rb;
+  });
+
+  const results = players.map(p => {
+    const raw = Number.isFinite(p.realScoreMs) ? msToTime(p.realScoreMs, timeMode) : '';
+    return {
+      joyi_lane: p.lane,
+      joyi_rank: Number.isFinite(p.rank) ? p.rank : null,
+      joyi_code: p.code,
+      joyi_name: p.name,
+      joyi_time_raw: raw,
+      joyi_time_mss00: raw,
+    };
+  });
+
+  // Pull the photo-finish overlay metadata out for downstream viewers.
+  const lcImage = doc.querySelector('LcImage');
+  const reachPoints = lcImage
+    ? [...lcImage.querySelectorAll('ReachPoints > ReachPoint')].map(rp => ({
+        no: parseInt(rp.querySelector('No')?.textContent, 10),
+        line: parseInt(rp.querySelector('Line')?.textContent, 10),
+      })).filter(rp => Number.isFinite(rp.no) && Number.isFinite(rp.line))
+    : [];
+  const direction = lcImage?.querySelector('Direction')?.textContent || 'LeftToRight';
+  const lcPath = lcImage?.querySelector('Path')?.textContent || '';
+
+  return {
+    raceNumber,
+    results,
+    filename: file.name,
+    jyd: {
+      gameTime: doc.querySelector('Game > GameTime')?.textContent || '',
+      windSpeed: parseFloat(doc.querySelector('Game > WindSpeed')?.textContent) || 0,
+      timeDelta: parseInt(doc.querySelector('Game > TimeDelta')?.textContent, 10) || 0,
+      players,
+      reachPoints,
+      direction,
+      lcPath,
+    },
+  };
+}
+
+/**
+ * Dispatch a Joyi import to the right parser based on extension.
+ * Operators can hand us either the native .jyd (XML) or the legacy .xls,
+ * and they end up in the same downstream importJoyiToDb flow.
+ */
+export async function parseJoyiAnyFile(file) {
+  const lower = (file.name || '').toLowerCase();
+  if (lower.endsWith('.jyd')) return parseJydFile(file);
+  return parseJoyiFile(file);
+}
+
 export async function parseJoyiFile(file) {
   const data = await file.arrayBuffer();
   const wb = XLSX.read(data, { type: 'array' });

@@ -140,6 +140,10 @@ export async function mountRacePage(container, params) {
       <span style="border-left:1px solid var(--border); height:20px; margin:0 4px;"></span>
       <button class="btn btn-ghost btn-sm" onclick="window._printDraw()" title="Print draw"><i class="material-icons" style="font-size:16px;">description</i> Print Draw</button>
       <button class="btn btn-ghost btn-sm" onclick="window._openDraw()" title="Open draw file"><i class="material-icons" style="font-size:16px;">folder_open</i> Open Draw</button>
+      <label class="btn btn-ghost btn-sm" style="cursor:pointer;" title="Open Joyi photo-finish image (.lcd + .jyd)">
+        <i class="material-icons" style="font-size:16px;">photo_camera</i> Photo Finish
+        <input type="file" id="photoFinishInput" multiple accept=".lcd,.jyd,.xls,.xlsx" style="display:none;">
+      </label>
       <div style="flex:1;"></div>
       <button class="btn btn-danger btn-outline btn-sm" onclick="window._cancelRace()" ${raceData.status === 'cancelled' ? 'disabled' : ''}>
         Cancel Race
@@ -1008,6 +1012,44 @@ function attachHandlers() {
     toggleEl.addEventListener('change', () => {
       batchOverrideEnabled = toggleEl.checked;
       recalculate();
+    });
+  }
+
+  // Photo Finish file picker — accepts .lcd + .jyd (and friendly .xls too,
+  // for the case the operator selected the whole Joyi triplet). If a .xls
+  // is in the selection it's also imported in the same go.
+  const pfInput = document.getElementById('photoFinishInput');
+  if (pfInput) {
+    pfInput.addEventListener('change', async () => {
+      const files = [...pfInput.files];
+      pfInput.value = '';
+      if (files.length === 0) return;
+
+      // Optional: import the .xls if it came along.
+      const xlsFile = files.find(f => /\.(xlsx?)$/i.test(f.name));
+      if (xlsFile) {
+        try {
+          const parsed = await parseJoyiFile(xlsFile);
+          await importJoyiToDb({ ...parsed, raceNumber });
+          showToast(`Imported Joyi results from ${xlsFile.name}`, 'success', 3000);
+          broadcastChange('race-updated', { race_number: raceNumber });
+        } catch (err) {
+          showToast(`Joyi .xls import failed: ${err.message}`, 'error');
+        }
+      }
+
+      const lcdFile = files.find(f => /\.lcd$/i.test(f.name));
+      if (!lcdFile) {
+        if (!xlsFile) showToast('Select at least a .lcd file', 'warning');
+        return;
+      }
+      try {
+        const { showPhotoFinishModal } = await import('../photo-finish.js');
+        await showPhotoFinishModal(raceData, files);
+      } catch (err) {
+        showToast(`Photo finish failed: ${err.message}`, 'error', 5000);
+        console.error(err);
+      }
     });
   }
 }
