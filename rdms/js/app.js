@@ -348,6 +348,7 @@ async function init() {
   }
 
   await updateNavEventName();
+  await updateNavUserInfo(); // Set up login/logout button
   startSyncService(); // Start Supabase sync (no-op if not configured)
 
   // Listen for hash changes
