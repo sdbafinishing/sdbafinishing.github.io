@@ -76,75 +76,72 @@ export async function mountRacePage(container, params) {
   });
 
   container.innerHTML = `
-    <!-- Race Header -->
-    <div class="card" style="margin-bottom:12px;">
-      <div style="display:flex; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; gap:12px;">
-        <div style="display:flex; align-items:center; gap:12px;">
-          <span title="${divLabel}" style="display:inline-block; width:14px; height:38px; border-radius:3px; background:${divColour}; flex-shrink:0;"></span>
+    <!-- Race Header — odd/even shaded to match the race-list striping. -->
+    <div class="card" style="margin-bottom:8px; padding:10px 14px; ${raceNumber % 2 === 1 ? 'background: rgba(250, 204, 21, 0.10);' : ''}">
+      <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px;">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <span title="${divLabel}" style="display:inline-block; width:10px; height:32px; border-radius:3px; background:${divColour}; flex-shrink:0;"></span>
           <div>
-            <div style="font-size:12px; color:var(--text-tertiary); text-transform:uppercase; letter-spacing:0.5px;">Race${divLabel ? ` · <span style="color:${divColour}; font-weight:600;">${divLabel}</span>` : ''}</div>
-            <div style="font-size:32px; font-weight:700; line-height:1;">${raceNumber}</div>
-            <div style="font-size:14px; color:var(--text-secondary); margin-top:4px;">${raceData.race_title || 'Untitled'}</div>
+            <div style="font-size:11px; color:var(--text-tertiary); text-transform:uppercase; letter-spacing:0.5px;">Race</div>
+            <div style="font-size:22px; font-weight:700; line-height:1.1;">${raceNumber}</div>
+            <div style="font-size:13px; color:var(--text-secondary); margin-top:2px;">${raceData.race_title || 'Untitled'}</div>
           </div>
         </div>
-        <div style="display:grid; grid-template-columns:repeat(4, auto); gap:16px; text-align:center;">
+        <div style="display:grid; grid-template-columns:repeat(4, auto); gap:14px; text-align:center;">
           <div>
-            <div style="font-size:11px; color:var(--text-tertiary); text-transform:uppercase;">Sched</div>
-            <div style="font-size:14px; font-weight:500;">${raceData.race_time || '—'}</div>
+            <div style="font-size:10px; color:var(--text-tertiary); text-transform:uppercase;">Sched</div>
+            <div style="font-size:13px; font-weight:500;">${raceData.race_time || '—'}</div>
           </div>
           <div>
-            <div style="font-size:11px; color:var(--text-tertiary); text-transform:uppercase;">Start</div>
-            <div style="font-size:14px; font-weight:500; color:var(--success);" id="raceStartTime">${raceData.start_time ? isoToTime(raceData.start_time) : '—'}</div>
+            <div style="font-size:10px; color:var(--text-tertiary); text-transform:uppercase;">Start</div>
+            <div style="font-size:13px; font-weight:500; color:var(--success);" id="raceStartTime">${renderStartTimeText(raceData)}</div>
           </div>
           <div>
-            <div style="font-size:11px; color:var(--text-tertiary); text-transform:uppercase;">Export</div>
-            <div style="font-size:14px; font-weight:500;" id="raceExportTime">${raceData.export_time ? isoToTime(raceData.export_time) : '—'}</div>
+            <div style="font-size:10px; color:var(--text-tertiary); text-transform:uppercase;">Export</div>
+            <div style="font-size:13px; font-weight:500;" id="raceExportTime">${renderExportTimeText(raceData)}</div>
           </div>
           <div>
-            <div style="font-size:11px; color:var(--text-tertiary); text-transform:uppercase;">Send</div>
-            <div style="font-size:14px; font-weight:500;" id="raceSendTime">${raceData.send_time ? isoToTime(raceData.send_time) : '—'}</div>
+            <div style="font-size:10px; color:var(--text-tertiary); text-transform:uppercase;">Send</div>
+            <div style="font-size:13px; font-weight:500;" id="raceSendTime">${renderSendTimeText(raceData)}</div>
           </div>
         </div>
-        <div style="display:flex; gap:8px; align-items:center;">
-          <span class="badge badge-${raceData.status}" id="raceStatus">${raceData.status?.toUpperCase() || 'PENDING'}</span>
-          <span id="raceTimer" style="font-size:20px; font-weight:600; font-variant-numeric:tabular-nums; color:var(--accent);"></span>
+        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:2px;">
+          <div style="display:flex; gap:6px; align-items:center;">
+            <span class="badge badge-${raceData.status}" id="raceStatus">${raceData.status?.toUpperCase() || 'PENDING'}</span>
+            <span id="raceTimer" style="font-size:18px; font-weight:600; font-variant-numeric:tabular-nums; color:var(--accent);"></span>
+          </div>
+          <button class="btn btn-ghost" id="stopCounterBtn" onclick="window._stopCounter()" title="Stop the running counter (data is preserved)"
+                  style="font-size:11px; padding:1px 8px; ${raceData.status === 'started' && raceData.start_time ? '' : 'display:none;'}">
+            <i class="material-icons" style="font-size:14px;">pause</i> Stop
+          </button>
         </div>
       </div>
     </div>
 
     <!-- Navigation -->
-    <div style="display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap; align-items:center;">
-      ${raceNumber > 1 ? `<a href="#/race/${raceNumber - 1}" class="btn btn-outline"><i class="material-icons">chevron_left</i> Race ${raceNumber - 1}</a>` : ''}
-      <a href="#/race/${raceNumber + 1}" class="btn btn-outline">Race ${raceNumber + 1} <i class="material-icons">chevron_right</i></a>
-      <span style="border-left:1px solid var(--border); height:24px; margin:0 4px;"></span>
-      <button class="btn btn-ghost" onclick="window._printDraw()" title="Print draw"><i class="material-icons">description</i> Print Draw</button>
-      <button class="btn btn-ghost" onclick="window._openDraw()" title="Open draw file"><i class="material-icons">folder_open</i> Open Draw</button>
+    <div style="display:flex; gap:6px; margin-bottom:6px; flex-wrap:wrap; align-items:center;">
+      ${raceNumber > 1 ? `<a href="#/race/${raceNumber - 1}" class="btn btn-outline btn-sm"><i class="material-icons" style="font-size:16px;">chevron_left</i> Race ${raceNumber - 1}</a>` : ''}
+      <a href="#/race/${raceNumber + 1}" class="btn btn-outline btn-sm">Race ${raceNumber + 1} <i class="material-icons" style="font-size:16px;">chevron_right</i></a>
+      <span style="border-left:1px solid var(--border); height:20px; margin:0 4px;"></span>
+      <button class="btn btn-ghost btn-sm" onclick="window._printDraw()" title="Print draw"><i class="material-icons" style="font-size:16px;">description</i> Print Draw</button>
+      <button class="btn btn-ghost btn-sm" onclick="window._openDraw()" title="Open draw file"><i class="material-icons" style="font-size:16px;">folder_open</i> Open Draw</button>
       <div style="flex:1;"></div>
-      <button class="btn btn-danger btn-outline" onclick="window._cancelRace()" ${raceData.status === 'cancelled' ? 'disabled' : ''}>
+      <button class="btn btn-danger btn-outline btn-sm" onclick="window._cancelRace()" ${raceData.status === 'cancelled' ? 'disabled' : ''}>
         Cancel Race
       </button>
     </div>
 
-    <!-- START / STOP Button -->
+    <!-- START / RESTART + FINISH row (70:30) -->
     ${hasPermission('race.start') ? `
-    <div style="margin-bottom:16px;" id="startStopWrap">
-      ${raceData.status === 'started'
-        ? `<button class="btn btn-danger btn-lg" style="width:100%;" onclick="window._stopRace()" id="stopBtn">
-             <i class="material-icons">stop</i> STOP RACE
-           </button>`
-        : `<button class="btn btn-success btn-lg" style="width:100%;" onclick="window._startRace()" id="startBtn"
-                   ${raceData.status === 'cancelled' ? 'disabled' : ''}>
-             <i class="material-icons">play_arrow</i> START RACE
-           </button>`}
-    </div>
+    <div style="display:flex; gap:6px; margin-bottom:8px;" id="startStopWrap"></div>
     ` : ''}
 
     <!-- Results Input Section -->
-    <div class="card" style="margin-bottom:12px;">
-      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
+    <div class="card" style="margin-bottom:8px; padding:10px 14px;">
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;">
         <div class="section-header" style="margin:0; border:none;">Results Input — must be in finishing order</div>
         ${configData?.shared_joyi_folder || hasPermission('race.import_joyi') ? `
-        <label class="btn btn-outline" style="cursor:pointer; font-size:12px; padding:4px 12px;">
+        <label class="btn btn-outline" style="cursor:pointer; font-size:12px; padding:3px 10px;">
           <i class="material-icons" style="font-size:16px;">cloud_download</i> Import Joyi
           <input type="file" accept=".xls,.xlsx" style="display:none;" id="joyiFileInput">
         </label>
@@ -153,10 +150,12 @@ export async function mountRacePage(container, params) {
       <div id="inputGridContainer"></div>
     </div>
 
-    <!-- Batch Adjustment -->
-    <div class="card" style="margin-bottom:12px;">
-      <div class="section-header">Batch Adjustment (Backup)</div>
-      <div style="display:flex; align-items:center; gap:16px; flex-wrap:wrap;">
+    <!-- Batch Adjustment — collapsed by default, fallback for the FINISH capture -->
+    <details style="margin-bottom:8px; background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius-sm);">
+      <summary style="cursor:pointer; padding:6px 14px; font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:0.5px; color:var(--text-tertiary); user-select:none;">
+        Batch Adjustment (Backup)
+      </summary>
+      <div style="padding:8px 14px 10px; display:flex; align-items:center; gap:16px; flex-wrap:wrap;">
         <div class="form-group" style="margin:0;">
           <label class="form-label">P1 Time (${timeMode})</label>
           <input class="form-input" id="batchP1Time" type="text" style="width:120px; font-family:monospace;"
@@ -166,18 +165,15 @@ export async function mountRacePage(container, params) {
           <div class="form-label">Difference</div>
           <span id="batchDelta" style="font-family:monospace; font-size:14px;">0.00.00</span>
         </div>
-        <button class="btn btn-outline" onclick="window._finishBackup()">
-          <i class="material-icons">timer</i> Finish (1st Boat) BACKUP ONLY
-        </button>
       </div>
-    </div>
+    </details>
 
     <!-- Validation -->
-    <div id="validationPanel" style="margin-bottom:12px;"></div>
+    <div id="validationPanel" style="margin-bottom:8px;"></div>
 
     <!-- Results Output Section -->
-    <div class="card" style="margin-bottom:12px;">
-      <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-bottom:12px;">
+    <div class="card" style="margin-bottom:8px; padding:10px 14px;">
+      <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-bottom:8px;">
         <div class="section-header" style="margin:0; border:none;">Results Output</div>
         <div style="display:flex; gap:6px; flex-wrap:wrap;">
           ${hasPermission('race.export') ? `
@@ -220,6 +216,9 @@ export async function mountRacePage(container, params) {
 
   // Attach handlers
   attachHandlers();
+
+  // Render the START/RESTART + FINISH button row now that handlers are wired.
+  if (hasPermission('race.start')) renderStartStopButton();
 }
 
 export function unmountRacePage() {
@@ -252,7 +251,7 @@ export function unmountRacePage() {
 
   // Clean up window handlers
   delete window._startRace;
-  delete window._stopRace;
+  delete window._stopCounter;
   delete window._cancelRace;
   delete window._finishBackup;
   delete window._exportAndSend;
@@ -402,6 +401,8 @@ function recalculate() {
   // Compute rankings
   computeRankings(data, timeMode, batchDeltaMs);
 
+  const laneCount = configData?.lane_count || 6;
+
   // Validation checks (G21/H22 equivalents)
   data.forEach((row, i) => {
     if (!row.raw_time && !row.remarks) {
@@ -416,6 +417,35 @@ function recalculate() {
       row.validation = 1; // has remark, ok
     } else {
       row.validation = -2; // has time but invalid
+    }
+  });
+
+  // Lane validity per row — blank/out-of-range/duplicate lane_input flips the
+  // row to invalid so the per-row colour + Valid? indicator agree with the
+  // panel message (panel says "lane out of range" → row also goes red).
+  const laneCounts = new Map();
+  data.forEach(row => {
+    if (!row.raw_time && !row.remarks) return;
+    const lane = parseInt(row.lane_input, 10);
+    if (Number.isInteger(lane) && lane >= 1 && lane <= laneCount) {
+      laneCounts.set(lane, (laneCounts.get(lane) || 0) + 1);
+    }
+  });
+  data.forEach(row => {
+    if (!row.raw_time && !row.remarks) return;
+    if (row.validation === -2) return; // already invalid for another reason
+    const laneStr = (row.lane_input ?? '').toString().trim();
+    if (laneStr === '') {
+      row.validation = -2; // blank lane while row has data
+      return;
+    }
+    const lane = parseInt(laneStr, 10);
+    if (!Number.isInteger(lane) || lane < 1 || lane > laneCount) {
+      row.validation = -2; // out of range
+      return;
+    }
+    if ((laneCounts.get(lane) || 0) > 1) {
+      row.validation = -2; // duplicate lane across rows
     }
   });
 
@@ -488,46 +518,62 @@ function renderOutput(data) {
   const container = document.getElementById('outputTableContainer');
   if (!container) return;
   const timeMode = configData?.time_format_mode || 'mss00';
+  const laneCount = configData?.lane_count || 6;
 
-  // Sort by position for output (nulls at end)
-  const sorted = [...data].sort((a, b) => {
-    if (a.computed_position == null && b.computed_position == null) return 0;
-    if (a.computed_position == null) return 1;
-    if (b.computed_position == null) return -1;
-    return a.computed_position - b.computed_position;
+  // Bottom section is a fixed-lane view of the same data the operator types
+  // into the top section. One row per lane 1..laneCount, always in order.
+  // Time/place/remarks come from whichever input row references this lane
+  // via lane_input; if no row does, the cells stay blank.
+  const inputByLane = {};
+  data.forEach(r => {
+    const lane = parseInt(r.lane_input, 10);
+    if (Number.isInteger(lane) && lane >= 1 && lane <= laneCount) {
+      // If two rows somehow point at the same lane, validation flags it;
+      // here we keep the last-wins so the operator at least sees something.
+      inputByLane[lane] = r;
+    }
   });
 
-  const rows = sorted.map(r => {
+  const rowsHtml = [];
+  for (let lane = 1; lane <= laneCount; lane++) {
+    const r = inputByLane[lane];
+    const draw = drawsByLane[lane] || {};
+    const teamName = draw.team_name || '';
+    const teamCode = draw.team_code || '';
+
+    if (!r) {
+      rowsHtml.push(`<tr>
+        <td>${lane}</td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td class="team-name">${teamName}</td>
+        <td>${teamCode}</td>
+      </tr>`);
+      continue;
+    }
+
     const posClass = r.computed_position === 1 ? 'first' : r.computed_position === 2 ? 'second' : r.computed_position === 3 ? 'third' : '';
     const remarksDisplay = [];
     if (r.penalty_time) remarksDisplay.push(`TP=${r.penalty_time}s`);
     if (r.remarks) remarksDisplay.push(r.remarks);
 
-    // Resolve the actual lane the user typed, and look up the team from the
-    // immutable draws snapshot. Do NOT fall back to row index — a blank
-    // lane_input means the operator left it blank, and that should be visible.
-    const laneVal = parseInt(r.lane_input, 10);
-    const laneDisplay = laneVal >= 1 && laneVal <= (configData?.lane_count || 6) ? laneVal : '';
-    const draw = laneVal ? drawsByLane[laneVal] : null;
-    const teamName = draw?.team_name || '';
-    const teamCode = draw?.team_code || '';
-
-    return `<tr>
-      <td>${laneDisplay}</td>
+    rowsHtml.push(`<tr>
+      <td>${lane}</td>
       <td>${timeToDisplay(r.raw_time, timeMode)}</td>
       <td class="cell-position ${posClass}">${r.remarks && ['DSQ', 'DQ'].includes(r.remarks) ? r.remarks : (r.computed_position ?? '')}</td>
       <td>${remarksDisplay.join(', ')}</td>
       <td class="team-name">${teamName}</td>
       <td>${teamCode}</td>
-    </tr>`;
-  }).join('');
+    </tr>`);
+  }
 
   container.innerHTML = `
     <table class="output-table">
       <thead><tr>
         <th>Lane</th><th>Time</th><th>Place</th><th>Remarks</th><th>Team Name</th><th>Code</th>
       </tr></thead>
-      <tbody>${rows}</tbody>
+      <tbody>${rowsHtml.join('')}</tbody>
     </table>
   `;
 }
@@ -564,10 +610,11 @@ function renderValidation(data) {
 function startTimer() {
   if (timerInterval) clearInterval(timerInterval);
   const timerEl = document.getElementById('raceTimer');
-  if (!timerEl || !raceData.start_time) return;
+  const baseline = raceData.restart_time || raceData.start_time;
+  if (!timerEl || !baseline) return;
 
   function update() {
-    const elapsed = Date.now() - new Date(raceData.start_time).getTime();
+    const elapsed = Date.now() - new Date(baseline).getTime();
     const totalSec = Math.floor(elapsed / 1000);
     const min = Math.floor(totalSec / 60);
     const sec = totalSec % 60;
@@ -607,68 +654,120 @@ async function checkPreviousRaces(currentRaceNum) {
   }
 }
 
+/**
+ * Render the primary action row: START or RESTART on the left (~70%) + a
+ * FINISH-capture button on the right (~30%). After the race has been started
+ * once, the left button permanently becomes RESTART. FINISH stays enabled as
+ * long as there's a start time; clicking it again will prompt to override.
+ */
 function renderStartStopButton() {
   const wrap = document.getElementById('startStopWrap');
   if (!wrap) return;
-  if (raceData.status === 'started') {
-    wrap.innerHTML = `<button class="btn btn-danger btn-lg" style="width:100%;" onclick="window._stopRace()" id="stopBtn">
-      <i class="material-icons">stop</i> STOP RACE
-    </button>`;
-  } else {
-    const disabled = raceData.status === 'cancelled' ? 'disabled' : '';
-    wrap.innerHTML = `<button class="btn btn-success btn-lg" style="width:100%;" onclick="window._startRace()" id="startBtn" ${disabled}>
-      <i class="material-icons">play_arrow</i> START RACE
-    </button>`;
+  const cancelled = raceData.status === 'cancelled';
+  const everStarted = !!raceData.start_time;
+  const startLabel = everStarted ? 'RESTART RACE' : 'START RACE';
+  const startIcon = everStarted ? 'replay' : 'play_arrow';
+  const startCls = everStarted ? 'btn-primary' : 'btn-success';
+  const finishDisabled = (!everStarted || cancelled) ? 'disabled' : '';
+
+  wrap.innerHTML = `
+    <button class="btn ${startCls}" style="flex:7;" onclick="window._startRace()" id="startBtn" ${cancelled ? 'disabled' : ''}>
+      <i class="material-icons">${startIcon}</i> ${startLabel}
+    </button>
+    <button class="btn btn-outline" style="flex:3;" onclick="window._finishBackup()" id="finishBtn" ${finishDisabled}
+            title="Capture first-boat finish timestamp at click moment">
+      <i class="material-icons">flag</i> FINISH
+    </button>
+  `;
+}
+
+/**
+ * Header "Start" cell content. If a restart_time exists, show the original
+ * struck through next to the active restart_time so the operator can see
+ * both.
+ */
+function renderStartTimeText(race) {
+  if (!race.start_time && !race.restart_time) return '—';
+  if (race.restart_time && race.start_time) {
+    return `<s style="color:var(--text-tertiary); font-weight:400;">${isoToTime(race.start_time)}</s> → ${isoToTime(race.restart_time)}`;
   }
+  return isoToTime(race.start_time || race.restart_time);
+}
+
+/**
+ * Header "Export" cell — if there's been more than one export, show the
+ * previous one struck through next to the latest.
+ */
+function renderExportTimeText(race) {
+  if (!race.export_time) return '—';
+  const history = race.export_history || [];
+  if (history.length >= 2) {
+    const prev = history[history.length - 2]?.timestamp;
+    if (prev) {
+      return `<s style="color:var(--text-tertiary); font-weight:400;">${isoToTime(prev)}</s> → ${isoToTime(race.export_time)}`;
+    }
+  }
+  return isoToTime(race.export_time);
+}
+
+/**
+ * Header "Send" cell — if there's been a re-send, show the previous send
+ * struck through next to the latest.
+ */
+function renderSendTimeText(race) {
+  if (!race.send_time) return '—';
+  if (race.prev_send_time) {
+    return `<s style="color:var(--text-tertiary); font-weight:400;">${isoToTime(race.prev_send_time)}</s> → ${isoToTime(race.send_time)}`;
+  }
+  return isoToTime(race.send_time);
 }
 
 function attachHandlers() {
   window._startRace = async () => {
-    // Fresh start every time. If the operator hit STOP first, start_time was
-    // cleared, so this writes a new one and the timer restarts from 0.
     const now = nowISO();
-    raceData.start_time = now;
-    raceData.restart_time = null;
+    const isRestart = !!raceData.start_time;
+    if (isRestart) {
+      if (!confirm(`Restart Race ${raceNumber}? The original start time stays for the record; the timer resets to 0.`)) return;
+      raceData.restart_time = now;
+    } else {
+      raceData.start_time = now;
+      raceData.restart_time = null;
+    }
     raceData.status = 'started';
     await saveRace(raceData);
-    await saveTimesheet({ race_number: raceNumber, start_time: now, restart_time: null });
+    await saveTimesheet({
+      race_number: raceNumber,
+      start_time: raceData.start_time,
+      restart_time: raceData.restart_time,
+    });
     broadcastChange('race-updated', { race_number: raceNumber });
 
-    document.getElementById('raceStartTime').textContent = isoToTime(raceData.start_time);
+    document.getElementById('raceStartTime').innerHTML = renderStartTimeText(raceData);
     document.getElementById('raceStatus').textContent = 'STARTED';
     document.getElementById('raceStatus').className = 'badge badge-started';
     renderStartStopButton();
+    // Show the small Stop button next to the timer.
+    const stopBtn = document.getElementById('stopCounterBtn');
+    if (stopBtn) stopBtn.style.display = '';
     startTimer();
-    showToast(`Race ${raceNumber} started!`, 'success');
+    showToast(isRestart ? `Race ${raceNumber} restarted` : `Race ${raceNumber} started!`, isRestart ? 'info' : 'success');
 
     // Clear "Race has no start time" validation error.
     recalculate();
 
-    // Force-signal this race as "next" on the mobile app, in case it was
-    // missed by the export flow of the prior race.
+    // Force-signal this race as "next" on the mobile app, in case the prior
+    // race's export flow missed it.
     signalNextRace(raceNumber).catch(() => {});
   };
 
-  window._stopRace = async () => {
-    if (!confirm(`Stop Race ${raceNumber}? Clears the start time. You can START again to restart the timer from 0.`)) return;
-    raceData.start_time = null;
-    raceData.restart_time = null;
-    raceData.status = 'pending';
-    // Clear next-race-signaled so START will signal again afterwards.
-    raceData.next_race_signaled = false;
-    await saveRace(raceData);
-    broadcastChange('race-updated', { race_number: raceNumber });
-
-    // Stop timer + reset display.
+  // STOP just halts the running counter. No data change — the start_time
+  // (and restart_time if any) stays so it can still be exported. Press
+  // RESTART to start counting again with a new restart_time.
+  window._stopCounter = () => {
     if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
-    const timerEl = document.getElementById('raceTimer');
-    if (timerEl) timerEl.textContent = '';
-    document.getElementById('raceStartTime').textContent = '—';
-    document.getElementById('raceStatus').textContent = 'PENDING';
-    document.getElementById('raceStatus').className = 'badge badge-pending';
-    renderStartStopButton();
-    showToast(`Race ${raceNumber} stopped. Press START to restart.`, 'info');
-    recalculate();
+    const stopBtn = document.getElementById('stopCounterBtn');
+    if (stopBtn) stopBtn.style.display = 'none';
+    showToast('Counter stopped. Press RESTART to begin again.', 'info', 4000);
   };
 
   window._cancelRace = async () => {
@@ -682,87 +781,97 @@ function attachHandlers() {
   };
 
   window._finishBackup = async () => {
-    const p1Input = document.getElementById('batchP1Time');
-    const timeMode = configData?.time_format_mode || 'mss00';
-    const data = grid.getData();
-    const firstTime = data.find(r => r.raw_time)?.raw_time;
+    // CAPTURE FIRST — at the click moment. We never let the confirm dialog
+    // move the recorded timestamp; ms precision must reflect when the
+    // operator's finger hit the button, not when they dismissed the prompt.
+    const captureISO = nowISO();
 
-    if (p1Input.value) {
-      // Operator typed a manual P1 — use it to compute delta.
-      batchDeltaMs = calcBatchDelta(p1Input.value, firstTime, timeMode);
-    } else if (raceData.start_time) {
-      // Capture an ms-precision real-time finish timestamp for boat #1.
-      // Persisted at .000; only the export format drops the trailing digit.
-      const finishISO = nowISO();
-      const elapsedMs = new Date(finishISO).getTime() - new Date(raceData.start_time).getTime();
-      raceData.p1_finish_time = finishISO;
-      raceData.p1_finish_elapsed_ms = elapsedMs;
-      await saveRace(raceData);
-      await saveTimesheet({
-        race_number: raceNumber,
-        start_time: raceData.start_time,
-        p1_finish_time: finishISO,
-        p1_finish_elapsed_ms: elapsedMs,
-      });
-      // Populate P1 input with the computed time in the configured format.
-      p1Input.value = msToTime(elapsedMs, timeMode);
-      if (firstTime) {
-        batchDeltaMs = calcBatchDelta(p1Input.value, firstTime, timeMode);
-      }
-      showToast(`First-boat finish captured at ${isoToTime(finishISO)} (.${String(new Date(finishISO).getMilliseconds()).padStart(3, '0')})`, 'success', 4000);
-    } else {
+    if (!raceData.start_time) {
       showToast('Cannot capture finish: race has no start time', 'warning');
       return;
     }
 
-    const deltaDisplay = timeToDisplay(msToTime(Math.abs(batchDeltaMs), timeMode), timeMode);
-    document.getElementById('batchDelta').textContent = (batchDeltaMs >= 0 ? '+' : '-') + deltaDisplay;
+    if (raceData.p1_finish_time) {
+      const captureMs = String(new Date(captureISO).getMilliseconds()).padStart(3, '0');
+      const ok = confirm(
+        `First-boat finish already captured at ${isoToTime(raceData.p1_finish_time)}.\n\n` +
+        `Override with the moment you just clicked (${isoToTime(captureISO)}.${captureMs})?`
+      );
+      if (!ok) return;
+    }
+
+    const baseline = raceData.restart_time || raceData.start_time;
+    const elapsedMs = new Date(captureISO).getTime() - new Date(baseline).getTime();
+    raceData.p1_finish_time = captureISO;
+    raceData.p1_finish_elapsed_ms = elapsedMs;
+    await saveRace(raceData);
+    await saveTimesheet({
+      race_number: raceNumber,
+      start_time: raceData.start_time,
+      p1_finish_time: captureISO,
+      p1_finish_elapsed_ms: elapsedMs,
+    });
+
+    const timeMode = configData?.time_format_mode || 'mss00';
+    const p1Input = document.getElementById('batchP1Time');
+    if (p1Input) p1Input.value = msToTime(elapsedMs, timeMode);
+
+    // Update batch-delta display if a row has a manual time entered.
+    const data = grid.getData();
+    const firstTime = data.find(r => r.raw_time)?.raw_time;
+    if (firstTime && p1Input) {
+      batchDeltaMs = calcBatchDelta(p1Input.value, firstTime, timeMode);
+      const deltaEl = document.getElementById('batchDelta');
+      if (deltaEl) {
+        const deltaDisplay = timeToDisplay(msToTime(Math.abs(batchDeltaMs), timeMode), timeMode);
+        deltaEl.textContent = (batchDeltaMs >= 0 ? '+' : '-') + deltaDisplay;
+      }
+    }
+
+    const ms = String(new Date(captureISO).getMilliseconds()).padStart(3, '0');
+    showToast(`First-boat finish captured at ${isoToTime(captureISO)}.${ms}`, 'success', 4000);
     recalculate();
   };
 
   window._exportAndSend = async () => {
     await showExportModal(raceNumber, async () => {
       await sendToWhatsApp(raceNumber);
-      // Update send time
       raceData = await getRace(raceNumber);
+      // Track previous send time so the header can render it struck through.
+      if (raceData.send_time) raceData.prev_send_time = raceData.send_time;
       raceData.send_time = nowISO();
       raceData.status = 'sent';
       await saveRace(raceData);
       const ts = await getTimesheet(raceNumber) || { race_number: raceNumber };
       if (!ts.send_time) { ts.send_time = raceData.send_time; } else { ts.re_send_time = raceData.send_time; }
       await saveTimesheet(ts);
-      document.getElementById('raceSendTime').textContent = isoToTime(raceData.send_time);
+      document.getElementById('raceSendTime').innerHTML = renderSendTimeText(raceData);
       document.getElementById('raceStatus').textContent = 'SENT';
       document.getElementById('raceStatus').className = 'badge badge-sent';
       broadcastChange('race-updated', { race_number: raceNumber });
-      // Prompt next race signal (skips if already signaled by another tab)
       await promptNextRaceSignal(raceNumber);
-      // Check previous races for missing exports/sends
       await checkPreviousRaces(raceNumber);
     });
-    // Update export display
+    // Refresh export display via the helper (handles strikethrough for re-export).
     raceData = await getRace(raceNumber);
     if (raceData.export_time) {
-      document.getElementById('raceExportTime').textContent = isoToTime(raceData.export_time);
+      document.getElementById('raceExportTime').innerHTML = renderExportTimeText(raceData);
     }
   };
 
   window._exportOnly = () => {
     showExportModal(raceNumber, async () => {
       raceData = await getRace(raceNumber);
-      document.getElementById('raceExportTime').textContent = isoToTime(raceData.export_time);
+      document.getElementById('raceExportTime').innerHTML = renderExportTimeText(raceData);
       document.getElementById('raceStatus').textContent = 'EXPORTED';
       document.getElementById('raceStatus').className = 'badge badge-exported';
-      // Reminder: send results to scoring team (VBA: "Please send Results to Scoring Team when ready!")
       showToast('Export complete. Send results to the scoring team when ready.', 'success', 5000);
-      // Prompt next race signal
       await promptNextRaceSignal(raceNumber);
       await checkPreviousRaces(raceNumber);
     });
   };
 
   window._sendOnly = async () => {
-    // Check if results exported first (VBA: "Results not yet exported. System will now export Results before sending.")
     raceData = await getRace(raceNumber);
     if (!raceData.export_time) {
       if (!confirm('Results not yet exported for this race. Export first before sending?')) return;
@@ -771,17 +880,17 @@ function attachHandlers() {
     }
     await sendToWhatsApp(raceNumber);
     raceData = await getRace(raceNumber);
+    if (raceData.send_time) raceData.prev_send_time = raceData.send_time;
     raceData.send_time = nowISO();
     raceData.status = 'sent';
     await saveRace(raceData);
     const ts = await getTimesheet(raceNumber) || { race_number: raceNumber };
     if (!ts.send_time) { ts.send_time = raceData.send_time; } else { ts.re_send_time = raceData.send_time; }
     await saveTimesheet(ts);
-    document.getElementById('raceSendTime').textContent = isoToTime(raceData.send_time);
+    document.getElementById('raceSendTime').innerHTML = renderSendTimeText(raceData);
     document.getElementById('raceStatus').textContent = 'SENT';
     document.getElementById('raceStatus').className = 'badge badge-sent';
     broadcastChange('race-updated', { race_number: raceNumber });
-    // Prompt next race signal
     await promptNextRaceSignal(raceNumber);
     await checkPreviousRaces(raceNumber);
   };

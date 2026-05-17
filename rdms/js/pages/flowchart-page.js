@@ -34,8 +34,10 @@ export async function mountFlowchartPage(container) {
     });
   }
 
+  // Display as "(CODE) name" — code first so operators can scan codes,
+  // name carried alongside for readability.
   const teamOptions = [...teamMap.entries()]
-    .map(([code, name]) => ({ value: code, label: name, sublabel: code }))
+    .map(([code, name]) => ({ value: code, label: `(${code}) ${name}` }))
     .sort((a, b) => a.label.localeCompare(b.label));
 
   const divOptions = divisions.map(d => ({
