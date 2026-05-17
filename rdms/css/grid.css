@@ -111,6 +111,24 @@
 .validation-dot.error { background: var(--danger); }
 .validation-dot.empty { background: var(--border); }
 
+/* Row-level validity tint applied by race-page.applyRowValidationStyles().
+   Subtle but visible at-a-glance; doesn't fight the cell-input focus ring. */
+.excel-grid tbody tr.row-invalid td:not(.cell-rownum) {
+  background: rgba(220, 38, 38, 0.18);
+}
+.excel-grid tbody tr.row-warning td:not(.cell-rownum) {
+  background: rgba(245, 158, 11, 0.18);
+}
+.excel-grid tbody tr.row-valid td:not(.cell-rownum) {
+  background: rgba(16, 185, 129, 0.08);
+}
+/* Keep the input field background clear so the focus ring still pops. */
+.excel-grid tbody tr.row-invalid .cell-input,
+.excel-grid tbody tr.row-warning .cell-input,
+.excel-grid tbody tr.row-valid .cell-input {
+  background: transparent;
+}
+
 /* Position column — bold for emphasis */
 .cell-position {
   font-weight: 700;
