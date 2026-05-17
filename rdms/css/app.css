@@ -1,0 +1,513 @@
+/* ==============================================================
+   SDBA RDMS — App Layout & Components
+   ============================================================== */
+
+/* ========== NAVBAR ========== */
+.navbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--navbar-height);
+  background: var(--brand-dark);
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  z-index: 1000;
+  gap: 8px;
+}
+
+.navbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 16px;
+  flex-shrink: 0;
+}
+.navbar-logo {
+  font-weight: 700;
+  font-size: 16px;
+  color: var(--accent);
+  letter-spacing: -0.5px;
+}
+.navbar-title {
+  font-weight: 500;
+  font-size: 14px;
+  color: rgba(255,255,255,0.7);
+}
+
+.navbar-links {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 1;
+  overflow-x: auto;
+}
+.nav-link {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  color: rgba(255,255,255,0.6);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 450;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+  white-space: nowrap;
+}
+.nav-link i.material-icons {
+  font-size: 18px;
+}
+.nav-link:hover {
+  color: rgba(255,255,255,0.9);
+  background: rgba(255,255,255,0.08);
+}
+.nav-link.active {
+  color: #ffffff;
+  background: rgba(59,130,246,0.2);
+}
+
+.navbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.navbar-folders {
+  display: flex;
+  gap: 2px;
+  padding-right: 8px;
+  border-right: 1px solid rgba(255,255,255,0.15);
+  margin-right: 4px;
+}
+.navbar-event {
+  font-size: 12px;
+  color: rgba(255,255,255,0.5);
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.navbar-clock {
+  font-size: 20px;
+  font-weight: 600;
+  color: #ffffff;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.5px;
+}
+
+/* ========== ICON BUTTON ========== */
+.btn-icon {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: rgba(255,255,255,0.6);
+  padding: 6px;
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--transition-fast);
+}
+.btn-icon:hover {
+  color: #ffffff;
+  background: rgba(255,255,255,0.1);
+}
+
+/* ========== MAIN CONTENT ========== */
+#app {
+  margin-top: var(--navbar-height);
+  padding: 20px 24px;
+  max-width: 1400px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* ========== CARD ========== */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  padding: 20px;
+}
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+.card-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* ========== BUTTONS ========== */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.btn i.material-icons {
+  font-size: 18px;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #ffffff;
+}
+.btn-primary:hover {
+  background: var(--accent-hover);
+  box-shadow: var(--shadow-sm);
+}
+
+.btn-success {
+  background: var(--success);
+  color: #ffffff;
+}
+.btn-success:hover {
+  filter: brightness(1.1);
+}
+
+.btn-danger {
+  background: var(--danger);
+  color: #ffffff;
+}
+.btn-danger:hover {
+  filter: brightness(1.1);
+}
+
+.btn-warning {
+  background: var(--warning);
+  color: #ffffff;
+}
+
+.btn-outline {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+}
+.btn-outline:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--text-tertiary);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-secondary);
+}
+.btn-ghost:hover {
+  background: var(--bg-card-hover);
+  color: var(--text-primary);
+}
+
+.btn-lg {
+  padding: 14px 32px;
+  font-size: 16px;
+  font-weight: 600;
+  border-radius: var(--radius-md);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ========== FORM INPUTS ========== */
+.form-group {
+  margin-bottom: 16px;
+}
+.form-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-tertiary);
+  margin-bottom: 6px;
+}
+.form-input,
+.form-select {
+  width: 100%;
+  padding: 8px 12px;
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--text-primary);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  transition: border-color var(--transition-fast);
+}
+.form-input:focus,
+.form-select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+.form-input::placeholder {
+  color: var(--text-tertiary);
+}
+
+/* ========== TABS ========== */
+.tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 20px;
+}
+.tab {
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.tab:hover {
+  color: var(--text-primary);
+}
+.tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* ========== STATUS BADGES ========== */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  border-radius: var(--radius-full);
+  white-space: nowrap;
+}
+.badge-pending { background: var(--bg-input); color: var(--text-secondary); }
+.badge-started { background: var(--info-bg); color: var(--info-text); }
+.badge-finished { background: var(--warning-bg); color: var(--warning-text); }
+.badge-exported { background: var(--success-bg); color: var(--success-text); }
+.badge-sent { background: var(--success-bg); color: var(--success-text); }
+.badge-cancelled { background: var(--danger-bg); color: var(--danger-text); }
+
+/* ========== TOAST NOTIFICATIONS ========== */
+.toast-container {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.toast {
+  padding: 12px 16px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  font-weight: 500;
+  color: #ffffff;
+  box-shadow: var(--shadow-lg);
+  animation: toastIn 0.2s ease-out;
+  max-width: 360px;
+}
+.toast-success { background: #059669; }
+.toast-warning { background: #d97706; }
+.toast-error { background: #dc2626; }
+.toast-info { background: var(--accent); }
+
+@keyframes toastIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ========== SECTION HEADERS ========== */
+.section-header {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-tertiary);
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 12px;
+}
+
+/* ========== SUMMARY CARDS (Dashboard) ========== */
+.summary-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.summary-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  text-align: center;
+}
+.summary-card-value {
+  font-size: 28px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+.summary-card-label {
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-tertiary);
+  margin-top: 4px;
+}
+
+/* ========== RACE STATUS TABLE (Dashboard) ========== */
+.race-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.race-table th {
+  text-align: left;
+  padding: 8px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-tertiary);
+  border-bottom: 2px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--bg-card);
+}
+.race-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  vertical-align: middle;
+}
+.race-table tr:hover td {
+  background: var(--bg-card-hover);
+}
+.race-table .division-color {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.race-table .status-icon {
+  font-size: 16px;
+  vertical-align: middle;
+}
+.race-table .status-icon.done { color: var(--success); }
+.race-table .status-icon.pending { color: var(--text-tertiary); }
+.race-table .status-icon.warning { color: var(--warning); }
+
+/* ========== DROP ZONE ========== */
+.drop-zone {
+  border: 2px dashed var(--border);
+  border-radius: var(--radius-lg);
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--text-secondary);
+  transition: all var(--transition-fast);
+  cursor: pointer;
+}
+.drop-zone:hover,
+.drop-zone.drag-over {
+  border-color: var(--accent);
+  background: var(--accent-light);
+  color: var(--accent);
+}
+.drop-zone p {
+  margin: 6px 0;
+  font-size: 14px;
+}
+
+/* ========== PRINT STYLES ========== */
+@media print {
+  .navbar, .toast-container { display: none !important; }
+  #app { margin-top: 0; padding: 0; }
+  .card { border: none; box-shadow: none; }
+  body { background: #fff; color: #000; font-size: 12px; }
+}
+
+/* ========== RESPONSIVE ========== */
+/* ========== TABLET (< 1024px) ========== */
+@media (max-width: 1024px) {
+  #app { padding: 16px; max-width: 100%; }
+  .navbar-event { max-width: 120px; font-size: 11px; }
+}
+
+/* ========== MOBILE (< 768px) ========== */
+@media (max-width: 768px) {
+  .navbar {
+    flex-wrap: wrap;
+    height: auto;
+    padding: 8px 12px;
+    gap: 4px;
+  }
+  .navbar-links {
+    order: 3;
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    gap: 0;
+    padding-top: 4px;
+    border-top: 1px solid rgba(255,255,255,0.1);
+  }
+  .nav-link {
+    padding: 6px 8px;
+    font-size: 11px;
+  }
+  .navbar-event { display: none; }
+  .navbar-folders { gap: 0; }
+
+  #app { padding: 10px; }
+  .card { padding: 12px; }
+  .summary-cards { grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .summary-card { padding: 10px; }
+  .summary-card-value { font-size: 22px; }
+
+  /* Race table: horizontal scroll */
+  .race-table { font-size: 12px; }
+  .race-table th, .race-table td { padding: 4px 6px; }
+
+  /* Excel grid: allow horizontal scroll */
+  .excel-grid-container { -webkit-overflow-scrolling: touch; }
+  .excel-grid .cell-input { font-size: 16px; } /* prevent iOS zoom */
+
+  /* Buttons: compact */
+  .btn { font-size: 12px; padding: 6px 10px; }
+  .btn-lg { font-size: 14px; padding: 10px 20px; }
+
+  /* Form inputs: prevent iOS zoom */
+  .form-input, .form-select { font-size: 16px; }
+
+  /* Tabs: scrollable */
+  .tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .tab { white-space: nowrap; padding: 8px 12px; font-size: 12px; }
+}
+
+/* ========== SMALL PHONE (< 480px) ========== */
+@media (max-width: 480px) {
+  .summary-cards { grid-template-columns: repeat(2, 1fr); }
+  .navbar-clock { font-size: 16px; }
+  .navbar-brand { margin-right: 8px; }
+  .navbar-logo { font-size: 14px; }
+}

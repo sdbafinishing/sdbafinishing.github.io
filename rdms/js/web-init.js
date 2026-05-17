@@ -1,0 +1,220 @@
+/**
+ * SDBA RDMS — Web Version Initialization
+ * For GitHub Pages deployment: auto-configures Supabase from web-config.js,
+ * loads available events, lets user pick (defaults to latest).
+ *
+ * Local version skips this entirely (uses IndexedDB config).
+ */
+import { WEB_CONFIG } from './web-config.js';
+import { isLocal } from './auth.js';
+import { getConfig, saveConfig } from './db.js';
+import { showToast } from './utils.js';
+
+let supabaseClient = null;
+
+/**
+ * Initialize the web version.
+ * - Loads Supabase client from baked-in config
+ * - Fetches available events
+ * - Auto-selects latest or lets user pick
+ * - Syncs event config into local IndexedDB for the app to use
+ *
+ * @returns {{ ready: boolean, eventRef: string|null }}
+ */
+export async function initWebVersion() {
+  if (isLocal()) return { ready: true, eventRef: null }; // Local — skip
+
+  if (!WEB_CONFIG.supabase_url || !WEB_CONFIG.supabase_anon_key) {
+    return { ready: false, eventRef: null }; // Not configured
+  }
+
+  // Load Supabase
+  if (!window.supabase) {
+    try {
+      await loadScript('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js');
+    } catch {
+      return { ready: false, eventRef: null };
+    }
+  }
+
+  supabaseClient = window.supabase.createClient(WEB_CONFIG.supabase_url, WEB_CONFIG.supabase_anon_key);
+
+  // Check if we already have a selected event in this session
+  const savedRef = sessionStorage.getItem('rdms-web-event');
+  if (savedRef) {
+    await loadEventConfig(savedRef);
+    return { ready: true, eventRef: savedRef };
+  }
+
+  // Fetch available events from Supabase
+  const events = await fetchEvents();
+  if (events.length === 0) {
+    return { ready: true, eventRef: null }; // No events yet
+  }
+
+  // Auto-select latest event
+  const latest = events[0]; // sorted by updated_at desc
+  await loadEventConfig(latest.event_ref);
+  sessionStorage.setItem('rdms-web-event', latest.event_ref);
+
+  return { ready: true, eventRef: latest.event_ref };
+}
+
+/**
+ * Fetch available events from Supabase.
+ */
+async function fetchEvents() {
+  if (!supabaseClient) return [];
+
+  const { data, error } = await supabaseClient
+    .from('event_config')
+    .select('event_ref, config, updated_at')
+    .order('updated_at', { ascending: false });
+
+  if (error || !data) return [];
+  return data;
+}
+
+/**
+ * Load event config + race snapshots into local IndexedDB.
+ * Web version uses Supabase as source of truth.
+ */
+async function loadEventConfig(eventRef) {
+  if (!supabaseClient) return;
+
+  // Load event config
+  const { data: eventData } = await supabaseClient
+    .from('event_config')
+    .select('*')
+    .eq('event_ref', eventRef)
+    .single();
+
+  if (eventData?.config) {
+    // Merge Supabase config into local IndexedDB
+    const localConfig = await getConfig() || {};
+    const merged = {
+      ...localConfig,
+      ...eventData.config,
+      event_short_ref: eventRef,
+      // Inject web config keys (not stored in Supabase)
+      supabase_url: WEB_CONFIG.supabase_url,
+      supabase_anon_key: WEB_CONFIG.supabase_anon_key,
+      google_client_id: WEB_CONFIG.google_client_id,
+    };
+    await saveConfig(merged);
+  }
+
+  // Load race snapshots into local races + lane_results
+  const { data: snapshots } = await supabaseClient
+    .from('race_snapshots')
+    .select('*')
+    .eq('event_ref', eventRef)
+    .order('race_number');
+
+  if (snapshots) {
+    const { db } = await import('./db.js');
+    // Sync race data from snapshots
+    const races = snapshots.map(s => ({
+      race_number: s.race_number,
+      race_title: s.snapshot?.title || '',
+      status: s.snapshot?.status || 'pending',
+      start_time: s.snapshot?.start_time || null,
+      export_time: s.snapshot?.export_time || null,
+      send_time: s.snapshot?.send_time || null,
+      export_version: s.snapshot?.export_version || 0,
+      scoring_flag: s.snapshot?.scoring_flag || 'N',
+      division_id: s.snapshot?.division_id || null,
+      teams_loaded: true,
+      joyi_imported: false,
+    }));
+    await db.races.bulkPut(races);
+
+    // Sync lane results from snapshots
+    for (const s of snapshots) {
+      if (s.snapshot?.results) {
+        const lanes = s.snapshot.results.map((r, i) => ({
+          race_number: s.race_number,
+          lane_number: r.lane || (i + 1),
+          team_name: r.team_name || '',
+          team_code: r.team_code || '',
+          raw_time: r.time_raw || '',
+          computed_position: r.position || null,
+          remarks: r.remarks || '',
+        }));
+        await db.lane_results.bulkPut(lanes);
+      }
+    }
+  }
+}
+
+/**
+ * Show event picker UI.
+ * @param {HTMLElement} container
+ * @param {function} onSelect - Called with eventRef when user picks an event
+ */
+export async function showEventPicker(container, onSelect) {
+  const events = await fetchEvents();
+
+  if (events.length === 0) {
+    container.innerHTML = `
+      <div style="text-align:center; padding:40px; color:var(--text-tertiary);">
+        <i class="material-icons" style="font-size:48px;">event_busy</i>
+        <p style="margin-top:12px;">No events available yet.</p>
+        <p style="font-size:13px;">Events appear here once the operator syncs from the local system.</p>
+      </div>
+    `;
+    return;
+  }
+
+  const currentRef = sessionStorage.getItem('rdms-web-event');
+
+  container.innerHTML = `
+    <div style="max-width:400px; margin:20px auto;">
+      <h4 style="font-size:16px; font-weight:600; margin-bottom:12px;">Select Event</h4>
+      ${events.map(e => {
+        const cfg = e.config || {};
+        const isActive = e.event_ref === currentRef;
+        const colour = cfg.event_colour || '#08394c';
+        return `
+          <div class="card" style="margin-bottom:8px; padding:12px 16px; cursor:pointer; ${isActive ? `border-color:${colour}; border-width:2px;` : ''}"
+               onclick="window._selectEvent('${e.event_ref}')">
+            <div style="display:flex; align-items:center; gap:10px;">
+              <span style="background:${colour}; color:#fff; padding:2px 8px; border-radius:var(--radius-full); font-size:11px; font-weight:600;">${e.event_ref}</span>
+              <strong style="font-size:14px;">${cfg.event_name || e.event_ref}</strong>
+              ${isActive ? '<span style="margin-left:auto; color:var(--success); font-size:12px;">Active</span>' : ''}
+            </div>
+            <div style="font-size:12px; color:var(--text-tertiary); margin-top:4px;">
+              ${cfg.event_date || ''} | ${cfg.total_races || '?'} races | Updated ${new Date(e.updated_at).toLocaleString()}
+            </div>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+
+  window._selectEvent = async (ref) => {
+    sessionStorage.setItem('rdms-web-event', ref);
+    showToast(`Loading ${ref}...`, 'info', 2000);
+    await loadEventConfig(ref);
+    if (onSelect) onSelect(ref);
+    delete window._selectEvent;
+  };
+}
+
+/**
+ * Get the Supabase client for web version.
+ */
+export function getWebSupabase() {
+  return supabaseClient;
+}
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = reject;
+    document.head.appendChild(s);
+  });
+}

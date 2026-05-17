@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#08394c">
+  <title>SDBA RDMS</title>
+
+  <!-- Inter Font -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600;700&display=swap" rel="stylesheet">
+
+  <!-- Material Icons -->
+  <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Outlined" rel="stylesheet">
+
+  <!-- App Styles -->
+  <link rel="stylesheet" href="./css/theme.css">
+  <link rel="stylesheet" href="./css/grid.css">
+  <link rel="stylesheet" href="./css/app.css">
+
+  <!-- PWA Manifest -->
+  <link rel="manifest" href="./manifest.json">
+</head>
+<body>
+  <!-- Top Navigation Bar -->
+  <nav class="navbar" id="navbar">
+    <div class="navbar-brand">
+      <span class="navbar-logo">SDBA</span>
+      <span class="navbar-title">RDMS</span>
+    </div>
+    <div class="navbar-links" id="navLinks">
+      <a href="#/dashboard" class="nav-link" data-page="dashboard">
+        <i class="material-icons">dashboard</i> Dashboard
+      </a>
+      <a href="#/race" class="nav-link" data-page="race">
+        <i class="material-icons">timer</i> Race
+      </a>
+      <a href="#/timesheet" class="nav-link" data-page="timesheet">
+        <i class="material-icons">schedule</i> TimeSheet
+      </a>
+      <a href="#/scoring" class="nav-link" data-page="scoring">
+        <i class="material-icons">emoji_events</i> Scoring
+      </a>
+      <a href="#/flowchart" class="nav-link" data-page="flowchart">
+        <i class="material-icons">account_tree</i> Flowchart
+      </a>
+      <a href="#/import" class="nav-link" data-page="import">
+        <i class="material-icons">upload_file</i> Import
+      </a>
+      <a href="#/setup" class="nav-link" data-page="setup">
+        <i class="material-icons">settings</i> Setup
+      </a>
+      <a href="#/admin" class="nav-link" data-page="admin">
+        <i class="material-icons">storage</i> DB
+      </a>
+    </div>
+    <div class="navbar-right">
+      <!-- Connect Event Folder (grants browser permission to read/write files) -->
+      <div class="navbar-folders" id="navFolders">
+        <button class="btn-icon" id="btnConnectSource" onclick="window._connectFolder('source')" title="Connect event folder (required for file read/write)">
+          <i class="material-icons" style="font-size:18px;">folder_open</i>
+        </button>
+        <span id="btnConnectLabel" style="font-size:10px; color:rgba(255,255,255,0.4); max-width:60px; line-height:1.2; text-align:center;">Connect Folder</span>
+      </div>
+      <span class="navbar-event" id="navEventName"></span>
+      <span class="navbar-clock" id="navClock"></span>
+      <button class="btn-icon" id="navLoginBtn" title="Sign in">
+        <i class="material-icons" style="font-size:18px;">login</i>
+      </button>
+      <button class="btn-icon" id="themeToggleBtn" onclick="window.toggleTheme()" title="Toggle theme">
+        <i class="material-icons" id="themeToggleIcon">dark_mode</i>
+      </button>
+    </div>
+  </nav>
+
+  <!-- Main Content Area -->
+  <main id="app">
+    <!-- Pages rendered here by router -->
+  </main>
+
+  <!-- Toast Container -->
+  <div id="toastContainer" class="toast-container"></div>
+
+  <!-- Theme Init (before main JS to prevent flash) -->
+  <script>
+    (function() {
+      var saved = localStorage.getItem('rdms-theme');
+      if (saved === 'dark') {
+        document.documentElement.setAttribute('data-theme', 'dark');
+      } else if (!saved && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+        document.documentElement.setAttribute('data-theme', 'dark');
+      }
+    })();
+
+    window.toggleTheme = function() {
+      var html = document.documentElement;
+      var current = html.getAttribute('data-theme');
+      var next = current === 'dark' ? 'light' : 'dark';
+      if (next === 'dark') {
+        html.setAttribute('data-theme', 'dark');
+      } else {
+        html.removeAttribute('data-theme');
+      }
+      localStorage.setItem('rdms-theme', next);
+      var icon = document.getElementById('themeToggleIcon');
+      if (icon) icon.textContent = next === 'dark' ? 'light_mode' : 'dark_mode';
+    };
+  </script>
+
+  <!-- Service Worker Registration -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('./sw.js').catch(() => {});
+    }
+  </script>
+
+  <!-- App Entry -->
+  <script type="module" src="./js/app.js"></script>
+</body>
+</html>

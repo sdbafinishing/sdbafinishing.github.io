@@ -1,0 +1,64 @@
+# Deploy RDMS to GitHub Pages
+# Triggers on push to main branch, builds with Vite, deploys to gh-pages
+name: Deploy RDMS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'rdms/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: rdms/package-lock.json
+
+      - name: Install dependencies
+        working-directory: rdms
+        run: npm ci
+
+      - name: Build
+        working-directory: rdms
+        run: npm run build
+
+      - name: Prepare deployment
+        run: |
+          # Copy existing static pages (digital flag) to deployment root
+          mkdir -p _deploy
+          cp -r home.html race-control.html starter.html finisher.html view-only.html Assets/ _deploy/ 2>/dev/null || true
+          cp favicon.ico README.md _deploy/ 2>/dev/null || true
+          # Copy RDMS build output
+          cp -r rdms/dist _deploy/rdms
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _deploy
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
