@@ -18,7 +18,7 @@
  *   Supabase URL + anon key stored in event config.
  *   If not configured, sync is silently disabled.
  */
-import { db, getConfig, getAllRaces, getLaneResults } from './db.js';
+import { db, getConfig, getAllRaces, getLaneResults, getTimesheet } from './db.js';
 import { timeToDisplay, isoToTime, showToast } from './utils.js';
 
 let supabaseClient = null;
@@ -66,9 +66,30 @@ async function buildRaceSnapshot(raceNumber) {
   if (!race) return null;
 
   const lanes = await getLaneResults(raceNumber);
+  const timesheet = await getTimesheet(raceNumber);
   const timeMode = config?.time_format_mode || 'mss00';
 
-  // Sort by position
+  // Full per-lane data so viewers can reproduce the input grid + by-lane
+  // output table exactly as the operator sees them. The map below intentionally
+  // mirrors the lane_results table shape.
+  const lane_results = lanes
+    .slice()
+    .sort((a, b) => a.lane_number - b.lane_number)
+    .map(l => ({
+      lane_number: l.lane_number,
+      lane_input: l.lane_input || '',
+      team_name: l.team_name || '',
+      team_code: l.team_code || '',
+      raw_time: l.raw_time || '',
+      computed_position: l.computed_position ?? null,
+      remarks: l.remarks || '',
+      penalty_time: l.penalty_time || null,
+      joyi_rank: l.joyi_rank ?? null,
+      effective_time_ms: l.effective_time_ms ?? null,
+    }));
+
+  // Legacy summarized results[] — kept for backward compat with any mobile
+  // clients reading the old shape. Web viewer uses lane_results instead.
   const results = lanes
     .filter(l => l.raw_time || l.remarks)
     .sort((a, b) => {
@@ -79,7 +100,7 @@ async function buildRaceSnapshot(raceNumber) {
     })
     .map(l => ({
       position: l.computed_position,
-      lane: l.lane_number,
+      lane: parseInt(l.lane_input, 10) || l.lane_number,
       team_name: l.team_name || '',
       team_code: l.team_code || '',
       time_display: timeToDisplay(l.raw_time, timeMode),
@@ -94,13 +115,22 @@ async function buildRaceSnapshot(raceNumber) {
       race_number: raceNumber,
       title: race.race_title || '',
       status: race.status,
-      start_time: race.start_time,
-      export_time: race.export_time,
-      send_time: race.send_time,
+      start_time: race.start_time || null,
+      restart_time: race.restart_time || null,
+      export_time: race.export_time || null,
+      send_time: race.send_time || null,
+      prev_send_time: race.prev_send_time || null,
+      p1_finish_time: race.p1_finish_time || null,
+      p1_finish_elapsed_ms: race.p1_finish_elapsed_ms ?? null,
       export_version: race.export_version || 0,
-      scoring_flag: race.scoring_flag,
-      division_id: race.division_id,
-      results,
+      export_history: race.export_history || [],
+      scoring_flag: race.scoring_flag || 'N',
+      division_id: race.division_id || null,
+      race_time: race.race_time || '',
+      next_race_signaled: !!race.next_race_signaled,
+      lane_results,        // full per-lane data — used by viewer hydration
+      results,             // legacy summary — kept for back-compat
+      timesheet: timesheet || null,
     },
     updated_at: new Date().toISOString(),
   };
@@ -114,6 +144,10 @@ async function buildEventSnapshot() {
   if (!config) return null;
 
   const races = await getAllRaces();
+  const divisions = await db.divisions.toArray();
+  const division_rounds = await db.division_rounds.toArray();
+  const division_progressions = await db.division_progressions.toArray();
+
   const total = races.length;
   const exported = races.filter(r => r.export_time).length;
   const sent = races.filter(r => r.send_time).length;
@@ -126,9 +160,16 @@ async function buildEventSnapshot() {
       event_date: config.race_date || '',
       event_colour: config.event_colour_code_hex || '#08394c',
       lane_count: config.lane_count || 6,
+      time_format_mode: config.time_format_mode || 'mss00',
+      scoring_enabled: !!config.scoring_enabled,
       total_races: total,
       exported_races: exported,
       sent_races: sent,
+      // Divisions + flowchart DAG — needed so viewer pages (dashboard
+      // swatches, scoring tabs, flowchart, timesheet) render fully.
+      divisions,
+      division_rounds,
+      division_progressions,
     },
     updated_at: new Date().toISOString(),
   };

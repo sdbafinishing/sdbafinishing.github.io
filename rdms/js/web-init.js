@@ -82,7 +82,9 @@ async function fetchEvents() {
 async function loadEventConfig(eventRef) {
   if (!supabaseClient) return;
 
-  // Load event config
+  const { db } = await import('./db.js');
+
+  // ────── event_config ──────
   const { data: eventData } = await supabaseClient
     .from('event_config')
     .select('*')
@@ -90,60 +92,116 @@ async function loadEventConfig(eventRef) {
     .single();
 
   if (eventData?.config) {
-    // Merge Supabase config into local IndexedDB
+    const cfg = eventData.config;
+
+    // Merge top-level config fields into the local singleton.
     const localConfig = await getConfig() || {};
     const merged = {
       ...localConfig,
-      ...eventData.config,
+      ...cfg,
       event_short_ref: eventRef,
-      // Inject web config keys (not stored in Supabase)
       supabase_url: WEB_CONFIG.supabase_url,
       supabase_anon_key: WEB_CONFIG.supabase_anon_key,
       google_client_id: WEB_CONFIG.google_client_id,
     };
+    // The nested arrays don't belong on the config singleton — they have
+    // their own tables. Strip before persisting.
+    delete merged.divisions;
+    delete merged.division_rounds;
+    delete merged.division_progressions;
     await saveConfig(merged);
+
+    // Hydrate divisions + flowchart DAG so viewer pages (dashboard
+    // swatches, scoring tabs, flowchart, timesheet) render fully.
+    if (Array.isArray(cfg.divisions)) {
+      await db.divisions.clear();
+      if (cfg.divisions.length > 0) await db.divisions.bulkPut(cfg.divisions);
+    }
+    if (Array.isArray(cfg.division_rounds)) {
+      await db.division_rounds.clear();
+      if (cfg.division_rounds.length > 0) await db.division_rounds.bulkPut(cfg.division_rounds);
+    }
+    if (Array.isArray(cfg.division_progressions)) {
+      await db.division_progressions.clear();
+      if (cfg.division_progressions.length > 0) await db.division_progressions.bulkPut(cfg.division_progressions);
+    }
   }
 
-  // Load race snapshots into local races + lane_results
+  // ────── race_snapshots ──────
   const { data: snapshots } = await supabaseClient
     .from('race_snapshots')
     .select('*')
     .eq('event_ref', eventRef)
     .order('race_number');
 
-  if (snapshots) {
-    const { db } = await import('./db.js');
-    // Sync race data from snapshots
-    const races = snapshots.map(s => ({
-      race_number: s.race_number,
-      race_title: s.snapshot?.title || '',
-      status: s.snapshot?.status || 'pending',
-      start_time: s.snapshot?.start_time || null,
-      export_time: s.snapshot?.export_time || null,
-      send_time: s.snapshot?.send_time || null,
-      export_version: s.snapshot?.export_version || 0,
-      scoring_flag: s.snapshot?.scoring_flag || 'N',
-      division_id: s.snapshot?.division_id || null,
-      teams_loaded: true,
-      joyi_imported: false,
-    }));
-    await db.races.bulkPut(races);
+  if (!snapshots) return;
 
-    // Sync lane results from snapshots
-    for (const s of snapshots) {
-      if (s.snapshot?.results) {
-        const lanes = s.snapshot.results.map((r, i) => ({
-          race_number: s.race_number,
-          lane_number: r.lane || (i + 1),
-          team_name: r.team_name || '',
-          team_code: r.team_code || '',
-          raw_time: r.time_raw || '',
-          computed_position: r.position || null,
-          remarks: r.remarks || '',
-        }));
-        await db.lane_results.bulkPut(lanes);
-      }
+  // Races — preserve everything the snapshot carries (restart_time,
+  // export_history, prev_send_time, p1_finish_*).
+  const races = snapshots.map(s => ({
+    race_number: s.race_number,
+    race_title: s.snapshot?.title || '',
+    race_time: s.snapshot?.race_time || '',
+    status: s.snapshot?.status || 'pending',
+    start_time: s.snapshot?.start_time || null,
+    restart_time: s.snapshot?.restart_time || null,
+    export_time: s.snapshot?.export_time || null,
+    send_time: s.snapshot?.send_time || null,
+    prev_send_time: s.snapshot?.prev_send_time || null,
+    p1_finish_time: s.snapshot?.p1_finish_time || null,
+    p1_finish_elapsed_ms: s.snapshot?.p1_finish_elapsed_ms ?? null,
+    export_version: s.snapshot?.export_version || 0,
+    export_history: s.snapshot?.export_history || [],
+    scoring_flag: s.snapshot?.scoring_flag || 'N',
+    division_id: s.snapshot?.division_id || null,
+    next_race_signaled: !!s.snapshot?.next_race_signaled,
+    teams_loaded: true,
+    joyi_imported: false,
+  }));
+  await db.races.bulkPut(races);
+
+  // Lane results — prefer the new full-shape lane_results. Fall back to
+  // the legacy summarized results[] for snapshots produced by older
+  // operator builds (where lane_input wasn't carried).
+  for (const s of snapshots) {
+    if (Array.isArray(s.snapshot?.lane_results) && s.snapshot.lane_results.length > 0) {
+      const lanes = s.snapshot.lane_results.map(l => ({
+        race_number: s.race_number,
+        lane_number: l.lane_number,
+        lane_input: l.lane_input || '',
+        team_name: l.team_name || '',
+        team_code: l.team_code || '',
+        raw_time: l.raw_time || '',
+        computed_position: l.computed_position ?? null,
+        remarks: l.remarks || '',
+        penalty_time: l.penalty_time ?? null,
+        joyi_rank: l.joyi_rank ?? null,
+        effective_time_ms: l.effective_time_ms ?? null,
+      }));
+      await db.lane_results.bulkPut(lanes);
+    } else if (Array.isArray(s.snapshot?.results)) {
+      const lanes = s.snapshot.results.map((r, i) => ({
+        race_number: s.race_number,
+        lane_number: r.lane || (i + 1),
+        // Best-effort lane_input recovery so the by-lane output table still
+        // resolves for legacy snapshots.
+        lane_input: r.lane ? String(r.lane) : '',
+        team_name: r.team_name || '',
+        team_code: r.team_code || '',
+        raw_time: r.time_raw || '',
+        computed_position: r.position || null,
+        remarks: r.remarks || '',
+      }));
+      await db.lane_results.bulkPut(lanes);
     }
+  }
+
+  // Timesheet — one row per race with timing log.
+  const timesheets = snapshots
+    .map(s => s.snapshot?.timesheet)
+    .filter(Boolean);
+  if (timesheets.length > 0) {
+    await db.timesheet.bulkPut(timesheets);
   }
 }
 

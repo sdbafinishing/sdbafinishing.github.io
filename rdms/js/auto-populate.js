@@ -293,5 +293,15 @@ export async function saveProposedDivisions(proposals) {
     saved++;
   }
 
+  // Push the new divisions / rounds / progressions to Supabase so viewers
+  // can render division swatches, scoring tabs, and the flowchart without
+  // waiting for a race-level event to trigger event_config sync.
+  if (saved > 0) {
+    try {
+      const { queueRaceSync } = await import('./sync.js');
+      await queueRaceSync(-1);
+    } catch { /* sync optional — never block the import path */ }
+  }
+
   return saved;
 }
