@@ -298,3 +298,70 @@ export function showToast(message, type = 'info', duration = 3000) {
     }, duration);
   }
 }
+
+// ──── CSV (UTF-8) ────
+
+/**
+ * Build a UTF-8 CSV blob from rows. Prepends a BOM (U+FEFF) so Excel opens
+ * the file with the right encoding without the operator having to choose a
+ * code page in the import dialog. Each cell is quoted iff it contains a
+ * comma, quote, or newline; embedded quotes are doubled per RFC 4180.
+ *
+ * @param {string[][]} rows - 2D array of cell values
+ * @returns {Blob} text/csv;charset=utf-8 blob with BOM
+ */
+export function rowsToCsvBlob(rows) {
+  const csv = rows.map(r => r.map(csvCell).join(',')).join('\r\n');
+  // U+FEFF as the first character is the Excel-friendly UTF-8 BOM. Without
+  // it Excel falls back to the OS code page (Big5 on HK / GB on CN) and
+  // mangles Chinese division names.
+  return new Blob(['﻿', csv], { type: 'text/csv;charset=utf-8' });
+}
+
+/**
+ * Quote a single CSV cell per RFC 4180. Numbers / booleans get String()'d;
+ * null/undefined → empty string.
+ */
+function csvCell(v) {
+  const s = v == null ? '' : String(v);
+  if (/[",\r\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+
+/**
+ * Parse a UTF-8 CSV file/Blob into rows. Reads via Blob.text() which always
+ * decodes as UTF-8, then drops a leading BOM if present. Supports quoted
+ * fields with embedded commas, quotes ("" → "), and newlines.
+ *
+ * @param {File|Blob|string} input - File/Blob or already-decoded string
+ * @returns {Promise<string[][]>}
+ */
+export async function csvToRows(input) {
+  const raw = typeof input === 'string' ? input : await input.text();
+  const text = raw.charCodeAt(0) === 0xFEFF ? raw.slice(1) : raw;
+
+  const rows = [];
+  let row = [];
+  let cell = '';
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { cell += '"'; i++; }
+        else inQuotes = false;
+      } else {
+        cell += c;
+      }
+      continue;
+    }
+    if (c === '"') { inQuotes = true; continue; }
+    if (c === ',') { row.push(cell); cell = ''; continue; }
+    if (c === '\r') { continue; }
+    if (c === '\n') { row.push(cell); cell = ''; rows.push(row); row = []; continue; }
+    cell += c;
+  }
+  // Flush last cell/row (handles files without a trailing newline).
+  if (cell !== '' || row.length > 0) { row.push(cell); rows.push(row); }
+  return rows;
+}

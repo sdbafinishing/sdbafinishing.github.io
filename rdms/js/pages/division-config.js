@@ -5,9 +5,11 @@
  */
 import { getAllDivisions, saveDivision, deleteDivision, getDivisionRounds, saveDivisionRound,
          getDivisionProgressions, saveDivisionProgression, db } from '../db.js';
-import { showToast } from '../utils.js';
+import { showToast, rowsToCsvBlob, csvToRows } from '../utils.js';
 import { broadcastChange } from '../app.js';
 import { autoPopulateDivisions, saveProposedDivisions } from '../auto-populate.js';
+import { runFlowchartAudit } from '../flowchart-audit.js';
+import { downloadFallback } from '../file-access.js';
 
 /**
  * Render the divisions tab content.
@@ -25,10 +27,21 @@ export async function renderDivisionsTab(container) {
         <button class="btn btn-outline" onclick="window._divAutoPopulate()">
           <i class="material-icons">auto_fix_high</i> Auto-Populate from Draws
         </button>
+        <button class="btn btn-outline" onclick="window._divCsvExport()" title="Download a CSV of all divisions — edit in Excel/Numbers, then re-import.">
+          <i class="material-icons">file_download</i> Export CSV
+        </button>
+        <label class="btn btn-outline" style="cursor:pointer;" title="Upload an edited CSV. Mandatory fields: division_name. Optional: div_main_name_en, div_main_name_tc, div_code_prefix, div_short_ref, colour_hex.">
+          <i class="material-icons">file_upload</i> Import CSV
+          <input type="file" id="divCsvInput" accept=".csv" style="display:none;">
+        </label>
         <button class="btn btn-primary" onclick="window._divAddNew()">
           <i class="material-icons">add</i> Add Division
         </button>
       </div>
+
+      <!-- Compact audit summary (full panel lives on the Flowchart page).
+           Updates whenever the tab re-renders. -->
+      <div id="divAuditSummary" style="margin-bottom:12px;"></div>
 
       <div id="divisionsList">
         ${divisions.length === 0
@@ -38,6 +51,14 @@ export async function renderDivisionsTab(container) {
       </div>
     </div>
   `;
+
+  // Run the audit once and surface a compact summary. Errors fail silently —
+  // the audit is informational, never block the Divisions tab from loading.
+  runFlowchartAudit().then(audit => {
+    const el = document.getElementById('divAuditSummary');
+    if (!el) return;
+    el.innerHTML = renderDivAuditSummary(audit);
+  }).catch(() => {});
 
   // Render each division card
   if (divisions.length > 0) {
@@ -74,6 +95,79 @@ export async function renderDivisionsTab(container) {
     showToast('Division deleted', 'info');
     renderDivisionsTab(container);
   };
+
+  // CSV template export — one row per existing division. When there are no
+  // divisions yet, emit a single example row so the operator has something
+  // to overwrite before re-importing. Round/progression structure is NOT
+  // part of the CSV (those need the full modal); CSV covers the flat
+  // identity fields only.
+  window._divCsvExport = async () => {
+    const all = await getAllDivisions();
+    const headers = ['division_name', 'div_main_name_en', 'div_main_name_tc', 'div_code_prefix', 'div_short_ref', 'colour_hex'];
+    const rows = all.length > 0
+      ? all.map(d => headers.map(h => d[h] || ''))
+      : [['Corp Mixed 200m', 'Corporate Mixed 200m', '公司男女子混合 200米', 'CM', 'CM2', '#3b82f6']];
+    const blob = rowsToCsvBlob([headers, ...rows]);
+    downloadFallback(`divisions_${new Date().toISOString().slice(0,10)}.csv`, blob);
+    showToast(`Exported ${all.length} division${all.length === 1 ? '' : 's'} as CSV`, 'success', 3000);
+  };
+
+  // CSV template import — additive (won't delete existing). Rows with an
+  // existing division_name are updated in place; new names create new rows.
+  // The required identity fields (rounds, progressions) come from the modal
+  // editor — CSV is for the basics only.
+  const divCsvInput = document.getElementById('divCsvInput');
+  if (divCsvInput) {
+    divCsvInput.addEventListener('change', async () => {
+      const file = divCsvInput.files[0];
+      divCsvInput.value = '';
+      if (!file) return;
+      try {
+        const rows = await csvToRows(file);
+        if (rows.length < 2) {
+          showToast('CSV has no data rows', 'warning');
+          return;
+        }
+        const header = rows[0].map(h => String(h).trim());
+        const nameIdx = header.indexOf('division_name');
+        if (nameIdx < 0) {
+          showToast('CSV missing required column "division_name"', 'error', 5000);
+          return;
+        }
+
+        const existing = await getAllDivisions();
+        const byName = new Map(existing.map(d => [d.division_name, d]));
+        let updated = 0, added = 0, skipped = 0;
+
+        for (let i = 1; i < rows.length; i++) {
+          const r = rows[i];
+          // Build a header→value map for this row so we accept reordered CSVs.
+          const obj = {};
+          header.forEach((h, j) => { obj[h] = (r[j] ?? '').toString().trim(); });
+          const name = obj.division_name;
+          if (!name) { skipped++; continue; }
+
+          const target = byName.get(name) || {};
+          target.division_name = name;
+          if (obj.div_main_name_en != null) target.div_main_name_en = obj.div_main_name_en;
+          if (obj.div_main_name_tc != null) target.div_main_name_tc = obj.div_main_name_tc;
+          if (obj.div_code_prefix != null) target.div_code_prefix = obj.div_code_prefix;
+          if (obj.div_short_ref != null) target.div_short_ref = obj.div_short_ref;
+          if (obj.colour_hex && /^#[0-9A-Fa-f]{6}$/.test(obj.colour_hex)) target.colour_hex = obj.colour_hex;
+
+          await saveDivision(target);
+          if (target.id != null) updated++; else added++;
+        }
+
+        broadcastChange('config-updated');
+        showToast(`CSV import: ${added} added, ${updated} updated${skipped ? `, ${skipped} skipped (no name)` : ''}`, 'success', 5000);
+        renderDivisionsTab(container);
+      } catch (err) {
+        showToast(`CSV import failed: ${err.message}`, 'error', 6000);
+        console.error(err);
+      }
+    });
+  }
 }
 
 function renderDivisionCard(div, rounds, progs) {
@@ -154,8 +248,26 @@ async function showDivisionModal(editId) {
 
       <!-- Basic Info -->
       <div class="form-group">
-        <label class="form-label">Division Name</label>
+        <label class="form-label">Division Name <span style="color:var(--danger); font-weight:400;">*</span></label>
         <input class="form-input" id="divName" type="text" placeholder="e.g. Corp Mixed 200m" value="${div.division_name || ''}">
+        <small style="color:var(--text-tertiary); font-size:11px;">Short label used everywhere in the UI. Required.</small>
+      </div>
+
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+        <div class="form-group">
+          <label class="form-label">Division Name (English long)</label>
+          <input class="form-input" id="divMainNameEn" type="text"
+                 placeholder="e.g. Corporate Mixed 200m"
+                 value="${div.div_main_name_en || ''}">
+          <small style="color:var(--text-tertiary); font-size:11px;">Optional. Used in photo-finish exports.</small>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Division Name (中文)</label>
+          <input class="form-input" id="divMainNameTc" type="text"
+                 placeholder="e.g. 公司男女子混合 200米"
+                 value="${div.div_main_name_tc || ''}">
+          <small style="color:var(--text-tertiary); font-size:11px;">Optional Traditional Chinese long name.</small>
+        </div>
       </div>
 
       <div style="display:grid; grid-template-columns:1fr 1fr auto; gap:12px;">
@@ -262,6 +374,8 @@ async function showDivisionModal(editId) {
     // Save division
     const divData = {
       division_name: name,
+      div_main_name_en: document.getElementById('divMainNameEn').value.trim(),
+      div_main_name_tc: document.getElementById('divMainNameTc').value.trim(),
       div_code_prefix: document.getElementById('divCodePrefix').value.trim(),
       div_short_ref: document.getElementById('divShortRef').value.trim(),
       colour_hex: document.getElementById('divColourHex').value.trim() || '#3b82f6',
@@ -373,4 +487,40 @@ export function cleanupDivisionHandlers() {
   delete window._divRemoveRound;
   delete window._divRemoveProg;
   delete window._divAutoPopulate;
+}
+
+/**
+ * Compact audit pill rendered above the divisions list. Clicks through to
+ * the Flowchart page where the full audit panel lives — we deliberately
+ * don't duplicate the long finding list here to keep the Divisions tab
+ * scannable.
+ */
+function renderDivAuditSummary(audit) {
+  const c = audit.conflicts?.length || 0;
+  const m = audit.missing?.length || 0;
+  if (c === 0 && m === 0) {
+    return `
+      <div style="font-size:12px; color:var(--success); display:flex; align-items:center; gap:6px;">
+        <i class="material-icons" style="font-size:16px;">check_circle</i>
+        Audit clean — ${audit.stats.divisions} divisions, ${audit.stats.rounds} rounds,
+        ${audit.stats.progressions} progressions.
+      </div>`;
+  }
+  const colour = c > 0 ? 'var(--danger)' : 'var(--warning)';
+  const icon   = c > 0 ? 'error' : 'warning';
+  return `
+    <a href="#/flowchart" style="text-decoration:none;">
+      <div style="display:flex; align-items:center; gap:8px; padding:8px 12px;
+                  border:1px solid ${colour}; border-radius:var(--radius-sm);
+                  background:var(--bg-elev); font-size:12px;">
+        <i class="material-icons" style="font-size:16px; color:${colour};">${icon}</i>
+        <span style="color:var(--text-primary);">
+          ${c > 0 ? `<strong style="color:${colour};">${c} conflict${c === 1 ? '' : 's'}</strong>` : ''}
+          ${c > 0 && m > 0 ? ' · ' : ''}
+          ${m > 0 ? `<strong style="color:var(--warning);">${m} missing</strong>` : ''}
+          detected — open the Flowchart page for details and fixes.
+        </span>
+        <i class="material-icons" style="font-size:16px; color:var(--text-tertiary); margin-left:auto;">arrow_forward</i>
+      </div>
+    </a>`;
 }

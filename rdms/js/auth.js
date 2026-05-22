@@ -4,17 +4,51 @@
  * Local (localhost / 127.0.0.1): always admin, no login required.
  * Web (GitHub Pages / any other host): Supabase Auth, role from user metadata.
  *
- * User roles stored in Supabase `rdms_users` table:
- *   { id, email, role, display_name, created_at, updated_at }
+ * Username scheme: Supabase Auth requires an email, so each user's Auth
+ * record uses `username@sdba.local`. The login form accepts username only;
+ * we append the suffix before calling signInWithPassword. The domain is
+ * never used for email delivery (no SMTP), so non-routable is fine.
  *
- * On login: look up user's role from rdms_users table.
- * If user exists in Supabase Auth but not in rdms_users → viewer (default).
+ * User profile stored in Supabase `rdms_users` table:
+ *   { id, email, username, role, display_name, default_mode,
+ *     created_at, updated_at }
+ *
+ * On login: look up user's profile from rdms_users by email.
+ *   - role     → drives RBAC
+ *   - default_mode → which RDMS page the user lands on after login
+ *                    ('dashboard', 'race', 'finish', 'starter', 'race-control',
+ *                     'timesheet', 'scoring', etc.)
+ * If user exists in Auth but not in rdms_users → viewer (default), dashboard.
  */
 import { setRole, getRole } from './rbac.js';
 import { showToast } from './utils.js';
 
+// Synthetic email suffix used to satisfy Supabase Auth's email requirement
+// while keeping the user-facing identifier a plain username. Don't change
+// this without coordinating an email rewrite in the rdms_users table.
+const USERNAME_SUFFIX = '@sdba.local';
+
 let supabaseAuth = null;
 let currentUser = null;
+let currentDefaultMode = null;
+
+function toEmail(usernameOrEmail) {
+  const v = (usernameOrEmail || '').trim();
+  if (!v) return '';
+  return v.includes('@') ? v : `${v}${USERNAME_SUFFIX}`;
+}
+
+export function emailToUsername(email) {
+  const v = (email || '').trim();
+  if (!v) return '';
+  return v.endsWith(USERNAME_SUFFIX)
+    ? v.slice(0, -USERNAME_SUFFIX.length)
+    : v;
+}
+
+export function getDefaultMode() {
+  return currentDefaultMode;
+}
 
 /**
  * Check if running locally (no auth needed).
@@ -55,14 +89,17 @@ export async function initAuth(supabaseClient) {
 }
 
 /**
- * Login with email + password.
+ * Login with username (or legacy email) + password.
+ * Plain usernames are mapped to <username>@sdba.local before being passed
+ * to Supabase. Inputs containing `@` are treated as legacy emails.
  */
-export async function login(email, password) {
+export async function login(usernameOrEmail, password) {
   if (!supabaseAuth) {
     showToast('Supabase not configured', 'error');
     return null;
   }
 
+  const email = toEmail(usernameOrEmail);
   const { data, error } = await supabaseAuth.auth.signInWithPassword({ email, password });
   if (error) {
     showToast(`Login failed: ${error.message}`, 'error');
@@ -85,29 +122,36 @@ export async function logout() {
 }
 
 /**
- * Resolve user's role from rdms_users table.
+ * Resolve user's role + default landing mode from rdms_users table.
+ *
+ * default_mode is whichever RDMS route the user prefers to start on:
+ *   'dashboard' | 'race' | 'finish' | 'starter' | 'race-control'
+ *   | 'timesheet' | 'scoring' | …
+ * Falls back to 'finish' for admins (race-day default) and 'dashboard' for
+ * everyone else when no value is configured.
  */
 async function resolveUser(authUser) {
   currentUser = authUser;
 
-  // Look up role in rdms_users table
-  let role = 'viewer'; // default
+  let role = 'viewer';
+  let defaultMode = null;
   try {
     const { data } = await supabaseAuth
       .from('rdms_users')
-      .select('role, display_name')
+      .select('role, display_name, default_mode')
       .eq('email', authUser.email)
       .single();
-
-    if (data?.role) {
-      role = data.role;
-    }
+    if (data?.role) role = data.role;
+    if (data?.default_mode) defaultMode = data.default_mode;
   } catch {
-    // Table might not exist yet or user not in it
+    // Table missing or user not in rdms_users — fall through to defaults.
   }
 
+  if (!defaultMode) defaultMode = role === 'admin' ? 'finish' : 'dashboard';
+  currentDefaultMode = defaultMode;
+
   setRole(role);
-  return { authenticated: true, user: authUser, role };
+  return { authenticated: true, user: authUser, role, defaultMode };
 }
 
 /**
@@ -134,7 +178,8 @@ export function renderLoginPage(container, onSuccess) {
           Race Day Management System — Sign in to continue
         </p>
         <div class="form-group">
-          <input class="form-input" id="loginEmail" type="email" placeholder="Email" autocomplete="email">
+          <input class="form-input" id="loginEmail" type="text" placeholder="Username"
+                 autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false">
         </div>
         <div class="form-group">
           <input class="form-input" id="loginPassword" type="password" placeholder="Password" autocomplete="current-password">
@@ -158,13 +203,13 @@ export function renderLoginPage(container, onSuccess) {
   });
 
   window._doLogin = async () => {
-    const email = document.getElementById('loginEmail').value.trim();
+    const usernameInput = document.getElementById('loginEmail').value.trim();
     const password = document.getElementById('loginPassword').value;
     const errEl = document.getElementById('loginError');
     const btn = document.getElementById('loginBtn');
 
-    if (!email || !password) {
-      errEl.textContent = 'Enter email and password';
+    if (!usernameInput || !password) {
+      errEl.textContent = 'Enter username and password';
       errEl.style.display = 'block';
       return;
     }
@@ -173,7 +218,7 @@ export function renderLoginPage(container, onSuccess) {
     btn.textContent = 'Signing in...';
     errEl.style.display = 'none';
 
-    const result = await login(email, password);
+    const result = await login(usernameInput, password);
     btn.disabled = false;
     btn.textContent = 'Sign In';
 
@@ -181,7 +226,7 @@ export function renderLoginPage(container, onSuccess) {
       showToast(`Signed in as ${result.role}`, 'success');
       if (onSuccess) onSuccess(result);
     } else {
-      errEl.textContent = 'Invalid email or password';
+      errEl.textContent = 'Invalid username or password';
       errEl.style.display = 'block';
     }
   };

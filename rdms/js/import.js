@@ -118,7 +118,19 @@ export async function importDrawToDb(parsed) {
 
   race.race_title = parsed.sanitisedTitle;
   race.race_time = parsed.raceTime;
-  race.teams_loaded = parsed.lanes.some(l => l.team_name && !l.team_name.match(/^R\d+P\d+$/i));
+  // A draw is "loaded" once at least one lane has a real team. A real team
+  // is any non-empty team_name that ISN'T an R{n}P{n} placeholder. Note:
+  // some templates park the placeholder in team_code (column C) with
+  // team_name blank — those rows shouldn't count as loaded either.
+  race.teams_loaded = parsed.lanes.some(l => {
+    const name = (l.team_name || '').trim();
+    const code = (l.team_code || '').trim();
+    if (!name && !code) return false;
+    if (name && !/^R\d+P\d+$/i.test(name)) return true;
+    // team_name empty but team_code set → real team only if code isn't a placeholder
+    if (!name && code && !/^R\d+P\d+$/i.test(code)) return true;
+    return false;
+  });
   await saveRace(race);
 
   // Build lane results (preserve existing times if any)
@@ -130,7 +142,14 @@ export async function importDrawToDb(parsed) {
       lane_number: i + 1,
       team_name: drawLane?.team_name || '',
       team_code: drawLane?.team_code || '',
-      designation: drawLane?.team_name?.match(/^R\d+P\d+$/i) ? drawLane.team_name : '',
+      // The placeholder may live in either column — remember the raw
+      // designation so audit + downstream code can identify the slot
+      // regardless of which template variant was imported.
+      designation: (drawLane?.team_name && /^R\d+P\d+$/i.test(drawLane.team_name))
+        ? drawLane.team_name
+        : (drawLane?.team_code && /^R\d+P\d+$/i.test(drawLane.team_code))
+            ? drawLane.team_code
+            : '',
       // Preserve existing result fields (don't overwrite)
       raw_time: '',
       penalty_time: '',
@@ -226,12 +245,22 @@ export async function parseJydFile(file) {
   const config = await getConfig();
   const timeMode = config?.time_format_mode || 'mss00';
 
-  // Parse all Players.
+  // Parse all Players. Three time fields in the JYD:
+  //   RealScore  — raw bow-crossing time the camera measured (ms)
+  //   FirstScore — same as RealScore in observed samples (preserved for
+  //                forward-compat; might diverge if Joyi later adds a
+  //                separate first-touch field)
+  //   Score      — official finish time = RealScore + TimeDelta correction
+  // The OFFICIAL displayed time is Score; the photo-finish overlay anchor and
+  // the operator-facing imports should both use it. RealScore is kept for the
+  // viewer's optional raw-camera-time comparison.
   const players = [...doc.querySelectorAll('Players > Player')].map(p => {
     const t = (sel) => p.querySelector(sel)?.textContent || '';
     return {
       lane: parseInt(t('Lane'), 10),
       rank: parseInt(t('Rank'), 10),
+      scoreMs: parseInt(t('Score'), 10),
+      firstScoreMs: parseInt(t('FirstScore'), 10),
       realScoreMs: parseInt(t('RealScore'), 10),
       name: t('Name').trim(),
       code: t('No').trim(),
@@ -247,7 +276,10 @@ export async function parseJydFile(file) {
   });
 
   const results = players.map(p => {
-    const raw = Number.isFinite(p.realScoreMs) ? msToTime(p.realScoreMs, timeMode) : '';
+    // Prefer Score (official, with TimeDelta correction). Fall back to
+    // RealScore for older .jyd files that might not carry Score.
+    const officialMs = Number.isFinite(p.scoreMs) ? p.scoreMs : p.realScoreMs;
+    const raw = Number.isFinite(officialMs) ? msToTime(officialMs, timeMode) : '';
     return {
       joyi_lane: p.lane,
       joyi_rank: Number.isFinite(p.rank) ? p.rank : null,
@@ -294,6 +326,113 @@ export async function parseJoyiAnyFile(file) {
   const lower = (file.name || '').toLowerCase();
   if (lower.endsWith('.jyd')) return parseJydFile(file);
   return parseJoyiFile(file);
+}
+
+/**
+ * Persist a Joyi-derived start time onto a race record. Also flips the
+ * race status to "started" when it was previously "pending" — the Joyi
+ * import is unambiguous evidence that the race has run, regardless of
+ * whether the operator remembered to click START in RDMS.
+ *
+ * Idempotent: skipped when joyi_start_time is already set to the same
+ * value (lets callers fire this from multiple paths without worrying
+ * about duplicate writes).
+ *
+ * Overwrite protection: once joyi_start_time is set, this function will
+ * NOT overwrite it with a different value. This prevents accidental
+ * clobbering when the operator re-opens an archive, copies files between
+ * folders (which may re-stamp .lcd mtime), or re-runs auto-import on a
+ * stale tree. To re-derive intentionally, clear joyi_start_time first
+ * via "Reset start" or "Reset race" on the race page (both set it to
+ * null) — the next import will then populate.
+ *
+ * @param {number} raceNumber
+ * @param {string} isoTime
+ * @returns {Promise<boolean>} true if anything changed
+ */
+export async function setJoyiStartTimeOnRace(raceNumber, isoTime) {
+  if (!raceNumber || !isoTime) return false;
+  const race = await getRace(raceNumber);
+  if (!race) return false;
+  let changed = false;
+  if (race.joyi_start_time && race.joyi_start_time !== isoTime) {
+    // Already set with a different value — preserve. The operator must
+    // explicitly clear via Reset start / Reset race to re-derive.
+    // Status may still need promotion if it's lagging behind.
+    if (race.status === 'pending' || !race.status) {
+      race.status = 'started';
+      await saveRace(race);
+      return true;
+    }
+    return false;
+  }
+  if (race.joyi_start_time !== isoTime) {
+    race.joyi_start_time = isoTime;
+    changed = true;
+  }
+  // Auto-promote pending → started when we have any evidence of a start.
+  if (race.status === 'pending' || !race.status) {
+    race.status = 'started';
+    changed = true;
+  }
+  if (changed) await saveRace(race);
+  return changed;
+}
+
+/**
+ * Derive the wall-clock race start time from a Joyi `.lcd` file. Reads only
+ * the header + the last scanline's 4-byte timestamp via `file.slice()` —
+ * no need to load the multi-hundred-MB image into memory just to compute
+ * a start time.
+ *
+ * Formula validated across four samples (races 27, 29 + TestRace2,
+ * TestRace3): the camera's per-scanline µs clock runs from 0 at race-start;
+ * the file's `lastModified` is when Joyi closed the file (capture-stop /
+ * Save click — both work because the camera streams until close). So:
+ *
+ *   raceStart_PC = lcd.lastModified − lastScanlineTs_us / 1000
+ *
+ * Returns `null` when the file is empty-header (no scanlines yet — race
+ * was aborted before capture) or when the inferred start is implausibly
+ * far from the file's mtime day (file mtime was likely stomped by a copy
+ * step that broke precision).
+ *
+ * @param {File} lcdFile - the .lcd File object
+ * @returns {Promise<string|null>} ISO timestamp or null
+ */
+export async function deriveJoyiStartTime(lcdFile) {
+  if (!lcdFile || lcdFile.size < 24 + 2168) return null; // header only
+
+  // Read the 24-byte LCD header and pull storage_cols + header_bytes.
+  const headBuf = await lcdFile.slice(0, 24).arrayBuffer();
+  const headView = new DataView(headBuf);
+  // Magic check — bail if this isn't a JLIF file.
+  const magic = String.fromCharCode(headView.getUint8(0), headView.getUint8(1), headView.getUint8(2), headView.getUint8(3));
+  if (magic !== 'JLIF') return null;
+  const storageCols = headView.getUint32(12, true);
+  const headerBytes = headView.getUint32(20, true);
+  if (!storageCols || !headerBytes) return null;
+
+  // Derive how many scanlines were actually written, then read the last
+  // scanline's u32 LE timestamp (first 4 bytes of its 8-byte preamble).
+  const dataBytes = lcdFile.size - headerBytes;
+  const storageRows = Math.floor(dataBytes / storageCols);
+  if (storageRows < 2) return null;
+  const lastOffset = headerBytes + (storageRows - 1) * storageCols;
+  const lastBuf = await lcdFile.slice(lastOffset, lastOffset + 4).arrayBuffer();
+  const lastTsUs = new DataView(lastBuf).getUint32(0, true);
+  if (!lastTsUs) return null;
+
+  const mtimeMs = lcdFile.lastModified;
+  if (!Number.isFinite(mtimeMs) || mtimeMs <= 0) return null;
+  const predictedMs = mtimeMs - Math.round(lastTsUs / 1000);
+
+  // Sanity: predicted start must be within 24 h of mtime (otherwise file
+  // mtime was likely re-stamped during a copy and the derivation is
+  // garbage).
+  if (Math.abs(mtimeMs - predictedMs) > 86_400_000) return null;
+
+  return new Date(predictedMs).toISOString();
 }
 
 export async function parseJoyiFile(file) {

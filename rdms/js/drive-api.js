@@ -178,7 +178,9 @@ export async function listDriveFiles(subfolderPath) {
   if (!folderId) return [];
 
   const query = `'${folderId}' in parents and trashed=false`;
-  const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=files(id,name,mimeType,modifiedTime)&orderBy=name`;
+  // `size` is needed by the Joyi LCD start-time derivation to compute the
+  // last-scanline byte offset without downloading the full image.
+  const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=files(id,name,mimeType,modifiedTime,size)&orderBy=name`;
 
   const resp = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
   if (!resp.ok) return [];
@@ -196,6 +198,33 @@ export async function readDriveFile(fileId) {
   const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
   const resp = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
   if (!resp.ok) throw new Error(`Failed to read file: ${resp.statusText}`);
+  return resp.arrayBuffer();
+}
+
+/**
+ * Read a byte range from a Drive file using an HTTP Range header.
+ * Used by the Joyi LCD start-time derivation to fetch only the 24-byte
+ * header + 4 bytes at the last-scanline offset — ~30 bytes total instead
+ * of downloading the full 100-300 MB image.
+ *
+ * @param {string} fileId
+ * @param {number} start - inclusive byte offset
+ * @param {number} end   - inclusive byte offset (per Range header convention)
+ * @returns {Promise<ArrayBuffer>}
+ */
+export async function readDriveFileRange(fileId, start, end) {
+  const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+  const resp = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Range: `bytes=${start}-${end}`,
+    },
+  });
+  // 206 Partial Content is the success case; 200 indicates the server
+  // ignored Range and sent the whole thing — still usable.
+  if (resp.status !== 206 && resp.status !== 200) {
+    throw new Error(`Range read failed (${resp.status}): ${resp.statusText}`);
+  }
   return resp.arrayBuffer();
 }
 

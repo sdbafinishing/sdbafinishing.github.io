@@ -5,7 +5,26 @@
  */
 import { showToast } from '../utils.js';
 import { getRole, hasPermission } from '../rbac.js';
-import { isLocal } from '../auth.js';
+import { isLocal, emailToUsername } from '../auth.js';
+
+// Pages a user can default-land on after login. Kept in sync with the
+// page registry in app.js + signal modes available in signal-panel.js.
+// 'finish' / 'starter' / 'race-control' route to the standalone Firebase
+// signal panels embedded on the dashboard (see signal-panel.js modes).
+const DEFAULT_MODES = [
+  { value: 'dashboard',    label: 'Dashboard (general)' },
+  { value: 'race',         label: 'Race (input/scoring)' },
+  { value: 'finish',       label: 'Finish station' },
+  { value: 'starter',      label: 'Starter station' },
+  { value: 'race-control', label: 'Race Control station' },
+  { value: 'timesheet',    label: 'TimeSheet' },
+  { value: 'scoring',      label: 'Scoring' },
+];
+
+// Mirror of USERNAME_SUFFIX from auth.js — kept duplicated here only because
+// this module needs to build the synthetic email on user-add (auth.js doesn't
+// export this constant since callers shouldn't hand-assemble emails normally).
+const USERNAME_SUFFIX = '@sdba.local';
 
 let supabaseRef = null;
 
@@ -109,30 +128,37 @@ async function renderUserList(container) {
       <table class="race-table">
         <thead>
           <tr>
-            <th>Email</th>
+            <th>Username</th>
             <th>Display Name</th>
             <th>Role</th>
+            <th>Default Mode</th>
             <th>Created</th>
             <th>Actions</th>
           </tr>
         </thead>
         <tbody>
-          ${(users || []).map(u => `
+          ${(users || []).map(u => {
+            const username = u.username || emailToUsername(u.email) || u.email;
+            const mode = u.default_mode || (u.role === 'admin' ? 'finish' : 'dashboard');
+            return `
             <tr>
-              <td>${u.email}</td>
+              <td>${username}</td>
               <td>${u.display_name || '—'}</td>
               <td>
                 <span class="badge ${u.role === 'admin' ? 'badge-sent' : u.role === 'editor' ? 'badge-started' : 'badge-pending'}">
                   ${u.role}
                 </span>
               </td>
+              <td style="font-size:12px;">${mode}</td>
               <td style="font-size:12px; color:var(--text-tertiary);">${u.created_at ? new Date(u.created_at).toLocaleDateString() : '—'}</td>
               <td>
-                <button class="btn btn-ghost" style="padding:2px 8px; font-size:12px;" onclick="window._userEdit('${u.id}', '${u.email}', '${u.role}', '${(u.display_name || '').replace(/'/g, "\\'")}')">Edit</button>
-                <button class="btn btn-ghost" style="padding:2px 8px; font-size:12px; color:var(--danger);" onclick="window._userDelete('${u.id}', '${u.email}')">Delete</button>
+                <button class="btn btn-ghost" style="padding:2px 8px; font-size:12px;"
+                        onclick='window._userEdit(${JSON.stringify({ id: u.id, email: u.email, username, role: u.role, display_name: u.display_name || "", default_mode: mode }).replace(/'/g, "&apos;")})'>Edit</button>
+                <button class="btn btn-ghost" style="padding:2px 8px; font-size:12px; color:var(--danger);"
+                        onclick="window._userDelete('${u.id}', '${username}')">Delete</button>
               </td>
-            </tr>
-          `).join('') || '<tr><td colspan="5" style="text-align:center; color:var(--text-tertiary); padding:20px;">No users. Click "Add User" to create one.</td></tr>'}
+            </tr>`;
+          }).join('') || '<tr><td colspan="6" style="text-align:center; color:var(--text-tertiary); padding:20px;">No users. Click "Add User" to create one.</td></tr>'}
         </tbody>
       </table>
     </div>
@@ -144,35 +170,55 @@ async function renderUserList(container) {
   `;
 
   window._userAdd = () => showUserModal(null, container);
-  window._userEdit = (id, email, role, name) => showUserModal({ id, email, role, display_name: name }, container);
-  window._userDelete = async (id, email) => {
-    if (!confirm(`Remove ${email} from RDMS users? (This does NOT delete their Supabase Auth account.)`)) return;
+  // _userEdit now takes a full record so we don't have to encode every
+  // field positionally in the HTML attribute (which broke when display
+  // names contained quotes).
+  window._userEdit = (record) => showUserModal(record, container);
+  window._userDelete = async (id, username) => {
+    if (!confirm(`Remove ${username} from RDMS users? (This does NOT delete their Supabase Auth account.)`)) return;
     await supabaseRef.from('rdms_users').delete().eq('id', id);
-    showToast(`User ${email} removed`, 'info');
+    showToast(`User ${username} removed`, 'info');
     await renderUserList(container);
   };
 }
 
 function showUserModal(existingUser, listContainer) {
   const isNew = !existingUser;
-  const u = existingUser || { email: '', role: 'viewer', display_name: '' };
+  const u = existingUser || {
+    email: '', username: '', role: 'viewer', display_name: '', default_mode: '',
+  };
+
+  const modeOptions = DEFAULT_MODES
+    .map(m => `<option value="${m.value}" ${u.default_mode === m.value ? 'selected' : ''}>${m.label}</option>`)
+    .join('');
 
   const modal = document.createElement('div');
   modal.id = 'userModal';
   modal.style.cssText = 'position:fixed; inset:0; background:var(--bg-overlay); z-index:9998; display:flex; align-items:center; justify-content:center;';
   modal.innerHTML = `
-    <div style="background:var(--bg-card); border-radius:var(--radius-lg); padding:24px; max-width:400px; width:90%; box-shadow:var(--shadow-lg);">
+    <div style="background:var(--bg-card); border-radius:var(--radius-lg); padding:24px; max-width:420px; width:90%; box-shadow:var(--shadow-lg);">
       <h5 style="font-size:16px; font-weight:600; margin-bottom:16px;">${isNew ? 'Add' : 'Edit'} User</h5>
 
       <div class="form-group">
-        <label class="form-label">Email</label>
-        <input class="form-input" id="userEmail" type="email" value="${u.email}" ${!isNew ? 'disabled style="opacity:0.6;"' : ''} placeholder="user@example.com">
-        ${isNew ? '<small style="color:var(--text-tertiary); font-size:11px;">Must match an existing Supabase Auth account</small>' : ''}
+        <label class="form-label">Username</label>
+        <input class="form-input" id="userUsername" type="text"
+               value="${u.username || ''}"
+               ${!isNew ? 'disabled style="opacity:0.6;"' : ''}
+               autocapitalize="none" autocorrect="off" spellcheck="false"
+               placeholder="e.g. john">
+        ${isNew
+          ? `<small style="color:var(--text-tertiary); font-size:11px;">
+              Stored in Supabase Auth as <code>&lt;username&gt;${USERNAME_SUFFIX}</code>.
+              You must also create the matching account in
+              <a href="${supabaseRef?.supabaseUrl || '#'}/auth/users" target="_blank" style="color:var(--accent);">Supabase Auth</a>
+              with that exact email and the user's initial password.
+            </small>`
+          : ''}
       </div>
 
       <div class="form-group">
         <label class="form-label">Display Name</label>
-        <input class="form-input" id="userName" type="text" value="${u.display_name || ''}" placeholder="e.g. John">
+        <input class="form-input" id="userName" type="text" value="${(u.display_name || '').replace(/"/g, '&quot;')}" placeholder="e.g. John">
       </div>
 
       <div class="form-group">
@@ -182,6 +228,18 @@ function showUserModal(existingUser, listContainer) {
           <option value="editor" ${u.role === 'editor' ? 'selected' : ''}>Editor — import, export, results input</option>
           <option value="viewer" ${u.role === 'viewer' ? 'selected' : ''}>Viewer — read-only</option>
         </select>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Default Mode (landing page)</label>
+        <select class="form-select" id="userDefaultMode">
+          <option value="">— Auto (admin→finish, others→dashboard)</option>
+          ${modeOptions}
+        </select>
+        <small style="color:var(--text-tertiary); font-size:11px;">
+          Which RDMS page this user lands on after login. Editors/viewers will be
+          bounced back to dashboard if the chosen page isn't permitted for their role.
+        </small>
       </div>
 
       <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:20px;">
@@ -194,16 +252,24 @@ function showUserModal(existingUser, listContainer) {
   document.body.appendChild(modal);
 
   modal.querySelector('#userSaveBtn').addEventListener('click', async () => {
-    const email = document.getElementById('userEmail').value.trim();
+    const username = document.getElementById('userUsername').value.trim().toLowerCase();
     const displayName = document.getElementById('userName').value.trim();
     const role = document.getElementById('userRole').value;
+    const defaultMode = document.getElementById('userDefaultMode').value || null;
 
-    if (!email) { showToast('Email is required', 'error'); return; }
+    if (!username) { showToast('Username is required', 'error'); return; }
+    if (!/^[a-z0-9._-]+$/i.test(username)) {
+      showToast('Username may only contain letters, digits, dot, dash, underscore.', 'error', 4500);
+      return;
+    }
 
+    const email = isNew ? `${username}${USERNAME_SUFFIX}` : u.email;
     const record = {
       email,
+      username,
       role,
       display_name: displayName,
+      default_mode: defaultMode,
       updated_at: new Date().toISOString(),
     };
 
@@ -217,7 +283,7 @@ function showUserModal(existingUser, listContainer) {
     }
 
     modal.remove();
-    showToast(`User ${email} ${isNew ? 'added' : 'updated'} as ${role}`, 'success');
+    showToast(`User ${username} ${isNew ? 'added' : 'updated'} as ${role}`, 'success');
     await renderUserList(listContainer);
   });
 }

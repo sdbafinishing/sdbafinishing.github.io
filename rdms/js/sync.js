@@ -161,10 +161,26 @@ async function buildEventSnapshot() {
       event_colour: config.event_colour_code_hex || '#08394c',
       lane_count: config.lane_count || 6,
       time_format_mode: config.time_format_mode || 'mss00',
-      scoring_enabled: !!config.scoring_enabled,
+      // Renamed: new semantics gate the scoring EXPORT, not calculation.
+      // Fall back to legacy scoring_enabled for configs synced before rename.
+      scoring_exported: !!(config.scoring_exported ?? config.scoring_enabled),
+      next_round_draw_enabled: !!config.next_round_draw_enabled,
+      auto_start_list_on_import: !!config.auto_start_list_on_import,
+      // Event-day lock + audit fields. Synced so other authenticated
+      // devices see the lock state on next refresh; web viewers can
+      // also use this to display a "locked" banner.
+      event_locked: !!config.event_locked,
+      event_locked_at: config.event_locked_at || null,
+      event_locked_by: config.event_locked_by || null,
+      event_unlocked_at: config.event_unlocked_at || null,
+      event_unlocked_by: config.event_unlocked_by || null,
       total_races: total,
       exported_races: exported,
       sent_races: sent,
+      // Drive folder id is captured so the Past Events archive viewer
+      // (and other read-only viewers) can deep-link to the event's Drive
+      // folder without needing per-event extra metadata.
+      drive_source_folder_id: config.drive_source_folder_id || '',
       // Divisions + flowchart DAG — needed so viewer pages (dashboard
       // swatches, scoring tabs, flowchart, timesheet) render fully.
       divisions,

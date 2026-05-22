@@ -222,6 +222,14 @@ export async function exportResults(raceNumber, options = {}) {
   // Queue for Supabase sync
   await queueRaceSync(raceNumber);
 
+  // Round-completion check (fire-and-forget). If the round this race
+  // belongs to is now fully exported AND auto-prompt is enabled in config,
+  // the operator gets a modal offering to generate next-round draws.
+  // Failures here never block export; the module logs internally.
+  import('./round-completion.js')
+    .then(m => m.checkRoundCompletionAfterExport(raceNumber))
+    .catch(err => console.warn('round-completion check failed', err));
+
   return { success: true, version: newVersion, filename };
 }
 

@@ -40,7 +40,12 @@ async function initFirebase() {
     await loadScript('https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js');
   }
 
-  firebaseApp = window.firebase.initializeApp(FIREBASE_CONFIG);
+  // Guard against double-init — flag-signal.js may already have done it.
+  if (!window.firebase.apps?.length) {
+    firebaseApp = window.firebase.initializeApp(FIREBASE_CONFIG);
+  } else {
+    firebaseApp = window.firebase.apps[0];
+  }
   dbRef = window.firebase.database();
 }
 
@@ -190,6 +195,118 @@ export function cleanupSignalPanel() {
   statusListener = null;
   alertListener = null;
   delete window._signalAlert;
+}
+
+// Independent listener slot for the embedded mini panel — kept separate from
+// the full-page `statusListener` so opening the standalone panel later
+// doesn't tear this one down.
+let miniStatusListener = null;
+let miniCurrentStatus = { RaceControlReady: false, StarterReady: false, FinishingReady: false };
+
+/**
+ * Render a compact in-header signal panel. Race Control + Starter are shown
+ * as small read-only dots (left); Finishing is a larger toggle button (right)
+ * since the finishing station is the operator using the race page.
+ *
+ * Designed to sit inline in the race header without dominating layout.
+ *
+ * @param {string} containerId - target element id
+ */
+export async function renderMiniSignalPanel(containerId) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+
+  try {
+    await initFirebase();
+  } catch {
+    container.innerHTML = '<span style="font-size:11px; color:var(--danger);">flag offline</span>';
+    return;
+  }
+
+  container.innerHTML = `
+    <div class="mini-flag-row" style="display:flex; gap:6px; align-items:stretch;">
+      <div style="display:flex; gap:4px;">
+        ${miniDot('RaceControlReady', 'RC', false)}
+        ${miniDot('StarterReady', 'ST', false)}
+      </div>
+      <button id="miniFinishBtn" data-field="FinishingReady"
+              style="border:none; background:var(--bg-card); padding:0 12px;
+                     min-height:44px; border-radius:var(--radius-sm); cursor:pointer;
+                     display:flex; align-items:center; gap:8px;
+                     box-shadow:0 0 0 2px var(--border) inset;
+                     transition:all 0.15s;"
+              title="Toggle Finishing flag (click to flip green/red)">
+        <span class="mini-flag-dot" data-field="FinishingReady"
+              style="width:16px; height:16px; border-radius:50%; background:var(--border);"></span>
+        <span style="font-size:12px; font-weight:700; letter-spacing:0.5px;
+                     text-transform:uppercase; color:var(--text-secondary);">FN</span>
+      </button>
+    </div>
+  `;
+
+  const btn = container.querySelector('#miniFinishBtn');
+  if (btn) {
+    btn.addEventListener('click', async () => {
+      try {
+        const newVal = !miniCurrentStatus.FinishingReady;
+        await dbRef.ref('race_status/FinishingReady').set(newVal);
+      } catch (err) {
+        console.warn('mini-flag toggle failed', err);
+      }
+    });
+  }
+
+  // Listener — independent from the full-page one. The mini and full panels
+  // can coexist; both read the same Firebase node.
+  if (miniStatusListener) dbRef.ref('race_status').off('value', miniStatusListener);
+  miniStatusListener = dbRef.ref('race_status').on('value', (snapshot) => {
+    const data = snapshot.val() || {};
+    miniCurrentStatus = {
+      RaceControlReady: data.RaceControlReady || false,
+      StarterReady: data.StarterReady || false,
+      FinishingReady: data.FinishingReady || false,
+    };
+    updateMiniBoxes(container);
+  });
+}
+
+export function cleanupMiniSignalPanel() {
+  if (dbRef && miniStatusListener) {
+    try { dbRef.ref('race_status').off('value', miniStatusListener); } catch {}
+  }
+  miniStatusListener = null;
+}
+
+function miniDot(field, label, clickable) {
+  return `
+    <div data-field="${field}"
+         title="${label === 'RC' ? 'Race Control' : 'Starter'}"
+         style="display:flex; flex-direction:column; align-items:center; justify-content:center;
+                padding:3px 6px; min-width:32px; min-height:44px;
+                border:1px solid var(--border); border-radius:var(--radius-sm);
+                background:var(--bg-card);">
+      <span class="mini-flag-dot" data-field="${field}"
+            style="width:12px; height:12px; border-radius:50%; background:var(--border);"></span>
+      <span style="font-size:10px; font-weight:700; color:var(--text-tertiary);
+                   letter-spacing:0.5px; margin-top:3px;">${label}</span>
+    </div>
+  `;
+}
+
+function updateMiniBoxes(container) {
+  for (const [field, ready] of Object.entries(miniCurrentStatus)) {
+    const dot = container.querySelector(`.mini-flag-dot[data-field="${field}"]`);
+    if (!dot) continue;
+    dot.style.background = ready ? '#10b981' : '#ef4444';
+    // Larger Finishing button — also tint the surrounding shadow.
+    if (field === 'FinishingReady') {
+      const btn = container.querySelector('#miniFinishBtn');
+      if (btn) {
+        btn.style.boxShadow = `0 0 0 2px ${ready ? '#10b981' : '#ef4444'} inset`;
+        btn.style.background = ready ? 'rgba(16,185,129,0.10)' : 'rgba(239,68,68,0.10)';
+      }
+    }
+  }
 }
 
 /**

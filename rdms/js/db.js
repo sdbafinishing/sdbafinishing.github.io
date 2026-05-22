@@ -51,6 +51,36 @@ export async function saveConfig(data) {
   return db.config.put(data);
 }
 
+// ──── Event Lock ────
+// When `event_locked` is true on the config record, every other write
+// function in this module refuses to proceed. The lock is meant to be
+// flipped from the dashboard once race day is fully wrapped, so a stale
+// open tab can't accidentally clobber the final state. Unlocking is an
+// admin action (gated at the UI layer in event-lock.js).
+//
+// We deliberately read the lock from IndexedDB each time rather than
+// caching — multiple tabs may flip the flag and we want the freshest
+// answer every write. The cost is a fast single-key get(); negligible.
+
+export class EventLockedError extends Error {
+  constructor() {
+    super('Event is locked. Unlock from the Dashboard before making changes.');
+    this.name = 'EventLockedError';
+    this.code = 'event-locked';
+  }
+}
+
+async function assertNotLocked() {
+  // Avoid recursion: getConfig itself never triggers a write.
+  const cfg = await db.config.get('event-config');
+  if (cfg?.event_locked) throw new EventLockedError();
+}
+
+export async function isEventLocked() {
+  const cfg = await db.config.get('event-config');
+  return !!cfg?.event_locked;
+}
+
 // ──── Race CRUD ────
 
 export async function getRace(raceNumber) {
@@ -62,11 +92,13 @@ export async function getAllRaces() {
 }
 
 export async function saveRace(data) {
+  await assertNotLocked();
   data.updated_at = new Date().toISOString();
   return db.races.put(data);
 }
 
 export async function bulkSaveRaces(racesArray) {
+  await assertNotLocked();
   const now = new Date().toISOString();
   racesArray.forEach(r => { r.updated_at = now; });
   return db.races.bulkPut(racesArray);
@@ -79,11 +111,13 @@ export async function getLaneResults(raceNumber) {
 }
 
 export async function saveLaneResult(data) {
+  await assertNotLocked();
   data.last_modified_at = new Date().toISOString();
   return db.lane_results.put(data);
 }
 
 export async function bulkSaveLaneResults(resultsArray) {
+  await assertNotLocked();
   const now = new Date().toISOString();
   resultsArray.forEach(r => { r.last_modified_at = now; });
   return db.lane_results.bulkPut(resultsArray);
@@ -96,6 +130,7 @@ export async function getTimesheet(raceNumber) {
 }
 
 export async function saveTimesheet(data) {
+  await assertNotLocked();
   return db.timesheet.put(data);
 }
 
@@ -110,10 +145,12 @@ export async function getAllDivisions() {
 }
 
 export async function saveDivision(data) {
+  await assertNotLocked();
   return db.divisions.put(data);
 }
 
 export async function deleteDivision(id) {
+  await assertNotLocked();
   return db.transaction('rw', db.divisions, db.division_rounds, db.division_progressions, db.race_relationships, async () => {
     await db.division_rounds.where('division_id').equals(id).delete();
     await db.division_progressions.where('division_id').equals(id).delete();
@@ -129,6 +166,7 @@ export async function getDivisionRounds(divisionId) {
 }
 
 export async function saveDivisionRound(data) {
+  await assertNotLocked();
   return db.division_rounds.put(data);
 }
 
@@ -139,6 +177,7 @@ export async function getDivisionProgressions(divisionId) {
 }
 
 export async function saveDivisionProgression(data) {
+  await assertNotLocked();
   return db.division_progressions.put(data);
 }
 
@@ -155,6 +194,9 @@ export async function getAllRaceRelationships() {
 // ──── Import Log ────
 
 export async function addImportLog(entry) {
+  // Import-log writes ARE allowed while locked — they're an audit trail of
+  // attempted imports, not state mutations. Even when an actual import is
+  // blocked, recording the attempt is useful for debugging.
   entry.imported_at = new Date().toISOString();
   return db.import_log.add(entry);
 }

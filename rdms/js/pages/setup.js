@@ -6,37 +6,60 @@
 import { getConfig, saveConfig } from '../db.js';
 import { showToast } from '../utils.js';
 import { broadcastChange } from '../app.js';
+import { requestSourceFolder, isSourceConnected } from '../file-access.js';
 import { renderDivisionsTab, cleanupDivisionHandlers } from './division-config.js';
 import { renderScheduleTab, cleanupScheduleHandlers } from './schedule-tab.js';
+import { renderNextRaceTab, cleanupNextRaceTab } from './next-race-tab.js';
 import { renderUsersTab, cleanupUsersTab } from './users-page.js';
 import { renderUserGuideTab } from './user-guide.js';
 import { hasPermission } from '../rbac.js';
 
 export async function mountSetup(container) {
-  const isAdmin = hasPermission('config.edit');
+  // Tab-level gating. Admins see everything; editors see the Next Race
+  // manual-fire tab + User Guide; viewers (if they somehow reach this
+  // page — they shouldn't) see User Guide only.
+  const canConfig    = hasPermission('setup.tab.config');
+  const canDivisions = hasPermission('setup.tab.divisions');
+  const canSchedule  = hasPermission('setup.tab.schedule');
+  const canNextRace  = hasPermission('setup.tab.next_race');
+  const canUsers     = hasPermission('setup.tab.users');
+  const canGuide     = hasPermission('setup.tab.guide');
+  const isAdmin      = canConfig; // legacy alias for the page title
+
+  // Pick the first tab the user can access as the default.
+  const firstTab = canConfig ? 'config'
+                 : canDivisions ? 'divisions'
+                 : canSchedule ? 'schedule'
+                 : canNextRace ? 'next-race'
+                 : canUsers ? 'users'
+                 : 'guide';
 
   container.innerHTML = `
     <div id="setupPage">
-      <h4 style="font-size:18px; font-weight:600; margin-bottom:16px;">${isAdmin ? 'Event Setup' : 'User Guide'}</h4>
+      <h4 style="font-size:18px; font-weight:600; margin-bottom:16px;">${isAdmin ? 'Event Setup' : 'Event Tools'}</h4>
       <div class="tabs">
-        ${isAdmin ? `
-          <button class="tab active" data-tab="config" onclick="window._setupTab('config')">Event</button>
-          <button class="tab" data-tab="divisions" onclick="window._setupTab('divisions')">Divisions</button>
-          <button class="tab" data-tab="schedule" onclick="window._setupTab('schedule')">Schedule</button>
-          <button class="tab" data-tab="users" onclick="window._setupTab('users')">Users</button>
-        ` : ''}
-        <button class="tab ${isAdmin ? '' : 'active'}" data-tab="guide" onclick="window._setupTab('guide')">User Guide</button>
+        ${canConfig    ? `<button class="tab ${firstTab === 'config' ? 'active' : ''}" data-tab="config" onclick="window._setupTab('config')">Event</button>` : ''}
+        ${canDivisions ? `<button class="tab ${firstTab === 'divisions' ? 'active' : ''}" data-tab="divisions" onclick="window._setupTab('divisions')">Divisions</button>` : ''}
+        ${canSchedule  ? `<button class="tab ${firstTab === 'schedule' ? 'active' : ''}" data-tab="schedule" onclick="window._setupTab('schedule')">Schedule</button>` : ''}
+        ${canNextRace  ? `<button class="tab ${firstTab === 'next-race' ? 'active' : ''}" data-tab="next-race" onclick="window._setupTab('next-race')">Next Race</button>` : ''}
+        ${canUsers     ? `<button class="tab ${firstTab === 'users' ? 'active' : ''}" data-tab="users" onclick="window._setupTab('users')">Users</button>` : ''}
+        ${canGuide     ? `<button class="tab ${firstTab === 'guide' ? 'active' : ''}" data-tab="guide" onclick="window._setupTab('guide')">User Guide</button>` : ''}
       </div>
       <div id="setupTabContent"></div>
     </div>
   `;
 
   window._setupTab = (tabName) => {
+    // Defensive: ignore clicks on tabs the user shouldn't have access to.
+    // Tabs are already filtered above, but a stale `onclick` from a prior
+    // render could leak through during permission downgrade.
+    const permKey = tabName === 'next-race' ? 'setup.tab.next_race' : `setup.tab.${tabName}`;
+    if (!hasPermission(permKey)) return;
     document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tabName));
     renderTab(tabName);
   };
 
-  renderTab(isAdmin ? 'config' : 'guide');
+  renderTab(firstTab);
 }
 
 export function unmountSetup() {
@@ -46,6 +69,7 @@ export function unmountSetup() {
   delete window._resetEvent;
   cleanupDivisionHandlers();
   cleanupScheduleHandlers();
+  cleanupNextRaceTab();
   cleanupUsersTab();
 }
 
@@ -59,6 +83,8 @@ async function renderTab(tabName) {
     await renderDivisionsTab(content);
   } else if (tabName === 'schedule') {
     await renderScheduleTab(content);
+  } else if (tabName === 'next-race') {
+    await renderNextRaceTab(content);
   } else if (tabName === 'users') {
     await renderUsersTab(content);
   } else if (tabName === 'guide') {
@@ -75,11 +101,34 @@ async function renderConfigTab(container) {
       <!-- Event Details (aligns with SDBA-RMS annual_event_config) -->
       <div class="section-header">Event Details</div>
 
+      <!-- Existing short name kept exactly as-is — used internally
+           throughout RDMS (page titles, status lines, etc.). -->
       <div class="form-group">
         <label class="form-label">Event Name</label>
         <input class="form-input" id="cfgEventName" type="text"
                placeholder="e.g. Tuen Ng Championships 2026"
                value="${c.event_long_name_en || ''}">
+        <small style="color:var(--text-tertiary); font-size:11px;">Used as the in-app short label.</small>
+      </div>
+
+      <!-- Optional long names. Only surface on the photo-finish export — if
+           blank the export falls back to "Event Name" above, then to the
+           short ref. Mirrors SDBA-RMS annual_event_config naming. -->
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
+        <div class="form-group">
+          <label class="form-label">Event Official Name (English) <span style="color:var(--text-tertiary); font-weight:400;">— optional</span></label>
+          <input class="form-input" id="cfgEventOfficialEn" type="text"
+                 placeholder="e.g. 2026 SDBA Tuen Ng Dragon Boat Championships"
+                 value="${c.event_official_name_en || ''}">
+          <small style="color:var(--text-tertiary); font-size:11px;">Long English name printed on photo-finish exports.</small>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Event Official Name (中文) <span style="color:var(--text-tertiary); font-weight:400;">— optional</span></label>
+          <input class="form-input" id="cfgEventOfficialTc" type="text"
+                 placeholder="e.g. 2026 SDBA 端午龍舟錦標賽"
+                 value="${c.event_official_name_tc || ''}">
+          <small style="color:var(--text-tertiary); font-size:11px;">Long Traditional Chinese name on photo-finish exports.</small>
+        </div>
       </div>
 
       <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px;">
@@ -137,11 +186,42 @@ async function renderConfigTab(container) {
 
       <div class="form-group">
         <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
-          <input type="checkbox" id="cfgScoring" ${c.scoring_enabled ? 'checked' : ''}>
-          <span style="font-size:14px;">Enable scoring</span>
+          <input type="checkbox" id="cfgScoring" ${(c.scoring_exported ?? c.scoring_enabled) ? 'checked' : ''}>
+          <span style="font-size:14px;">Export scoring results</span>
         </label>
         <small style="color:var(--text-tertiary); font-size:11px; margin-top:4px; display:block;">
-          When enabled, scored races (1:1 mapping) accumulate points across rounds. Configure scoring rounds in the Divisions tab.
+          When checked, the per-race export also writes a scoring file alongside the result.
+          Scoring is always calculated in-app (Scoring tab) regardless of this setting —
+          this flag controls whether the scoring output is written out to the results folder.
+          Configure scoring rounds in the Divisions tab.
+        </small>
+      </div>
+
+      <div class="form-group">
+        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+          <input type="checkbox" id="cfgNextRoundDraws" ${c.next_round_draw_enabled ? 'checked' : ''}>
+          <span style="font-size:14px;">Auto-prompt to generate next round draws</span>
+        </label>
+        <small style="color:var(--text-tertiary); font-size:11px; margin-top:4px; display:block;">
+          When checked, RDMS prompts to resolve next-round R{n}P{n} placeholders
+          automatically after every race in a round is exported.
+          Manual generation is always available from
+          <a href="#/import" style="color:var(--accent);">Im/Export → Generate Next Round Draws</a>
+          regardless of this setting.
+        </small>
+      </div>
+
+      <div class="form-group">
+        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+          <input type="checkbox" id="cfgAutoStartList" ${c.auto_start_list_on_import ? 'checked' : ''}>
+          <span style="font-size:14px;">Auto-generate Joyi start list after draw import</span>
+        </label>
+        <small style="color:var(--text-tertiary); font-size:11px; margin-top:4px; display:block;">
+          When checked, RDMS regenerates the Joyi start list automatically after
+          every draw import (manual or from <code>01 Input_Draw/</code>). The file
+          lands in <code>11 Output_Start Lists/</code> + the shared <code>{ref}_Joyi/</code>
+          folder so the Joyi camera laptop sees the updated start list without
+          a separate click.
         </small>
       </div>
 
@@ -157,6 +237,20 @@ async function renderConfigTab(container) {
           Master event folder. Contains: 01 Input_Draw/, 11 Output_Start Lists/,
           12 Output_Results/, 13 Output_Next Round Draws/, 20 Database Backup/
         </small>
+        <!-- Inline connect button — same flow as the navbar folder icon
+             but reachable while editing config, so an admin can attach
+             the folder without leaving this tab. The label reflects
+             current connection state. -->
+        <div style="margin-top:8px; display:flex; align-items:center; gap:10px;">
+          <button class="btn btn-outline" type="button" id="cfgConnectSourceBtn">
+            <i class="material-icons" style="font-size:16px;">folder_open</i>
+            <span id="cfgConnectSourceLabel">Connect event folder</span>
+          </button>
+          <small id="cfgConnectSourceStatus" style="font-size:11px; color:var(--text-tertiary);">
+            Pick the root event folder (e.g. <code>2026TN/</code>) — RDMS finds the
+            <code>01 Input_Draw/</code>, <code>12 Output_Results/</code>, etc. subfolders inside it.
+          </small>
+        </div>
       </div>
 
       <div class="section-header" style="margin-top:16px;">Shared Folder Paths (for external parties)</div>
@@ -216,14 +310,15 @@ async function renderConfigTab(container) {
                   onchange="var o=document.getElementById('cfgNextRaceRacenameCustom');o.style.display=this.value==='_custom'?'block':'none';if(this.value!=='_custom')o.value='';">
             <option value="" ${!c.next_race_signal_racename ? 'selected' : ''}>— Select —</option>
             <option value="warmup" ${c.next_race_signal_racename === 'warmup' ? 'selected' : ''}>warmup</option>
+            <option value="warmup2" ${c.next_race_signal_racename === 'warmup2' ? 'selected' : ''}>warmup2</option>
             <option value="shortcourse" ${c.next_race_signal_racename === 'shortcourse' ? 'selected' : ''}>shortcourse</option>
             <option value="main" ${c.next_race_signal_racename === 'main' ? 'selected' : ''}>main</option>
-            <option value="_custom" ${c.next_race_signal_racename && !['warmup','shortcourse','main'].includes(c.next_race_signal_racename) ? 'selected' : ''}>Other...</option>
+            <option value="_custom" ${c.next_race_signal_racename && !['warmup','warmup2','shortcourse','main'].includes(c.next_race_signal_racename) ? 'selected' : ''}>Other...</option>
           </select>
           <input class="form-input" id="cfgNextRaceRacenameCustom" type="text"
                  placeholder="Enter custom race name"
-                 value="${c.next_race_signal_racename && !['warmup','shortcourse','main'].includes(c.next_race_signal_racename) ? c.next_race_signal_racename : ''}"
-                 style="margin-top:6px; display:${c.next_race_signal_racename && !['warmup','shortcourse','main'].includes(c.next_race_signal_racename) ? 'block' : 'none'};">
+                 value="${c.next_race_signal_racename && !['warmup','warmup2','shortcourse','main'].includes(c.next_race_signal_racename) ? c.next_race_signal_racename : ''}"
+                 style="margin-top:6px; display:${c.next_race_signal_racename && !['warmup','warmup2','shortcourse','main'].includes(c.next_race_signal_racename) ? 'block' : 'none'};">
           <small style="color:var(--text-tertiary); font-size:11px;">Passed as racename= in the API call</small>
         </div>
       </div>
@@ -298,9 +393,45 @@ async function renderConfigTab(container) {
     </div>
   `;
 
+  // Connect-source-folder handler. Mirrors the navbar folder icon flow.
+  // Updates the button label + status text live so the operator can tell
+  // whether the connection succeeded without checking elsewhere.
+  const cfgConnectBtn   = document.getElementById('cfgConnectSourceBtn');
+  const cfgConnectLabel = document.getElementById('cfgConnectSourceLabel');
+  const cfgConnectStat  = document.getElementById('cfgConnectSourceStatus');
+  const refreshConnectState = () => {
+    if (!cfgConnectBtn || !cfgConnectLabel || !cfgConnectStat) return;
+    if (isSourceConnected()) {
+      cfgConnectLabel.textContent = 'Reconnect event folder';
+      cfgConnectStat.innerHTML = `
+        <span style="color:var(--success);">✓ Connected</span> — RDMS can read/write
+        directly to <code>01 Input_Draw/</code>, <code>12 Output_Results/</code>, etc.
+      `;
+    } else {
+      cfgConnectLabel.textContent = 'Connect event folder';
+      cfgConnectStat.innerHTML = `
+        Pick the root event folder (e.g. <code>${(c.event_short_ref || '2026XX')}/</code>) —
+        RDMS finds the <code>01 Input_Draw/</code>, <code>12 Output_Results/</code>, etc.
+        subfolders inside it.
+      `;
+    }
+  };
+  refreshConnectState();
+  if (cfgConnectBtn) {
+    cfgConnectBtn.addEventListener('click', async () => {
+      const handle = await requestSourceFolder();
+      if (handle) {
+        showToast(`Event folder connected: ${handle.name}`, 'success', 3000);
+      }
+      refreshConnectState();
+    });
+  }
+
   window._saveConfig = async () => {
     const data = {
       event_long_name_en: document.getElementById('cfgEventName').value.trim(),
+      event_official_name_en: document.getElementById('cfgEventOfficialEn').value.trim(),
+      event_official_name_tc: document.getElementById('cfgEventOfficialTc').value.trim(),
       event_short_ref: document.getElementById('cfgEventRef').value.trim(),
       event_type: document.getElementById('cfgEventType').value.trim(),
       event_colour_code_hex: document.getElementById('cfgEventColourHex').value.trim() || '#08394c',
@@ -323,7 +454,11 @@ async function renderConfigTab(container) {
         if (sel === '_custom') return document.getElementById('cfgNextRaceRacenameCustom').value.trim();
         return sel;
       })(),
-      scoring_enabled: document.getElementById('cfgScoring').checked,
+      // Renamed from scoring_enabled → scoring_exported (new semantics: gates
+      // whether scoring file is written out, not whether the page is shown).
+      scoring_exported: document.getElementById('cfgScoring').checked,
+      next_round_draw_enabled: document.getElementById('cfgNextRoundDraws').checked,
+      auto_start_list_on_import: document.getElementById('cfgAutoStartList').checked,
     };
 
     // Validate required fields

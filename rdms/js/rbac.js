@@ -31,8 +31,21 @@ const PERMISSIONS = {
   'page.scoring':        { admin: true,  editor: true,  viewer: true  },
   'page.flowchart':      { admin: true,  editor: true,  viewer: true  },
   'page.import':         { admin: true,  editor: true,  viewer: false },
-  'page.setup':          { admin: true,  editor: false, viewer: false },
+  // Editors can reach Setup, but the tab-level gates below limit them to
+  // the Next Race manual-fire tab + User Guide. Only admins can edit
+  // config / divisions / schedule / users.
+  'page.setup':          { admin: true,  editor: true,  viewer: false },
   'page.admin':          { admin: true,  editor: false, viewer: false },
+  'page.archive':        { admin: true,  editor: true,  viewer: false },
+
+  // Setup sub-tabs — surface granular gates so the setup page can hide
+  // tabs an editor isn't allowed to touch.
+  'setup.tab.config':    { admin: true,  editor: false, viewer: false },
+  'setup.tab.divisions': { admin: true,  editor: false, viewer: false },
+  'setup.tab.schedule':  { admin: true,  editor: false, viewer: false },
+  'setup.tab.users':     { admin: true,  editor: false, viewer: false },
+  'setup.tab.next_race': { admin: true,  editor: true,  viewer: false },
+  'setup.tab.guide':     { admin: true,  editor: true,  viewer: true  },
 
   // Actions
   'race.start':          { admin: true,  editor: true,  viewer: false },

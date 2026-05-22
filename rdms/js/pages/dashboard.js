@@ -6,10 +6,12 @@
  *     URL modes: #/dashboard, #/dashboard/finisher, #/dashboard/starter, #/dashboard/race-control
  *   AUTHENTICATED: Full dashboard with summary, progress, alerts + signal panel at top.
  */
-import { getAllRaces, getConfig, getAllDivisions } from '../db.js';
+import { getAllRaces, getConfig, getAllDivisions, isEventLocked } from '../db.js';
 import { isoToTime, showToast } from '../utils.js';
 import { getSignalStatus, forceSignalRace } from '../next-race-signal.js';
 import { renderSignalPanel, cleanupSignalPanel } from './signal-panel.js';
+import { isRaceDayComplete, showLockModal } from '../event-lock.js';
+import { hasPermission } from '../rbac.js';
 
 let refreshInterval = null;
 let isAuthenticatedUser = false;
@@ -51,6 +53,7 @@ export function unmountDashboard() {
   delete window._dashForceSignal;
   delete window._dashForceSignalCustom;
   delete window._switchStationMode;
+  delete window._eventLockOpen;
   lastRaceHash = '';
   cleanupSignalPanel();
 }
@@ -320,6 +323,12 @@ async function renderFullDashboard(container, stationMode) {
           <tbody id="raceProgressBody"></tbody>
         </table>
       </div>
+
+      <!-- Event Lock — race-day-complete seal. Visible to admins only;
+           the button enables itself once every race is in a terminal
+           state (exported/sent/cancelled). See event-lock.js for the
+           full lock semantics. -->
+      <div id="dashEventLockRow" style="margin-top:14px;"></div>
     </div>
   `;
 
@@ -358,6 +367,46 @@ async function renderDashboard() {
 
   const activeSort = document.querySelector('.btn-sort.active');
   renderRaces(activeSort ? activeSort.dataset.sort : 'race', races, divisions);
+
+  await renderEventLockRow(races);
+}
+
+async function renderEventLockRow(races) {
+  const el = document.getElementById('dashEventLockRow');
+  if (!el) return;
+  // Only admins can lock/unlock — hide the row entirely for editors and
+  // viewers (the locked-state banner at the top of every page is enough
+  // signal for them).
+  if (!hasPermission('config.edit')) { el.innerHTML = ''; return; }
+
+  const locked = await isEventLocked();
+  if (locked) {
+    // The persistent top banner carries the unlock control; keep this
+    // footer row quiet so it doesn't duplicate the same call-to-action.
+    el.innerHTML = `
+      <div style="font-size:12px; color:var(--text-tertiary); text-align:right;">
+        Event is locked — see the banner at the top of the page to unlock.
+      </div>`;
+    return;
+  }
+
+  const complete = races.length > 0 && races.every(r =>
+    ['exported', 'sent', 'cancelled'].includes(r.status));
+  const remaining = races.length - races.filter(r =>
+    ['exported', 'sent', 'cancelled'].includes(r.status)).length;
+  const btnTone   = complete ? 'btn-primary' : 'btn-ghost';
+  const hint      = complete
+    ? 'All races complete — safe to lock.'
+    : `${remaining} race${remaining === 1 ? '' : 's'} still pending — locking now will block their exports.`;
+
+  el.innerHTML = `
+    <div style="display:flex; align-items:center; justify-content:flex-end; gap:10px; font-size:12px; color:var(--text-tertiary);">
+      <span>${hint}</span>
+      <button class="btn ${btnTone} btn-sm" onclick="window._eventLockOpen()">
+        <i class="material-icons" style="font-size:14px;">lock</i> Lock event
+      </button>
+    </div>`;
+  window._eventLockOpen = showLockModal;
 }
 
 function renderSummary(races) {

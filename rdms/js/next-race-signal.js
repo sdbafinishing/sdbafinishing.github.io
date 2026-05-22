@@ -7,6 +7,7 @@
 import { getConfig, saveConfig, getAllRaces, getRace, saveRace } from './db.js';
 import { showToast } from './utils.js';
 import { broadcastChange } from './app.js';
+import { setFinishingFlag } from './flag-signal.js';
 
 /**
  * Find the next non-cancelled race after a given race number.
@@ -132,6 +133,81 @@ export async function promptNextRaceSignal(completedRaceNumber) {
     modal.remove();
     await signalNextRace(unsignaled.race_number);
   });
+}
+
+/**
+ * Fire the "scoring started for race N" pair of signals:
+ *   - Lambda nextraceedit → advance the public mobile app to race N+1
+ *   - Firebase race_status/FinishingReady = false → digital flag goes red
+ *
+ * Gated: skipped entirely if the next race already has a start_time (the
+ * next race has begun on the water, so any signalling we do is too late
+ * and could confuse downstream displays).
+ *
+ * Idempotent per race: flips race.result_entry_signaled once written so
+ * repeat result edits / re-imports don't re-fire. Persists to IndexedDB so
+ * reloads stay quiet.
+ *
+ * Fire-and-forget — never blocks the caller. All errors are logged and
+ * surfaced as toasts but don't propagate.
+ *
+ * @param {number} raceNumber - race currently being scored
+ */
+export async function notifyResultEntryStarted(raceNumber) {
+  let race;
+  try {
+    race = await getRace(raceNumber);
+    if (!race) return;
+    if (race.result_entry_signaled) return; // already fired for this race
+
+    const nextRace = await findNextRace(raceNumber);
+    // If the next race is already running on the water — by EITHER signal
+    // source — we're behind. Don't muddy the mobile-app state. We check
+    // both manual start_time and joyi_start_time because the operator may
+    // have skipped the manual click and the next race's true start is
+    // only known via the Joyi-derived value.
+    const nextStarted = !!(nextRace?.start_time || nextRace?.joyi_start_time);
+    if (nextStarted) {
+      // Mark as signaled anyway so we don't keep checking on every cell edit.
+      race.result_entry_signaled = true;
+      await saveRace(race);
+      return;
+    }
+
+    race.result_entry_signaled = true;
+    await saveRace(race);
+  } catch (err) {
+    console.warn('notifyResultEntryStarted: gate-check failed', err);
+    return;
+  }
+
+  // Two independent fire-and-forgets. We don't await one before the other —
+  // the operator shouldn't wait on network for either.
+  const tasks = [];
+
+  // (1) Firebase digital flag → red.
+  tasks.push((async () => {
+    const ok = await setFinishingFlag(false);
+    if (ok) showToast(`Digital flag set to RED (scoring race ${raceNumber})`, 'info', 2500);
+    else showToast('Digital flag write failed (offline?)', 'warning', 3000);
+  })());
+
+  // (2) Lambda nextraceedit — advance public mobile app to race N+1.
+  if (nextRaceExists(race)) {
+    // Use the existing signalNextRace which handles the URL build + record.
+    const next = await findNextRace(raceNumber);
+    if (next && !next.next_race_signaled) {
+      tasks.push(signalNextRace(next.race_number).catch(() => {}));
+    }
+  }
+
+  // Don't await; let them run in the background.
+  Promise.allSettled(tasks);
+}
+
+// Tiny helper so the call-site reads naturally.
+function nextRaceExists(race) {
+  return race && race.race_number != null;
 }
 
 /**

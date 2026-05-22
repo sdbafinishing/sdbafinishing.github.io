@@ -17,9 +17,11 @@ import { mountTimesheetPage, unmountTimesheetPage } from './pages/timesheet-page
 import { mountScoringPage, unmountScoringPage } from './pages/scoring-page.js';
 import { mountFlowchartPage, unmountFlowchartPage } from './pages/flowchart-page.js';
 import { mountAdminPage, unmountAdminPage } from './pages/admin-page.js';
+import { mountArchivePage, unmountArchivePage } from './pages/archive-page.js';
 import { mountUsersPage, unmountUsersPage } from './pages/users-page.js';
 import { initAuth, isLocal, renderLoginPage, logout, getCurrentUser } from './auth.js';
-import { canAccessPage, getRole, hasPermission } from './rbac.js';
+import { canAccessPage, getRole, hasPermission, setRole } from './rbac.js';
+import { refreshLockBanner } from './event-lock.js';
 
 // ──── Page Registry ────
 // Each page exports mount(container) and unmount()
@@ -32,6 +34,7 @@ const pages = {
   scoring: { mount: mountScoringPage, unmount: unmountScoringPage },
   flowchart: { mount: mountFlowchartPage, unmount: unmountFlowchartPage },
   admin: { mount: mountAdminPage, unmount: unmountAdminPage },
+  archive: { mount: mountArchivePage, unmount: unmountArchivePage },
   users: { mount: mountUsersPage, unmount: unmountUsersPage },
 };
 
@@ -95,7 +98,11 @@ async function navigate() {
   if (pages[page]) {
     container.innerHTML = '';
     await pages[page].mount(container, params);
-  } else {
+  }
+  // Sticky lock banner — refresh on every navigation so it stays visible
+  // even after page swaps. Fire-and-forget; never blocks routing.
+  refreshLockBanner().catch(() => {});
+  if (!pages[page]) {
     container.innerHTML = `
       <div class="card" style="text-align:center; padding:40px;">
         <i class="material-icons" style="font-size:48px; color:var(--text-tertiary);">construction</i>
@@ -183,6 +190,13 @@ channel.onmessage = (event) => {
 
 export function broadcastChange(type, data = {}) {
   channel.postMessage({ type, ...data });
+  // Also fan out a window CustomEvent so same-tab subscribers (e.g. the
+  // race page that already has its DOM mounted) can react without
+  // remounting. The BroadcastChannel onmessage above only fires in OTHER
+  // tabs of the same origin.
+  try {
+    window.dispatchEvent(new CustomEvent(`rdms-${type}`, { detail: data }));
+  } catch { /* no-op in environments without CustomEvent */ }
 }
 
 // ──── Folder Connection ────
@@ -240,26 +254,75 @@ async function updateNavUserInfo() {
     });
   }
 
-  // Show/hide login button in navbar
+  // Show/hide login button in navbar. Local mode never shows it — local
+  // dev is always admin and offering a logout button just lets the
+  // operator stuck themselves out of their own machine.
   const loginBtn = document.getElementById('navLoginBtn');
   if (loginBtn) {
-    if (isAuthenticated) {
+    if (isLocal()) {
+      loginBtn.style.display = 'none';
+    } else if (isAuthenticated) {
+      loginBtn.style.display = '';
       loginBtn.innerHTML = `<i class="material-icons" style="font-size:18px;">logout</i>`;
       loginBtn.title = `Logged in as ${getRole()}. Click to logout.`;
       loginBtn.onclick = async () => {
         await logout();
         isAuthenticated = false;
+        window._rdmsAuthenticated = false;
         await updateNavUserInfo();
-        window.location.hash = '#/dashboard';
+        // Force the route back to the public dashboard. If the user is
+        // already on #/dashboard, setting the same hash is a no-op and
+        // hashchange won't fire — so we replace history + call navigate()
+        // ourselves to guarantee the page re-renders as the public
+        // (unauthenticated) view with the digital-flag panel.
+        if ((window.location.hash || '').replace('#/', '').split('/')[0] === 'dashboard') {
+          await navigate();
+        } else {
+          window.location.hash = '#/dashboard';
+        }
       };
-    } else if (!isLocal()) {
+    } else {
+      loginBtn.style.display = '';
       loginBtn.innerHTML = `<i class="material-icons" style="font-size:18px;">login</i>`;
       loginBtn.title = 'Sign in';
       loginBtn.onclick = () => { showLoginModal(); };
-    } else {
-      loginBtn.style.display = 'none';
     }
   }
+}
+
+// External Firebase station pages — used when default_mode points at a
+// physical station rather than an RDMS route. Keep aligned with
+// signal-panel.js's openStationTab() URL table.
+const STATION_URLS = {
+  finish:        'https://sdbafinishing.github.io/finisher.html',
+  finisher:      'https://sdbafinishing.github.io/finisher.html',
+  'race-control': 'https://sdbafinishing.github.io/race-control.html',
+  starter:       'https://sdbafinishing.github.io/starter.html',
+};
+
+/**
+ * Navigate to the user's configured landing page.
+ *   - Station modes (finish / starter / race-control) → external standalone
+ *     Firebase station URL (full-page redirect).
+ *   - RDMS routes (race, timesheet, scoring, …) → set the hash + let the
+ *     router pick it up.
+ *   - Anything else / unreachable → return false so the caller can fall
+ *     back to whatever default behavior makes sense.
+ * @param {string|null} mode
+ * @returns {boolean} true if the redirect was issued
+ */
+function routeToDefaultMode(mode) {
+  if (!mode) return false;
+  if (STATION_URLS[mode]) {
+    window.location.href = STATION_URLS[mode];
+    return true;
+  }
+  if (mode === 'dashboard') return false; // already on dashboard route
+  if (canAccessPage(mode)) {
+    window.location.hash = `#/${mode}`;
+    return true;
+  }
+  return false;
 }
 
 function showLoginModal() {
@@ -273,7 +336,8 @@ function showLoginModal() {
         <span style="font-size:15px; font-weight:500; color:var(--text-secondary); margin-left:4px;">RDMS</span>
       </div>
       <div class="form-group">
-        <input class="form-input" id="modalLoginEmail" type="email" placeholder="Email" autocomplete="email">
+        <input class="form-input" id="modalLoginEmail" type="text" placeholder="Username"
+               autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false">
       </div>
       <div class="form-group">
         <input class="form-input" id="modalLoginPassword" type="password" placeholder="Password" autocomplete="current-password">
@@ -296,18 +360,18 @@ function showLoginModal() {
   });
 
   modal.querySelector('#modalLoginBtn').addEventListener('click', async () => {
-    const email = document.getElementById('modalLoginEmail').value.trim();
+    const usernameInput = document.getElementById('modalLoginEmail').value.trim();
     const password = document.getElementById('modalLoginPassword').value;
     const errEl = document.getElementById('modalLoginError');
 
-    if (!email || !password) {
-      errEl.textContent = 'Enter email and password';
+    if (!usernameInput || !password) {
+      errEl.textContent = 'Enter username and password';
       errEl.style.display = 'block';
       return;
     }
 
     const { login } = await import('./auth.js');
-    const result = await login(email, password);
+    const result = await login(usernameInput, password);
 
     if (result) {
       isAuthenticated = true;
@@ -315,9 +379,14 @@ function showLoginModal() {
       modal.remove();
       showToast(`Signed in as ${result.role}`, 'success');
       await updateNavUserInfo();
-      navigate(); // re-render current page with new permissions
+      // Route the user to their preferred landing page (default_mode from
+      // rdms_users). For station modes (finish/starter/race-control) we
+      // redirect to the standalone Firebase station pages instead.
+      if (!routeToDefaultMode(result.defaultMode)) {
+        navigate(); // re-render current page with new permissions
+      }
     } else {
-      errEl.textContent = 'Invalid email or password';
+      errEl.textContent = 'Invalid username or password';
       errEl.style.display = 'block';
     }
   });
@@ -327,9 +396,13 @@ async function init() {
   startClock();
   syncThemeIcon();
 
-  // Auth check — expose for dashboard
+  // Auth check — expose for dashboard.
+  // Local dev is always admin: force the role on every init so a stale
+  // localStorage value (e.g. from clicking the logout button) can't lock
+  // the operator out of their own machine.
   if (isLocal()) {
     isAuthenticated = true;
+    setRole('admin');
   }
   window._rdmsAuthenticated = isAuthenticated;
 
@@ -352,6 +425,13 @@ async function init() {
     if (authResult?.authenticated) {
       isAuthenticated = true;
       window._rdmsAuthenticated = true;
+      // Honor default_mode on initial load — but only if the user hasn't
+      // already deep-linked into a specific page. The default is
+      // #/dashboard (empty hash), so we only redirect from that.
+      const hash = window.location.hash || '';
+      if (!hash || hash === '#/' || hash === '#/dashboard') {
+        routeToDefaultMode(authResult.defaultMode);
+      }
     }
   }
 

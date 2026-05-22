@@ -7,7 +7,7 @@
  */
 import { db } from './db.js';
 import { showToast } from './utils.js';
-import { writeToSourceSubfolder, downloadFallback } from './file-access.js';
+import { writeToSourceSubfolder, downloadFallback, isSourceConnected } from './file-access.js';
 
 const TABLE_NAMES = [
   'config', 'races', 'lane_results', 'timesheet',
@@ -18,10 +18,14 @@ const TABLE_NAMES = [
 
 /**
  * Create a full database backup.
- * Tries to write to backup folder first, falls back to download.
+ * Tries to write to backup folder first, falls back to download — but only
+ * when the folder is already connected. We don't pop a folder picker mid-
+ * import (that surprised operators after drag-and-drop), so an unconnected
+ * source folder + non-manual trigger results in a quiet "skipped" outcome.
  * @param {string} trigger - What triggered the backup (for filename)
+ * @param {{silent?: boolean}} [opts] - silent: skip toasts (default false)
  */
-export async function autoBackup(trigger = 'manual') {
+export async function autoBackup(trigger = 'manual', opts = {}) {
   const backup = {};
   for (const table of TABLE_NAMES) {
     backup[table] = await db[table].toArray();
@@ -39,14 +43,36 @@ export async function autoBackup(trigger = 'manual') {
   const filename = `rdms_backup_${eventRef}_${trigger}_${timestamp}.json`;
   const jsonStr = JSON.stringify(backup);
 
-  // Write to 20 Database Backup/ subfolder (auto-created if missing)
-  const written = await writeToSourceSubfolder('20 Database Backup', filename, jsonStr);
+  // Skip the disk write when no folder is connected — popping a picker
+  // here interrupts whatever the operator was doing. The browser-download
+  // fallback IS still ok for explicit manual backups; we only suppress it
+  // for automatic triggers (setup-complete, R*_export).
+  const isManual  = trigger === 'manual';
+  const connected = isSourceConnected();
+  if (!connected && !isManual) {
+    if (!opts.silent) {
+      showToast(
+        `Auto-backup skipped (no event folder connected). Use DB Admin → Backup to download a copy.`,
+        'info', 3500);
+    }
+    return null;
+  }
+
+  const written = connected
+    ? await writeToSourceSubfolder('20 Database Backup', filename, jsonStr)
+    : false;
 
   if (written) {
-    showToast(`Backup saved: ${filename}`, 'info', 2000);
-  } else {
+    if (!opts.silent) showToast(`Backup saved: ${filename}`, 'info', 2000);
+  } else if (isManual) {
+    // Only fall through to browser-download for explicit manual triggers.
     downloadFallback(filename, jsonStr);
-    showToast(`Backup downloaded: ${filename}`, 'info', 2000);
+    if (!opts.silent) showToast(`Backup downloaded: ${filename}`, 'info', 2000);
+  } else {
+    if (!opts.silent) {
+      showToast(`Auto-backup write failed — folder may be read-only.`, 'warning', 4000);
+    }
+    return null;
   }
 
   return filename;

@@ -13,14 +13,11 @@ export async function mountScoringPage(container) {
   const races = await getAllRaces();
   const divisions = await getAllDivisions();
 
-  if (!config?.scoring_enabled) {
-    container.innerHTML = `
-      <h4 style="font-size:18px; font-weight:600; margin-bottom:16px;">Scoring</h4>
-      <div class="card" style="text-align:center; padding:32px; color:var(--text-tertiary);">
-        Scoring is not enabled. Enable it in Setup → Event Config → Scoring.
-      </div>`;
-    return;
-  }
+  // Scoring is always calculable. The `scoring_exported` config flag only
+  // controls whether the export pipeline writes a scoring file out — the
+  // in-app Scoring page renders as long as there are races with R1/R2/RFinal
+  // flags set. The "no scored races" empty-state below handles the case
+  // where no flags have been set.
 
   // Find scored race pairs/groups
   // Scored races have scoring_flag = R1, R2, or RFinal

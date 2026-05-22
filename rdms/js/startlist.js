@@ -5,7 +5,7 @@
  */
 import * as XLSX from 'xlsx';
 import { getConfig, getAllRaces, getLaneResults } from './db.js';
-import { showToast } from './utils.js';
+import { showToast, rowsToCsvBlob } from './utils.js';
 import { writeToBoth, downloadFallback } from './file-access.js';
 
 /**
@@ -110,11 +110,13 @@ export async function generateSprintTimerStartList() {
     lines.push('#,,,');
   }
 
-  const csvContent = lines.join('\n');
   const filename = `SprintTimer_Start_List_${eventRef}_${raceDate}.csv`;
 
-  // Write to 11 Output_Start Lists/ (local) — SprintTimer CSV is local only
-  const csvBlob = new Blob([csvContent], { type: 'text/csv' });
+  // Use the shared UTF-8 CSV helper so the file opens cleanly in Excel/Numbers
+  // (BOM-prefixed, text/csv;charset=utf-8). The pre-built `lines` array has
+  // commas baked in, so re-parse to a rows matrix before handing it over.
+  const rowsMatrix = lines.map(l => l.split(','));
+  const csvBlob = rowsToCsvBlob(rowsMatrix);
   const { local } = await writeToBoth('11 Output_Start Lists', filename, csvBlob);
   if (!local) downloadFallback(filename, csvBlob);
 

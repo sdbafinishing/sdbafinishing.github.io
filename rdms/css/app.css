@@ -513,6 +513,42 @@
   /* Tabs: scrollable */
   .tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; }
   .tab { white-space: nowrap; padding: 8px 12px; font-size: 12px; }
+
+  /* ── Race page header: keep title + times tight on narrow screens ── */
+  .race-header-times {
+    /* 4 columns → 2 columns when the header is forced to wrap. Keeps the
+       widget readable without scrolling. */
+    grid-template-columns: repeat(2, auto) !important;
+    gap: 8px 18px !important;
+    text-align: left !important;
+  }
+  .race-header-status,
+  .race-header-status-row { align-items: center !important; }
+  .race-header-status { align-self: flex-start !important; }
+
+  /* The section header inline hint ("— must be in finishing order") is
+     repeated nonsense on a small screen; the grid columns make ordering
+     obvious anyway. Hide it. */
+  .section-header-hint { display: none; }
+  .section-header-inline {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  /* Buttons next to the section header — let them stay on one row by
+     shrinking padding rather than wrapping. */
+  .section-header-row .btn { padding: 4px 8px; font-size: 11px; }
+
+  /* Race page top nav row: prev/next links visible, secondary stuff
+     scrolls horizontally below them. */
+  .race-page-nav { gap: 4px; }
+  .race-page-nav .btn { padding: 4px 8px; }
+
+  /* Results output table: allow horizontal scroll for the wide team/code
+     columns. Wrapping a 6-col table at 360px CSS px isn't worth it. */
+  .race-output-scroll table { min-width: 480px; }
 }
 
 /* ========== SMALL PHONE (< 480px) ========== */
@@ -521,4 +557,47 @@
   .navbar-clock { font-size: 16px; }
   .navbar-brand { margin-right: 8px; }
   .navbar-logo { font-size: 14px; }
+
+  /* Race header: status row is its own line below times. We give it the
+     full width and align left so STARTED + flag + timer line up cleanly
+     with the title block above. */
+  .race-header-status {
+    align-self: stretch !important;
+    width: 100%;
+  }
+  .race-header-status-row {
+    justify-content: flex-start !important;
+    flex-wrap: wrap;
+  }
+
+  /* Mini flag: keep tap targets thumb-friendly but tighten gaps so it
+     doesn't push the timer off-row. */
+  .mini-flag-row { gap: 4px !important; }
+
+  /* Race-action button row (START / FINISH / Reset start / Reset race):
+     allow wrap to a second row and shrink secondary buttons. The wrap
+     parent is a flex row with gap:6px on the race page. */
+  #startStopWrap { flex-wrap: wrap; }
+  #startStopWrap .btn { font-size: 12px; padding: 6px 10px; }
+  #resetStartBtn, #resetRaceBtn { flex: 1 1 auto !important; }
+
+  /* Multi-column form layouts collapse to a single column on phones.
+     Setup, Next Race, Division config all use inline grid styles
+     (1fr 1fr, 1fr 1fr 1fr, 2fr 1fr, etc.). The attribute selector
+     catches all of them without requiring per-site markup changes. */
+  .card div[style*="grid-template-columns"] {
+    grid-template-columns: 1fr !important;
+    gap: 12px !important;
+  }
+  /* Don't collapse the race header times block — its own rule above
+     keeps it as 2-col so SCHED/START/EXPORT/SEND stay grouped. */
+  .race-header-times { grid-template-columns: repeat(2, auto) !important; }
+
+  /* Flowchart SVG: ensure horizontal scroll on phones rather than the
+     SVG being squashed beyond legibility. */
+  .flowchart-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .flowchart-scroll svg { max-width: none !important; }
+
+  /* Dashboard signal panel + station buttons row: align nicely on wrap. */
+  #dashSignalPanel { min-width: 0 !important; flex: 1 1 100% !important; }
 }

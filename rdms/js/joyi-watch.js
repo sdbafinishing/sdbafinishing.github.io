@@ -14,16 +14,23 @@
  * imported (so re-enabling the watcher doesn't re-import everything).
  */
 import { listNestedSubfolder, isSourceConnected } from './file-access.js';
-import { parseJoyiFile, importJoyiToDb } from './import.js';
+import { isDriveApiConnected, listDriveFiles, readDriveFile } from './drive-api.js';
+import { parseJoyiFile, parseJoyiAnyFile, importJoyiToDb } from './import.js';
 import { getConfig } from './db.js';
 import { showToast } from './utils.js';
 import { broadcastChange } from './app.js';
+import { notifyResultEntryStarted } from './next-race-signal.js';
+import { enqueueLcdFetch } from './joyi-lcd-pending.js';
 
 const STORAGE_KEY = 'rdms-joyi-watch-enabled';
 const DEFAULT_INTERVAL_MS = 5000;
 
 let intervalId = null;
-let seenMtimes = new Map(); // filename → lastModified epoch
+// seenMtimes is keyed by:
+//   local mode: filename → lastModified epoch (number)
+//   drive mode: file.id  → modifiedTime ISO string
+// Mixed-mode is not supported (we resolve which backend at start()).
+let seenMtimes = new Map();
 let folderPath = null;       // resolved path string for UI
 let onTick = null;           // optional UI callback (lastScan, importedCount, error)
 let lastError = null;
@@ -31,6 +38,7 @@ let lastScanAt = null;
 let importedSinceStart = 0;
 let scanInFlight = false;    // re-entrancy guard
 let bootstrapDone = false;   // first scan only records mtimes
+let backend = 'local';       // 'local' (FS Access) | 'drive' (Drive API)
 
 /**
  * Build the path to scan. Prefers an explicit config.shared_joyi_folder
@@ -51,6 +59,7 @@ export function isJoyiWatchEnabled() {
 export function getJoyiWatchStatus() {
   return {
     enabled: !!intervalId,
+    backend,
     folderPath,
     lastScanAt,
     lastError,
@@ -61,13 +70,22 @@ export function getJoyiWatchStatus() {
 
 /**
  * Start the watch loop.
+ *
+ * Backend selection: prefers Drive (faster — no local FS sync delay) if a
+ * Drive token is present; falls back to the connected source folder. If
+ * neither is available, surfaces a toast and bails.
+ *
  * @param {function} [statusCallback] - called after every scan tick
  * @param {number} [intervalMs] - poll interval (defaults to 5s)
  */
 export async function startJoyiWatch(statusCallback, intervalMs = DEFAULT_INTERVAL_MS) {
   if (intervalId) return; // already running
-  if (!isSourceConnected()) {
-    showToast('Connect the source folder first (folder icon in navbar)', 'warning');
+  if (isDriveApiConnected()) {
+    backend = 'drive';
+  } else if (isSourceConnected()) {
+    backend = 'local';
+  } else {
+    showToast('Connect Drive or source folder first (top-right icons).', 'warning');
     return;
   }
   onTick = statusCallback || null;
@@ -80,7 +98,7 @@ export async function startJoyiWatch(statusCallback, intervalMs = DEFAULT_INTERV
   // Run an immediate scan, then schedule.
   await scanOnce();
   intervalId = setInterval(scanOnce, intervalMs);
-  showToast(`Joyi auto-import watching ${folderPath}`, 'info', 3000);
+  showToast(`Joyi auto-import (${backend}) watching ${folderPath}`, 'info', 3000);
 }
 
 export function stopJoyiWatch() {
@@ -96,18 +114,18 @@ async function scanOnce() {
   if (scanInFlight) return; // skip if previous tick still importing
   scanInFlight = true;
   try {
-    const handles = await listNestedSubfolder(folderPath);
-    const xls = handles.filter(h => /\.xlsx?$/i.test(h.name));
+    // Each backend returns a list of {key, mtime, getFile} entries — `key`
+    // is filename (local) or Drive file id (drive); both stay stable across
+    // ticks. getFile() returns a File object on demand so we only pay the
+    // download cost on actual changes.
+    const candidates = backend === 'drive'
+      ? await listDriveCandidates(folderPath)
+      : await listLocalCandidates(folderPath);
 
     if (!bootstrapDone) {
       // Record current mtimes without importing — avoids re-importing every
       // file the first time the watcher starts on an already-populated folder.
-      for (const fh of xls) {
-        try {
-          const f = await fh.getFile();
-          seenMtimes.set(fh.name, f.lastModified);
-        } catch { /* ignore individual file errors */ }
-      }
+      for (const c of candidates) seenMtimes.set(c.key, c.mtime);
       bootstrapDone = true;
       lastScanAt = new Date().toISOString();
       lastError = null;
@@ -115,28 +133,36 @@ async function scanOnce() {
       return;
     }
 
-    // Look for new or modified files.
-    const toImport = [];
-    for (const fh of xls) {
-      const f = await fh.getFile();
-      const seen = seenMtimes.get(fh.name);
-      if (seen == null || f.lastModified > seen) {
-        toImport.push({ handle: fh, file: f });
-      }
-    }
+    const toImport = candidates.filter(c => {
+      const seen = seenMtimes.get(c.key);
+      return seen == null || isNewer(c.mtime, seen);
+    });
 
-    for (const { handle, file } of toImport) {
+    for (const c of toImport) {
       try {
-        const parsed = await parseJoyiFile(file);
+        const file = await c.getFile();
+        // parseJoyiAnyFile picks the right parser by extension — supports
+        // both .xls(x) and .jyd that may live in the Joyi folder.
+        const parsed = await parseJoyiAnyFile(file);
         await importJoyiToDb(parsed);
-        seenMtimes.set(handle.name, file.lastModified);
+        seenMtimes.set(c.key, c.mtime);
         importedSinceStart++;
         broadcastChange('race-updated', { race_number: parsed?.raceNumber });
-        showToast(`Auto-imported Joyi: ${handle.name} → Race ${parsed?.raceNumber ?? '?'}`, 'success', 4000);
+        if (parsed?.raceNumber) {
+          notifyResultEntryStarted(parsed.raceNumber).catch(() => {});
+          // Lazy-fetch the sibling .lcd in the background to derive
+          // joyi_start_time. Doesn't block this import — race results
+          // are already saved. The pending-state tracker will surface
+          // a small "Joyi start time loading…" chip on the race page
+          // until the fetch settles (typically < 1 s on Drive given
+          // the byte-range read is ~30 bytes).
+          enqueueLcdFetch(parsed.raceNumber);
+        }
+        showToast(`Auto-imported Joyi (${backend}): ${c.name} → Race ${parsed?.raceNumber ?? '?'}`, 'success', 4000);
       } catch (err) {
         // Don't keep retrying a bad file: record the mtime so we move on.
-        seenMtimes.set(handle.name, file.lastModified);
-        showToast(`Joyi import failed (${handle.name}): ${err.message}`, 'error', 5000);
+        seenMtimes.set(c.key, c.mtime);
+        showToast(`Joyi import failed (${c.name}): ${err.message}`, 'error', 5000);
       }
     }
 
@@ -148,4 +174,47 @@ async function scanOnce() {
     scanInFlight = false;
     if (onTick) onTick(getJoyiWatchStatus());
   }
+}
+
+// File System Access path: returns candidates with filename keys + ms mtimes.
+async function listLocalCandidates(path) {
+  const handles = await listNestedSubfolder(path);
+  // Only watch importable formats — same set we accept manually elsewhere.
+  const filtered = handles.filter(h => /\.(xlsx?|jyd)$/i.test(h.name));
+  const out = [];
+  for (const h of filtered) {
+    try {
+      const f = await h.getFile();
+      out.push({
+        key: h.name,
+        name: h.name,
+        mtime: f.lastModified,
+        getFile: async () => f,
+      });
+    } catch { /* skip individual errors */ }
+  }
+  return out;
+}
+
+// Drive API path: returns candidates with Drive file id keys + ISO mtimes.
+async function listDriveCandidates(path) {
+  const files = await listDriveFiles(path);
+  return files
+    .filter(f => /\.(xlsx?|jyd)$/i.test(f.name))
+    .map(f => ({
+      key: f.id,
+      name: f.name,
+      mtime: f.modifiedTime,
+      getFile: async () => {
+        const buf = await readDriveFile(f.id);
+        return new File([buf], f.name);
+      },
+    }));
+}
+
+function isNewer(a, b) {
+  // Both backends produce comparable values: numbers (epoch ms) for local,
+  // ISO strings for Drive. The same type is used on each side per session,
+  // so a direct > comparison works for both.
+  return a > b;
 }

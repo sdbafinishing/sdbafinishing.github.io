@@ -7,6 +7,7 @@ import { getAllRaces, getAllDivisions, getDivisionRounds, getDivisionProgression
          getLaneResults, getAllRaceRelationships } from '../db.js';
 import { showToast } from '../utils.js';
 import { mountMultiSelect } from '../components/multi-select.js';
+import { runFlowchartAudit } from '../flowchart-audit.js';
 
 let fcDivSelect = null;
 let fcTeamSelect = null;
@@ -16,6 +17,16 @@ export async function mountFlowchartPage(container) {
   const divisions = await getAllDivisions();
   const races = await getAllRaces();
   const raceMap = Object.fromEntries(races.map(r => [r.race_number, r]));
+
+  // Run the audit up front. If the flowchart isn't ready (no divisions or
+  // no rounds anywhere), short-circuit with a directed empty state instead
+  // of rendering an empty SVG and an "All teams" picker with nothing to
+  // pick from.
+  const audit = await runFlowchartAudit();
+  if (!audit.ready) {
+    container.innerHTML = renderNotReadyState(audit);
+    return;
+  }
 
   // Build unique team list keyed by team_code with team_name as the display.
   // Also remember which races each team_code appears in, so the team filter
@@ -47,7 +58,12 @@ export async function mountFlowchartPage(container) {
   }));
 
   container.innerHTML = `
-    <h4 style="font-size:18px; font-weight:600; margin-bottom:16px;">Race Flowchart</h4>
+    <h4 style="font-size:18px; font-weight:600; margin-bottom:8px;">Race Flowchart</h4>
+
+    <!-- Audit panel: surfaces conflicts (red) and missing data (yellow)
+         picked up by flowchart-audit.js. Collapsed when clean; expanded
+         automatically when something's wrong. -->
+    <div id="fcAuditPanel" style="margin-bottom:12px;">${renderAuditPanel(audit)}</div>
 
     <!-- Filters -->
     <div style="display:flex; gap:12px; margin-bottom:16px; flex-wrap:wrap; align-items:center;">
@@ -267,14 +283,145 @@ async function renderFlowchart(divisions, races, raceMap) {
     yOffset += divHeight + 20;
   }
 
-  // Render SVG
+  // Render SVG. The outer `flowchart-scroll` wrapper lets phones swipe
+  // horizontally when the chart is wider than the viewport (mobile CSS
+  // strips the max-width cap so the SVG can extend past the viewport).
   const totalWidth = 800;
   container.innerHTML = `
-    <svg width="100%" viewBox="0 0 ${totalWidth} ${yOffset || 100}" style="max-width:${totalWidth}px;">
-      <style>
-        text { font-family: 'Inter', sans-serif; }
-      </style>
-      ${svgContent || '<text x="50%" y="50" text-anchor="middle" fill="var(--text-tertiary)" font-size="14">No flowchart data. Configure divisions with rounds first.</text>'}
-    </svg>
+    <div class="flowchart-scroll">
+      <svg width="100%" viewBox="0 0 ${totalWidth} ${yOffset || 100}" style="max-width:${totalWidth}px; min-width:${Math.min(totalWidth, 480)}px;">
+        <style>
+          text { font-family: 'Inter', sans-serif; }
+        </style>
+        ${svgContent || '<text x="50%" y="50" text-anchor="middle" fill="var(--text-tertiary)" font-size="14">No flowchart data. Configure divisions with rounds first.</text>'}
+      </svg>
+    </div>
   `;
+}
+
+// ──────────────── Audit panel rendering ────────────────
+
+/**
+ * Empty-state shown when no divisions or no rounds are configured. Directs
+ * the operator to the right place to fix it (Setup → Divisions). Also
+ * surfaces the most critical missing data so they don't waste a click on
+ * an empty Divisions tab.
+ */
+function renderNotReadyState(audit) {
+  const stats = audit.stats;
+  const haveRaces = stats.races > 0;
+  return `
+    <h4 style="font-size:18px; font-weight:600; margin-bottom:16px;">Race Flowchart</h4>
+    <div class="card" style="padding:32px; text-align:center;">
+      <i class="material-icons" style="font-size:48px; color:var(--text-tertiary);">account_tree</i>
+      <h3 style="margin-top:12px; color:var(--text-secondary); font-size:16px;">
+        Flowchart needs divisions to be configured
+      </h3>
+      <p style="color:var(--text-tertiary); margin-top:8px; font-size:13px; max-width:480px; margin-left:auto; margin-right:auto;">
+        ${haveRaces
+          ? `${stats.races} races are loaded but no division rounds exist yet.
+             Configure divisions (or auto-populate from the draws) so the flowchart
+             knows how to group and progress them.`
+          : 'No races have been imported yet. Import draws, then configure divisions.'}
+      </p>
+      <div style="margin-top:18px; display:flex; gap:10px; justify-content:center; flex-wrap:wrap;">
+        ${haveRaces
+          ? `<a class="btn btn-primary" href="#/setup">
+               <i class="material-icons">tune</i> Configure Divisions
+             </a>`
+          : `<a class="btn btn-primary" href="#/import">
+               <i class="material-icons">upload_file</i> Import Draws
+             </a>`}
+      </div>
+    </div>
+  `;
+}
+
+/**
+ * Render the audit panel. Two banners — conflicts on top (red), missing
+ * data below (amber). Each is collapsed to the first 3 items with a
+ * "show all" toggle so a single broken event doesn't bury the chart.
+ */
+function renderAuditPanel(audit) {
+  const c = audit.conflicts || [];
+  const m = audit.missing || [];
+  if (c.length === 0 && m.length === 0) {
+    // Clean — show a subtle one-liner so the operator knows the audit ran.
+    return `
+      <div style="font-size:12px; color:var(--success); display:flex; align-items:center; gap:6px;">
+        <i class="material-icons" style="font-size:16px;">check_circle</i>
+        Flowchart audit clean — ${audit.stats.divisions} divisions, ${audit.stats.rounds} rounds, ${audit.stats.progressions} progressions.
+      </div>
+    `;
+  }
+
+  return `
+    <details ${c.length > 0 ? 'open' : ''} style="background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius-sm); padding:0;">
+      <summary style="cursor:pointer; padding:10px 14px; font-size:13px; font-weight:600; user-select:none; display:flex; align-items:center; gap:8px;">
+        <i class="material-icons" style="font-size:18px; color:${c.length > 0 ? 'var(--danger)' : 'var(--warning)'};">
+          ${c.length > 0 ? 'error' : 'warning'}
+        </i>
+        Flowchart audit:
+        ${c.length > 0 ? `<span style="color:var(--danger);">${c.length} conflict${c.length === 1 ? '' : 's'}</span>` : ''}
+        ${c.length > 0 && m.length > 0 ? '·' : ''}
+        ${m.length > 0 ? `<span style="color:var(--warning);">${m.length} missing</span>` : ''}
+      </summary>
+      <div style="padding:0 14px 12px;">
+        ${c.length > 0 ? `
+          <div class="section-header" style="border:none; margin:6px 0 4px; color:var(--danger);">Conflicts</div>
+          ${renderFindingList(c)}
+        ` : ''}
+        ${m.length > 0 ? `
+          <div class="section-header" style="border:none; margin:10px 0 4px; color:var(--warning);">Missing data</div>
+          ${renderFindingList(m)}
+        ` : ''}
+        <div style="margin-top:10px; font-size:11px; color:var(--text-tertiary);">
+          Fix issues in <a href="#/setup" style="color:var(--accent);">Setup → Divisions</a>
+          ${audit.stats.uncoveredRaces > 0 ? ` — ${audit.stats.uncoveredRaces} race(s) aren't in any round yet.` : ''}
+        </div>
+      </div>
+    </details>
+  `;
+}
+
+function renderFindingList(items) {
+  const MAX = 3;
+  const head = items.slice(0, MAX);
+  const tail = items.slice(MAX);
+  const liStyle = 'padding:4px 0; font-size:12px; color:var(--text-secondary); border-bottom:1px solid var(--border-subtle);';
+  let html = `<ul style="list-style:none; padding:0; margin:0;">`;
+  for (const it of head) html += renderFindingRow(it, liStyle);
+  if (tail.length > 0) {
+    const detailsId = 'fc-find-' + Math.random().toString(36).slice(2, 8);
+    html += `</ul>
+      <details id="${detailsId}" style="margin-top:4px;">
+        <summary style="cursor:pointer; font-size:11px; color:var(--accent); padding:4px 0;">
+          Show ${tail.length} more…
+        </summary>
+        <ul style="list-style:none; padding:0; margin:0;">`;
+    for (const it of tail) html += renderFindingRow(it, liStyle);
+    html += `</ul></details>`;
+  } else {
+    html += `</ul>`;
+  }
+  return html;
+}
+
+function renderFindingRow(it, liStyle) {
+  const refLink = it.refs?.race_number
+    ? `<a href="#/race/${it.refs.race_number}" style="color:var(--accent); margin-left:6px; font-size:11px;">Race ${it.refs.race_number} →</a>`
+    : '';
+  return `
+    <li style="${liStyle}">
+      ${escapeHtml(it.message)}
+      ${refLink}
+      <span style="display:inline-block; margin-left:6px; font-size:10px; color:var(--text-tertiary); font-family:monospace;">${it.code}</span>
+    </li>
+  `;
+}
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
 }

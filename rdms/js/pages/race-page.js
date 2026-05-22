@@ -4,14 +4,17 @@
  */
 import { getRace, saveRace, getLaneResults, saveLaneResult, bulkSaveLaneResults, getConfig, saveTimesheet, getTimesheet, getAllRaces, getAllDivisions } from '../db.js';
 import { ExcelGrid } from '../grid.js';
-import { computeRankings, calcBatchDelta, validateRace } from '../race.js';
+import { computeRankings, calcBatchDelta, validateRace, getEffectiveStartTime } from '../race.js';
 import { timeToMs, msToTime, timeToDisplay, isValidTime, nowISO, nowDisplay, isoToTime, showToast } from '../utils.js';
 import { broadcastChange } from '../app.js';
 import { showExportModal } from '../export.js';
 import { sendToWhatsApp } from '../whatsapp.js';
-import { promptNextRaceSignal, signalNextRace } from '../next-race-signal.js';
+import { promptNextRaceSignal, signalNextRace, notifyResultEntryStarted } from '../next-race-signal.js';
+import { isLcdPending, awaitLcd, onPendingChange } from '../joyi-lcd-pending.js';
 import { parseJoyiFile, importJoyiToDb } from '../import.js';
 import { printResult, printDraw, openFileFromFolder } from '../print.js';
+import { renderMiniSignalPanel, cleanupMiniSignalPanel } from './signal-panel.js';
+import { generateNextRoundDraw } from '../draw-gen.js';
 import { hasPermission } from '../rbac.js';
 
 let grid = null;
@@ -24,6 +27,7 @@ let saveDebounceTimer = null;
 let batchDebounceTimer = null;
 let joyiChangeHandler = null;
 let p1InputHandler = null;
+let unsubLcdPending = null;
 // Immutable per-mount snapshot of the original draws (lane_number → team info).
 // Used so the output table's team column follows the user-entered lane_input,
 // not the row index. See "lane input bug" in the audit.
@@ -87,11 +91,45 @@ export async function mountRacePage(container, params) {
     }
   });
 
+  // Detect R{n}P{n} placeholders in either column (templates park them in
+  // team_name on some events, team_code on others). When present, expose
+  // a "Resolve from prior results" button in the nav row.
+  //
+  // We also gate the button on the source races' status — if any of the
+  // referenced races (R{n} in the placeholder) hasn't been exported yet,
+  // the button stays visible but disabled with a tooltip naming the
+  // missing race(s). Visible-but-disabled is more discoverable than
+  // hidden ("why isn't this option available?").
+  const placeholderRe = /^R(\d+)P\d+$/i;
+  const placeholderSourceRaces = new Set();
+  for (const lr of laneResults) {
+    for (const cell of [(lr.team_name || '').trim(), (lr.team_code || '').trim()]) {
+      const m = cell.match(placeholderRe);
+      if (m) placeholderSourceRaces.add(parseInt(m[1], 10));
+    }
+  }
+  const hasPlaceholders = placeholderSourceRaces.size > 0;
+  // Which source races aren't ready? Status must be exported or sent
+  // (cancelled doesn't help — its lanes have no computed_position).
+  const placeholderSourceRacesNotReady = [];
+  if (hasPlaceholders) {
+    const allRaces = await getAllRaces();
+    const byNum = new Map(allRaces.map(r => [r.race_number, r]));
+    for (const srcNum of placeholderSourceRaces) {
+      const src = byNum.get(srcNum);
+      if (!src || !['exported', 'sent'].includes(src.status)) {
+        placeholderSourceRacesNotReady.push(srcNum);
+      }
+    }
+    placeholderSourceRacesNotReady.sort((a, b) => a - b);
+  }
+  const canResolveNow = hasPlaceholders && placeholderSourceRacesNotReady.length === 0;
+
   container.innerHTML = `
     <!-- Race Header — odd/even shaded to match the race-list striping. -->
-    <div class="card" style="margin-bottom:8px; padding:10px 14px; ${raceNumber % 2 === 1 ? 'background: rgba(250, 204, 21, 0.10);' : ''}">
-      <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px;">
-        <div style="display:flex; align-items:center; gap:10px;">
+    <div class="card race-page-header" style="margin-bottom:8px; padding:10px 14px; ${raceNumber % 2 === 1 ? 'background: rgba(250, 204, 21, 0.10);' : ''}">
+      <div class="race-header-row" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px;">
+        <div class="race-header-title" style="display:flex; align-items:center; gap:10px;">
           <span title="${divLabel}" style="display:inline-block; width:10px; height:32px; border-radius:3px; background:${divColour}; flex-shrink:0;"></span>
           <div>
             <div style="font-size:11px; color:var(--text-tertiary); text-transform:uppercase; letter-spacing:0.5px;">Race</div>
@@ -99,7 +137,7 @@ export async function mountRacePage(container, params) {
             <div style="font-size:13px; color:var(--text-secondary); margin-top:2px;">${raceData.race_title || 'Untitled'}</div>
           </div>
         </div>
-        <div style="display:grid; grid-template-columns:repeat(4, auto); gap:14px; text-align:center;">
+        <div class="race-header-times" style="display:grid; grid-template-columns:repeat(4, auto); gap:14px; text-align:center;">
           <div>
             <div style="font-size:10px; color:var(--text-tertiary); text-transform:uppercase;">Sched</div>
             <div style="font-size:13px; font-weight:500;">${raceData.race_time || '—'}</div>
@@ -107,6 +145,13 @@ export async function mountRacePage(container, params) {
           <div>
             <div style="font-size:10px; color:var(--text-tertiary); text-transform:uppercase;">Start</div>
             <div style="font-size:13px; font-weight:500; color:var(--success);" id="raceStartTime">${renderStartTimeText(raceData)}</div>
+            <!-- Inline pending chip: shown while a sibling .lcd is being
+                 fetched in the background after a Joyi import. Auto-hides
+                 once joyi_start_time lands or the fetch fails. -->
+            <div id="raceJoyiPending" style="display:none; align-items:center; gap:4px; font-size:10px; color:#7dd3fc; margin-top:2px;">
+              <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:#7dd3fc; opacity:0.9; animation:pf-pulse 1.2s ease-in-out infinite;"></span>
+              Joyi start time loading…
+            </div>
           </div>
           <div>
             <div style="font-size:10px; color:var(--text-tertiary); text-transform:uppercase;">Export</div>
@@ -117,13 +162,17 @@ export async function mountRacePage(container, params) {
             <div style="font-size:13px; font-weight:500;" id="raceSendTime">${renderSendTimeText(raceData)}</div>
           </div>
         </div>
-        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:2px;">
-          <div style="display:flex; gap:6px; align-items:center;">
+        <div class="race-header-status" style="display:flex; flex-direction:column; align-items:flex-end; gap:2px;">
+          <div class="race-header-status-row" style="display:flex; gap:8px; align-items:center;">
             <span class="badge badge-${raceData.status}" id="raceStatus">${raceData.status?.toUpperCase() || 'PENDING'}</span>
+            <!-- Mini digital flag — RC+ST dots (read-only) + Finishing toggle.
+                 Finishing is the primary user of this race page, so it's the
+                 only one the operator can flip from here. -->
+            <span id="raceHeaderMiniFlag" style="display:inline-flex; align-items:stretch;"></span>
             <span id="raceTimer" style="font-size:18px; font-weight:600; font-variant-numeric:tabular-nums; color:var(--accent);"></span>
           </div>
           <button class="btn btn-ghost" id="stopCounterBtn" onclick="window._stopCounter()" title="Stop the running counter (data is preserved)"
-                  style="font-size:11px; padding:1px 8px; ${raceData.status === 'started' && raceData.start_time ? '' : 'display:none;'}">
+                  style="font-size:11px; padding:1px 8px; ${raceData.status === 'started' && (raceData.start_time || raceData.joyi_start_time) ? '' : 'display:none;'}">
             <i class="material-icons" style="font-size:14px;">pause</i> Stop
           </button>
         </div>
@@ -134,20 +183,37 @@ export async function mountRacePage(container, params) {
          race-table striping so the operator can tell parity at a glance.
          Buttons only render when the adjacent race actually exists in
          the loaded set — no more "Race N not found" dead-ends. -->
-    <div style="display:flex; gap:6px; margin-bottom:6px; flex-wrap:wrap; align-items:center;">
+    <div class="race-page-nav" style="display:flex; gap:6px; margin-bottom:6px; flex-wrap:wrap; align-items:center;">
       ${prevRaceNum != null ? `<a href="#/race/${prevRaceNum}" class="btn btn-outline btn-sm" style="${prevRaceNum % 2 === 1 ? 'background: rgba(250, 204, 21, 0.12);' : ''}"><i class="material-icons" style="font-size:16px;">chevron_left</i> Race ${prevRaceNum}</a>` : ''}
       ${nextRaceNum != null ? `<a href="#/race/${nextRaceNum}" class="btn btn-outline btn-sm" style="${nextRaceNum % 2 === 1 ? 'background: rgba(250, 204, 21, 0.12);' : ''}">Race ${nextRaceNum} <i class="material-icons" style="font-size:16px;">chevron_right</i></a>` : ''}
       <span style="border-left:1px solid var(--border); height:20px; margin:0 4px;"></span>
       <button class="btn btn-ghost btn-sm" onclick="window._printDraw()" title="Print draw"><i class="material-icons" style="font-size:16px;">description</i> Print Draw</button>
       <button class="btn btn-ghost btn-sm" onclick="window._openDraw()" title="Open draw file"><i class="material-icons" style="font-size:16px;">folder_open</i> Open Draw</button>
-      <label class="btn btn-ghost btn-sm" style="cursor:pointer;" title="Open Joyi photo-finish image (.lcd + .jyd)">
+      <button class="btn btn-ghost btn-sm" onclick="window._photoFinish()" title="Open Joyi photo-finish image (.lcd + .jyd)">
         <i class="material-icons" style="font-size:16px;">photo_camera</i> Photo Finish
-        <input type="file" id="photoFinishInput" multiple accept=".lcd,.jyd,.xls,.xlsx" style="display:none;">
-      </label>
-      <div style="flex:1;"></div>
-      <button class="btn btn-danger btn-outline btn-sm" onclick="window._cancelRace()" ${raceData.status === 'cancelled' ? 'disabled' : ''}>
-        Cancel Race
       </button>
+      ${hasPlaceholders && hasPermission('race.import_draw') ? (canResolveNow
+        ? `<button class="btn btn-outline btn-sm" onclick="window._resolvePlaceholders()"
+                  title="Replace R{n}P{n} placeholders with actual teams from the source races' results."
+                  style="color:var(--accent);">
+            <i class="material-icons" style="font-size:16px;">auto_fix_high</i> Resolve from prior results
+          </button>`
+        : `<button class="btn btn-ghost btn-sm" disabled
+                  title="Waiting for source race${placeholderSourceRacesNotReady.length === 1 ? '' : 's'} ${placeholderSourceRacesNotReady.join(', ')} to be exported before placeholders can be resolved.">
+            <i class="material-icons" style="font-size:16px;">hourglass_empty</i> Awaiting Race ${placeholderSourceRacesNotReady.slice(0, 3).join(', ')}${placeholderSourceRacesNotReady.length > 3 ? '…' : ''}
+          </button>`
+      ) : ''}
+      <div style="flex:1;"></div>
+      ${raceData.status === 'cancelled'
+        ? `<button class="btn btn-outline btn-sm" onclick="window._reviveRace()"
+                  style="color:var(--success); border-color:var(--success);"
+                  title="Restore this cancelled race. Status returns to PENDING (or STARTED if a start time was already recorded). Lane results and start/joyi/export history are untouched.">
+            <i class="material-icons" style="font-size:16px;">restart_alt</i> Revive Race
+          </button>`
+        : `<button class="btn btn-danger btn-outline btn-sm" onclick="window._cancelRace()">
+            Cancel Race
+          </button>`
+      }
     </div>
 
     <!-- START / RESTART + FINISH row (70:30) -->
@@ -156,15 +222,28 @@ export async function mountRacePage(container, params) {
     ` : ''}
 
     <!-- Results Input Section -->
-    <div class="card" style="margin-bottom:8px; padding:10px 14px;">
-      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;">
-        <div class="section-header" style="margin:0; border:none;">Results Input — must be in finishing order</div>
-        ${configData?.shared_joyi_folder || hasPermission('race.import_joyi') ? `
-        <label class="btn btn-outline" style="cursor:pointer; font-size:12px; padding:3px 10px;">
-          <i class="material-icons" style="font-size:16px;">cloud_download</i> Import Joyi
-          <input type="file" accept=".xls,.xlsx" style="display:none;" id="joyiFileInput">
-        </label>
-        ` : ''}
+    <div class="card race-results-input" style="margin-bottom:8px; padding:10px 14px;">
+      <div class="section-header-row" style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; gap:8px; flex-wrap:wrap;">
+        <div class="section-header section-header-inline" style="margin:0; border:none;">
+          <span class="section-header-main">Results Input</span>
+          <span class="section-header-hint" style="font-weight:400; color:var(--text-tertiary);"> — must be in finishing order</span>
+        </div>
+        <div style="display:flex; gap:6px;">
+          ${hasPermission('race.input') ? `
+          <button class="btn btn-ghost" onclick="window._clearInputs()"
+                  style="cursor:pointer; font-size:12px; padding:3px 10px; color:var(--danger);"
+                  title="Clear all input cells (Lane, Time, TP, Remarks). Keeps team draws + race state untouched.">
+            <i class="material-icons" style="font-size:16px;">backspace</i> Clear Inputs
+          </button>
+          ` : ''}
+          ${configData?.shared_joyi_folder || hasPermission('race.import_joyi') ? `
+          <button class="btn btn-outline" onclick="window._importJoyi()"
+                  style="cursor:pointer; font-size:12px; padding:3px 10px;"
+                  title="Auto-finds .jyd / .xls / .lcd in the Joyi folder for this race; falls back to drag-drop.">
+            <i class="material-icons" style="font-size:16px;">cloud_download</i> Import Joyi
+          </button>
+          ` : ''}
+        </div>
       </div>
       <div id="inputGridContainer"></div>
     </div>
@@ -196,9 +275,9 @@ export async function mountRacePage(container, params) {
     <div id="validationPanel" style="margin-bottom:8px;"></div>
 
     <!-- Results Output Section -->
-    <div class="card" style="margin-bottom:8px; padding:10px 14px;">
-      <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-bottom:8px;">
-        <div class="section-header" style="margin:0; border:none;">Results Output</div>
+    <div class="card race-results-output" style="margin-bottom:8px; padding:10px 14px;">
+      <div class="section-header-row" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-bottom:8px;">
+        <div class="section-header section-header-inline" style="margin:0; border:none;">Results Output</div>
         <div style="display:flex; gap:6px; flex-wrap:wrap;">
           ${hasPermission('race.export') ? `
           ${configData?.whatsapp_group
@@ -214,8 +293,34 @@ export async function mountRacePage(container, params) {
           <button class="btn btn-ghost" onclick="window._openResult()" title="Open result file"><i class="material-icons">open_in_new</i></button>
         </div>
       </div>
-      <div id="outputTableContainer"></div>
+      <div id="outputTableContainer" class="race-output-scroll" style="overflow-x:auto; -webkit-overflow-scrolling:touch;"></div>
     </div>
+
+    <!-- Blocking overlay: only shown when the operator has started result
+         entry / clicked FINISH but the Joyi LCD fetch hasn't finished yet.
+         The fetch is usually < 1 s, so this appears momentarily; longer
+         delays warrant the wait so the elapsed-time delta is correct. -->
+    <div id="raceJoyiBlock" style="display:none; position:fixed; inset:0; z-index:9000;
+                                   background:rgba(15,23,42,0.55); backdrop-filter:blur(2px);
+                                   align-items:center; justify-content:center;">
+      <div style="background:var(--bg-card); border-radius:var(--radius-lg); padding:20px 24px;
+                  box-shadow:var(--shadow-lg); display:flex; gap:14px; align-items:center; max-width:420px;">
+        <span style="display:inline-block; width:18px; height:18px; border-radius:50%;
+                     border:3px solid rgba(125,211,252,0.35); border-top-color:#7dd3fc;
+                     animation:pf-spin 0.9s linear infinite;"></span>
+        <div>
+          <div style="font-weight:600; font-size:14px;">Waiting for Joyi start time…</div>
+          <div style="font-size:12px; color:var(--text-tertiary); margin-top:2px;">
+            The finish-time delta depends on the Joyi-derived race start.
+            This usually takes &lt; 1 s.
+          </div>
+        </div>
+      </div>
+    </div>
+    <style>
+      @keyframes pf-pulse { 0%,100% { opacity:0.4 } 50% { opacity:1 } }
+      @keyframes pf-spin  { to { transform:rotate(360deg) } }
+    </style>
   `;
 
   // Build input grid
@@ -233,8 +338,10 @@ export async function mountRacePage(container, params) {
   // Initial ranking
   recalculate();
 
-  // Start timer if race is started
-  if (raceData.start_time) {
+  // Start the running timer if the race has begun via either source.
+  // Joyi-derived start counts too — operator may have skipped the manual
+  // click and we should still tick.
+  if (raceData.start_time || raceData.joyi_start_time) {
     startTimer();
   }
 
@@ -243,6 +350,46 @@ export async function mountRacePage(container, params) {
 
   // Render the START/RESTART + FINISH button row now that handlers are wired.
   if (hasPermission('race.start')) renderStartStopButton();
+
+  // Subscribe to the LCD-pending tracker so the inline chip near the
+  // Start cell reflects in-flight Joyi background fetches. When the
+  // pending set changes, refresh visibility for THIS race only.
+  refreshJoyiPendingChip();
+  unsubLcdPending = onPendingChange(refreshJoyiPendingChip);
+
+  // Refresh start-time display + chip when our race is updated from
+  // another tab (e.g. the joyi-watch loop finished its LCD fetch).
+  window.addEventListener('rdms-race-updated', _onRaceUpdateRefresh);
+
+  // Mount the mini digital flag in the race header. Fire-and-forget — the
+  // panel handles its own Firebase init failure gracefully.
+  renderMiniSignalPanel('raceHeaderMiniFlag').catch(() => {});
+}
+
+// Refresh the inline pending chip + start-time display for the current race.
+function refreshJoyiPendingChip() {
+  const chip = document.getElementById('raceJoyiPending');
+  if (!chip || !raceNumber) return;
+  chip.style.display = isLcdPending(raceNumber) ? 'inline-flex' : 'none';
+}
+
+// Listen for cross-tab race-updated broadcasts (joyi-watch finished an
+// LCD fetch in another tab → refresh our display).
+async function _onRaceUpdateRefresh(ev) {
+  const detail = ev.detail || {};
+  if (detail.race_number !== raceNumber) return;
+  // Reload race data and re-render the affected pieces.
+  const fresh = await getRace(raceNumber);
+  if (!fresh) return;
+  raceData = fresh;
+  const startEl = document.getElementById('raceStartTime');
+  if (startEl) startEl.innerHTML = renderStartTimeText(raceData);
+  renderStartStopButton();
+  refreshJoyiPendingChip();
+  // Re-anchor the running timer if joyi_start_time just landed.
+  if (raceData.start_time || raceData.joyi_start_time) {
+    if (!timerInterval) startTimer();
+  }
 }
 
 export function unmountRacePage() {
@@ -254,11 +401,9 @@ export function unmountRacePage() {
   // Destroy grid
   if (grid) { grid.destroy(); grid = null; }
 
-  // Remove event listeners that were added in attachHandlers
-  const joyiInput = document.getElementById('joyiFileInput');
-  if (joyiInput && joyiChangeHandler) {
-    joyiInput.removeEventListener('change', joyiChangeHandler);
-  }
+  // joyiChangeHandler is unused now (the <input> was replaced by a button
+  // + drag-drop modal) — kept the ref-clear here in case any half-mounted
+  // state remains. The modal cleans up its own handlers on close.
   joyiChangeHandler = null;
 
   const p1Input = document.getElementById('batchP1Time');
@@ -266,6 +411,16 @@ export function unmountRacePage() {
     p1Input.removeEventListener('input', p1InputHandler);
   }
   p1InputHandler = null;
+
+  // Detach the joyi-pending subscriber + cross-tab listener.
+  if (typeof unsubLcdPending === 'function') {
+    try { unsubLcdPending(); } catch {}
+    unsubLcdPending = null;
+  }
+  window.removeEventListener('rdms-race-updated', _onRaceUpdateRefresh);
+
+  // Tear down the mini-flag Firebase listener so it doesn't leak across mounts.
+  try { cleanupMiniSignalPanel(); } catch {}
 
   // Clear state
   raceNumber = null;
@@ -278,6 +433,12 @@ export function unmountRacePage() {
   delete window._startRace;
   delete window._stopCounter;
   delete window._cancelRace;
+  delete window._reviveRace;
+  delete window._resetStart;
+  delete window._resetRace;
+  delete window._clearInputs;
+  delete window._resolvePlaceholders;
+  delete window._importJoyi;
   delete window._finishBackup;
   delete window._exportAndSend;
   delete window._exportOnly;
@@ -403,6 +564,14 @@ function onCellChange(rowIndex, colKey, newValue, rowData) {
   // Update display time
   if (colKey === 'raw_time') {
     rowData.display_time = timeToDisplay(newValue, timeMode);
+  }
+
+  // First non-empty entry in raw_time or remarks → fire result-entry signals
+  // (Lambda nextraceedit + Firebase digital flag → red). notifyResultEntryStarted
+  // is itself idempotent and gated on "next race not yet started" so we only
+  // need a cheap local trigger: cell key + non-empty value.
+  if ((colKey === 'raw_time' || colKey === 'remarks') && newValue && String(newValue).trim()) {
+    notifyResultEntryStarted(raceNumber).catch(() => {});
   }
 
   // Recalculate rankings
@@ -659,7 +828,10 @@ function renderValidation(data) {
 function startTimer() {
   if (timerInterval) clearInterval(timerInterval);
   const timerEl = document.getElementById('raceTimer');
-  const baseline = raceData.restart_time || raceData.start_time;
+  // Restart wins (operator-initiated re-baseline); otherwise prefer the
+  // Joyi-derived start (sub-second accurate, no missed clicks), falling
+  // back to the manual click.
+  const baseline = raceData.restart_time || raceData.joyi_start_time || raceData.start_time;
   if (!timerEl || !baseline) return;
 
   function update() {
@@ -695,11 +867,13 @@ async function checkPreviousRaces(currentRaceNum) {
     if (!r.send_time) missingSends.push(r.race_number);
   }
 
+  // Singular/plural label so the message reads naturally for one race vs many.
+  const fmtRaces = (nums) => (nums.length === 1 ? `Race ${nums[0]}` : `Races ${nums.join(', ')}`);
   if (missingExports.length > 0) {
-    showToast(`Reminder: Race(s) ${missingExports.join(', ')} NOT exported`, 'warning', 6000);
+    showToast(`Reminder: ${fmtRaces(missingExports)} NOT exported`, 'warning', 6000);
   }
   if (missingSends.length > 0) {
-    showToast(`Reminder: Race(s) ${missingSends.join(', ')} NOT sent`, 'warning', 6000);
+    showToast(`Reminder: ${fmtRaces(missingSends)} NOT sent`, 'warning', 6000);
   }
 }
 
@@ -713,11 +887,20 @@ function renderStartStopButton() {
   const wrap = document.getElementById('startStopWrap');
   if (!wrap) return;
   const cancelled = raceData.status === 'cancelled';
-  const everStarted = !!raceData.start_time;
+  // The race has "begun" if either source has a start: a Joyi-imported
+  // .lcd has populated joyi_start_time, OR the operator has clicked START.
+  // Either way, the button flips to RESTART RACE so the operator can
+  // manually re-baseline the timer if needed.
+  const everStarted = !!(raceData.start_time || raceData.joyi_start_time);
   const startLabel = everStarted ? 'RESTART RACE' : 'START RACE';
   const startIcon = everStarted ? 'replay' : 'play_arrow';
   const startCls = everStarted ? 'btn-primary' : 'btn-success';
   const finishDisabled = (!everStarted || cancelled) ? 'disabled' : '';
+
+  // "Reset start" is an escape hatch for a misclick on START — only useful
+  // before any results land (export or any raw_time entered). Once data has
+  // been captured, hide it; the operator must go via DB Admin instead.
+  const canReset = everStarted && !raceData.export_time && !cancelled;
 
   wrap.innerHTML = `
     <button class="btn ${startCls}" style="flex:7;" onclick="window._startRace()" id="startBtn" ${cancelled ? 'disabled' : ''}>
@@ -727,20 +910,48 @@ function renderStartStopButton() {
             title="Capture first-boat finish timestamp at click moment">
       <i class="material-icons">flag</i> FINISH
     </button>
+    ${canReset ? `
+    <button class="btn btn-ghost btn-sm" style="flex:0 0 auto;" onclick="window._resetStart()" id="resetStartBtn"
+            title="Undo START — clears start_time and goes back to PENDING. Hidden once results are exported.">
+      <i class="material-icons" style="font-size:16px;">undo</i> Reset start
+    </button>
+    <button class="btn btn-ghost btn-sm" style="flex:0 0 auto; color:var(--danger);" onclick="window._resetRace()" id="resetRaceBtn"
+            title="Draconian reset — clears start times AND all lane results. Use only for a confirmed re-race.">
+      <i class="material-icons" style="font-size:16px;">delete_forever</i> Reset race
+    </button>
+    ` : ''}
   `;
 }
 
 /**
- * Header "Start" cell content. If a restart_time exists, show the original
- * struck through next to the active restart_time so the operator can see
- * both.
+ * Header "Start" cell content. Priority:
+ *   1. joyi_start_time (derived from Joyi files — sub-second accurate when
+ *      transport preserves mtime; always present after a Joyi import)
+ *   2. start_time (operator click — kept as fallback for when Joyi isn't
+ *      available or hasn't been imported yet)
+ *   3. restart_time (operator restart — overrides timer baseline but the
+ *      original start stays for the record)
+ *
+ * Small inline badge shows the source so the operator knows which value
+ * is being shown. Manual + Joyi disagreement is surfaced via tooltip.
  */
 function renderStartTimeText(race) {
-  if (!race.start_time && !race.restart_time) return '—';
-  if (race.restart_time && race.start_time) {
-    return `<s style="color:var(--text-tertiary); font-weight:400;">${isoToTime(race.start_time)}</s> → ${isoToTime(race.restart_time)}`;
+  const { start, source, restartedFrom } = getEffectiveStartTime(race);
+  if (!start && !restartedFrom) return '—';
+  const baseDisplay = start ? isoToTime(start) : isoToTime(restartedFrom);
+  // Build a tooltip noting both manual and joyi when both exist + differ.
+  const both = race.joyi_start_time && race.start_time;
+  const driftMs = both ? Math.abs(new Date(race.joyi_start_time) - new Date(race.start_time)) : 0;
+  const driftNote = both && driftMs > 1000
+    ? ` (manual=${isoToTime(race.start_time)}, Δ=${(driftMs / 1000).toFixed(1)}s)`
+    : '';
+  const badge = source === 'joyi'
+    ? `<span title="From Joyi .lcd metadata${driftNote}" style="display:inline-block; font-size:9px; font-weight:600; letter-spacing:0.5px; text-transform:uppercase; color:#7dd3fc; background:rgba(125,211,252,0.18); padding:1px 5px; border-radius:3px; margin-left:5px; vertical-align:middle;">Joyi</span>`
+    : '';
+  if (restartedFrom && start) {
+    return `<s style="color:var(--text-tertiary); font-weight:400;">${baseDisplay}</s> → ${isoToTime(restartedFrom)}${badge}`;
   }
-  return isoToTime(race.start_time || race.restart_time);
+  return `${baseDisplay}${badge}`;
 }
 
 /**
@@ -820,13 +1031,315 @@ function attachHandlers() {
   };
 
   window._cancelRace = async () => {
-    if (!confirm(`Cancel Race ${raceNumber}? This can be reversed by changing status back in DB Admin.`)) return;
+    if (!confirm(`Cancel Race ${raceNumber}? You can restore it later from this same page (Revive Race).`)) return;
     raceData.status = 'cancelled';
     await saveRace(raceData);
     broadcastChange('race-updated', { race_number: raceNumber });
     document.getElementById('raceStatus').textContent = 'CANCELLED';
     document.getElementById('raceStatus').className = 'badge badge-cancelled';
-    showToast(`Race ${raceNumber} cancelled. To reverse, go to DB Admin → races → change status back to "pending".`, 'warning', 8000);
+    showToast(`Race ${raceNumber} cancelled. Use Revive Race to restore.`, 'warning', 5000);
+  };
+
+  // Revive a previously cancelled race. Mirrors _cancelRace in reverse —
+  // flips status back to whichever state the recorded times imply:
+  //   - exported / sent if export_time exists (the cancellation didn't
+  //     wipe the export history — preserve that audit trail)
+  //   - started if start_time or joyi_start_time exists
+  //   - pending otherwise
+  // No other state is touched; if the operator also wants to clear lane
+  // results, they use Reset race separately.
+  window._reviveRace = async () => {
+    if (raceData.status !== 'cancelled') {
+      showToast('Race is not cancelled — nothing to revive.', 'info', 2500);
+      return;
+    }
+    if (!confirm(`Revive Race ${raceNumber}? Returns status to where it logically should be based on existing start/export times. Lane results stay as they are.`)) return;
+
+    let newStatus = 'pending';
+    if (raceData.export_time) newStatus = raceData.send_time ? 'sent' : 'exported';
+    else if (raceData.start_time || raceData.joyi_start_time) newStatus = 'started';
+
+    raceData.status = newStatus;
+    await saveRace(raceData);
+    broadcastChange('race-updated', { race_number: raceNumber });
+
+    // Re-render the affected header pieces in place (no full remount —
+    // the operator may be mid-task and we want to preserve any unsaved
+    // grid edits).
+    const statusEl = document.getElementById('raceStatus');
+    if (statusEl) {
+      statusEl.textContent = newStatus.toUpperCase();
+      statusEl.className = `badge badge-${newStatus}`;
+    }
+    renderStartStopButton();
+    // Swap the Revive button back to Cancel in-place. The button sits
+    // inside the .race-page-nav row; find it by current text content
+    // (we don't have a stable id on it since both buttons share the slot).
+    const navRow = document.querySelector('.race-page-nav');
+    const revive = navRow?.querySelector('button[onclick="window._reviveRace()"]');
+    if (revive) {
+      const cancel = document.createElement('button');
+      cancel.className = 'btn btn-danger btn-outline btn-sm';
+      cancel.setAttribute('onclick', 'window._cancelRace()');
+      cancel.textContent = 'Cancel Race';
+      revive.replaceWith(cancel);
+    }
+    showToast(`Race ${raceNumber} revived (status: ${newStatus.toUpperCase()}).`, 'success', 4000);
+  };
+
+  // Draconian race reset — clears start times AND all lane results
+  // (raw_time, penalty_time, remarks, computed_position, joyi fields).
+  // Team_name / team_code / lane_number / designation stay (those are the
+  // imported draw — unchanged by a re-race). Status returns to pending.
+  //
+  // Gated behind type-the-race-number confirmation because this destroys
+  // recorded data. Only relevant for a confirmed re-race (e.g. boat hit
+  // a buoy, race officials void the result, restart on the water).
+  window._resetRace = async () => {
+    if (raceData.status === 'cancelled') {
+      showToast('Race is cancelled — nothing to reset. Change status in DB Admin.', 'warning', 5000);
+      return;
+    }
+    const typed = window.prompt(
+      `RESET RACE ${raceNumber}?\n\n` +
+      `This permanently clears:\n` +
+      `  • start_time / restart_time / joyi_start_time\n` +
+      `  • p1 finish time\n` +
+      `  • EVERY lane's raw_time, penalty, remarks, computed position\n` +
+      `  • EVERY lane's Joyi result fields\n\n` +
+      `Team draw (lane assignments) is preserved.\n\n` +
+      `Type the race number (${raceNumber}) to confirm:`
+    );
+    if (typed == null) return; // cancelled
+    if (parseInt(typed, 10) !== raceNumber) {
+      showToast('Race number did not match — reset aborted.', 'info', 4000);
+      return;
+    }
+
+    // 1) Clear start-related fields on the race record.
+    raceData.start_time = null;
+    raceData.joyi_start_time = null;
+    raceData.restart_time = null;
+    raceData.p1_finish_time = null;
+    raceData.p1_finish_elapsed_ms = null;
+    raceData.result_entry_signaled = false;
+    raceData.joyi_imported = false;
+    raceData.status = 'pending';
+    // Export history is not cleared — the audit trail of what WAS exported
+    // before the reset is still useful. The next export will increment as
+    // a new version anyway.
+    await saveRace(raceData);
+
+    // 2) Clear lane-result fields. Preserve identity (lane_number, team).
+    const laneCount = configData?.lane_count || 6;
+    const existing = await getLaneResults(raceNumber);
+    const wipedLanes = [];
+    for (let i = 0; i < laneCount; i++) {
+      const lr = existing.find(r => r.lane_number === i + 1) || {};
+      wipedLanes.push({
+        race_number: raceNumber,
+        lane_number: i + 1,
+        team_name: lr.team_name || '',
+        team_code: lr.team_code || '',
+        designation: lr.designation || '',
+        // Wipe everything else:
+        lane_input: '',
+        raw_time: '',
+        penalty_time: '',
+        remarks: '',
+        computed_position: null,
+        effective_time_ms: null,
+        joyi_lane: null,
+        joyi_time: null,
+        joyi_name: null,
+        joyi_rank: null,
+        validation: null,
+      });
+    }
+    await bulkSaveLaneResults(wipedLanes);
+
+    // 3) Clear timesheet too.
+    const ts = await getTimesheet(raceNumber);
+    if (ts) {
+      ts.start_time = null;
+      ts.restart_time = null;
+      ts.p1_finish_time = null;
+      ts.p1_finish_elapsed_ms = null;
+      ts.send_time = null;
+      ts.re_send_time = null;
+      await saveTimesheet(ts);
+    }
+
+    // 4) Stop the running timer + reload the grid from the now-empty DB.
+    if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+    const newGridData = buildGridData(wipedLanes, laneCount);
+    for (let i = 0; i < newGridData.length; i++) {
+      grid.setRowData(i, newGridData[i]);
+    }
+
+    // 5) Re-render header + buttons.
+    document.getElementById('raceStartTime').innerHTML = renderStartTimeText(raceData);
+    document.getElementById('raceStatus').textContent = 'PENDING';
+    document.getElementById('raceStatus').className = 'badge badge-pending';
+    const timerEl = document.getElementById('raceTimer');
+    if (timerEl) timerEl.textContent = '';
+    renderStartStopButton();
+    broadcastChange('race-updated', { race_number: raceNumber });
+    showToast(`Race ${raceNumber} fully reset (re-race). Start when ready.`, 'warning', 6000);
+    recalculate();
+  };
+
+  // Manual placeholder resolver — replaces R{n}P{n} cells with actual
+  // teams from the source races. Mirrors the auto-prompt flow but runs
+  // for just this one race. Persists DB + writes .xls to 13/ + shared.
+  window._resolvePlaceholders = async () => {
+    if (!confirm(
+      `Resolve R{n}P{n} placeholders for Race ${raceNumber}?\n\n` +
+      `Looks at the placeholder in each lane (e.g. "R5P1") and pulls the\n` +
+      `matching team from the source race's results. Lane assignments stay\n` +
+      `as they are — only the team names + codes change.\n\n` +
+      `Source races must have computed positions (i.e. results entered).\n` +
+      `An .xls file is written to 13 Output_Next Round Draws/ + shared folder.`
+    )) return;
+
+    showToast('Resolving placeholders…', 'info', 2000);
+    const result = await generateNextRoundDraw(raceNumber);
+    if (result.warnings.length > 0) {
+      console.warn('Resolve placeholders warnings:', result.warnings);
+    }
+    if (result.resolved > 0) {
+      showToast(
+        `Resolved ${result.resolved} of ${result.total} placeholder${result.total === 1 ? '' : 's'}` +
+        (result.skipped > 0 ? ` (${result.skipped} skipped — see console)` : '') +
+        (result.filename ? ` · ${result.filename}` : ''),
+        result.skipped > 0 ? 'warning' : 'success', 5500);
+      broadcastChange('draw-imported', { race_number: raceNumber });
+      // Reload lane_results + re-render the grid in place.
+      const fresh = await getLaneResults(raceNumber);
+      const newGridData = buildGridData(fresh, configData?.lane_count || 6);
+      for (let i = 0; i < newGridData.length; i++) {
+        grid?.setRowData(i, newGridData[i]);
+      }
+      recalculate();
+      // Refresh the page-level snapshot so the output table picks up the
+      // new team names without a full re-mount.
+      raceData = (await getRace(raceNumber)) || raceData;
+    } else {
+      showToast(result.warnings[0] || 'No placeholders resolved.', 'warning', 5000);
+    }
+  };
+
+  // Clear the Results Input panel only: lane_input / raw_time / penalty_time
+  // / remarks / computed_position on every lane row. Preserves team draws,
+  // race state (start_time, status, export_time), Joyi imports, etc.
+  //
+  // Use when the operator wants a quick wipe of entered values to start
+  // typing again — distinct from "Reset start" (race-level) and
+  // "Reset race" (race + lane_results destructive).
+  window._clearInputs = async () => {
+    const data = grid?.getData() || [];
+    const hasAny = data.some(r =>
+      (r.lane_input && String(r.lane_input).trim()) ||
+      (r.raw_time && String(r.raw_time).trim()) ||
+      (r.penalty_time && String(r.penalty_time).trim()) ||
+      (r.remarks && String(r.remarks).trim())
+    );
+    if (!hasAny) {
+      showToast('Input panel is already empty.', 'info', 2500);
+      return;
+    }
+    if (!confirm(
+      `Clear all entered values in the Results Input panel for Race ${raceNumber}?\n\n` +
+      `Cleared: Lane, Time, TP, Remarks (every row).\n` +
+      `Preserved: team draws, start times, race status, export/send history,\n` +
+      `Joyi import results, and the Output table will recompute automatically.`
+    )) return;
+
+    // Wipe IndexedDB lane_results entries — keep identity columns (team_*,
+    // lane_number, designation) and Joyi columns (those came from import,
+    // not from manual input).
+    const laneCount = configData?.lane_count || 6;
+    const existing = await getLaneResults(raceNumber);
+    const wiped = [];
+    for (let i = 0; i < laneCount; i++) {
+      const lr = existing.find(r => r.lane_number === i + 1) || {};
+      wiped.push({
+        race_number: raceNumber,
+        lane_number: i + 1,
+        team_name: lr.team_name || '',
+        team_code: lr.team_code || '',
+        designation: lr.designation || '',
+        // Joyi-derived columns persist — they're not manual input.
+        joyi_lane: lr.joyi_lane ?? null,
+        joyi_time: lr.joyi_time ?? null,
+        joyi_name: lr.joyi_name ?? null,
+        joyi_rank: lr.joyi_rank ?? null,
+        // Wiped:
+        lane_input: '',
+        raw_time: '',
+        penalty_time: '',
+        remarks: '',
+        computed_position: null,
+        effective_time_ms: null,
+        validation: null,
+      });
+    }
+    await bulkSaveLaneResults(wiped);
+
+    // Refresh grid in-place so the UI mirrors the DB without remount.
+    const fresh = buildGridData(wiped, laneCount);
+    for (let i = 0; i < fresh.length; i++) {
+      grid.setRowData(i, fresh[i]);
+    }
+    recalculate();
+    broadcastChange('race-updated', { race_number: raceNumber });
+    showToast(`Race ${raceNumber} inputs cleared.`, 'info', 3000);
+  };
+
+  window._resetStart = async () => {
+    // Sanity-check at click time (re-render guards already hide the button in
+    // these cases, but the operator could have edited DB Admin in another tab).
+    if (raceData.export_time) {
+      showToast('Cannot reset start after export. Use DB Admin to roll back.', 'error', 5000);
+      return;
+    }
+    if (!confirm(
+      `Reset START for Race ${raceNumber}?\n\n` +
+      `This clears start_time, restart_time, p1_finish_time and returns the\n` +
+      `race to PENDING. Use only when START was clicked by mistake.`
+    )) return;
+
+    raceData.start_time = null;
+    raceData.joyi_start_time = null;          // re-derived on next Joyi import
+    raceData.restart_time = null;
+    raceData.p1_finish_time = null;
+    raceData.p1_finish_elapsed_ms = null;
+    raceData.result_entry_signaled = false;   // re-arm result-entry signals
+    raceData.status = 'pending';
+    await saveRace(raceData);
+
+    // Mirror the same clear in the TimeSheet log so reports don't show a
+    // ghost start. The row stays so prior history isn't lost.
+    const ts = await getTimesheet(raceNumber);
+    if (ts) {
+      ts.start_time = null;
+      ts.restart_time = null;
+      ts.p1_finish_time = null;
+      ts.p1_finish_elapsed_ms = null;
+      await saveTimesheet(ts);
+    }
+
+    // Stop the running clock; re-render header + buttons.
+    if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+    document.getElementById('raceStartTime').innerHTML = renderStartTimeText(raceData);
+    document.getElementById('raceStatus').textContent = 'PENDING';
+    document.getElementById('raceStatus').className = 'badge badge-pending';
+    const timerEl = document.getElementById('raceTimer');
+    if (timerEl) timerEl.textContent = '';
+    renderStartStopButton();
+    broadcastChange('race-updated', { race_number: raceNumber });
+    showToast(`Race ${raceNumber} start reset. Press START when ready.`, 'info', 4000);
+    recalculate(); // re-runs validation (start-time warning comes back)
   };
 
   window._finishBackup = async () => {
@@ -835,7 +1348,21 @@ function attachHandlers() {
     // operator's finger hit the button, not when they dismissed the prompt.
     const captureISO = nowISO();
 
-    if (!raceData.start_time) {
+    // If a Joyi LCD fetch is in flight, block on it before computing the
+    // delta — the elapsed-time math depends on the right baseline. Block
+    // is short-lived: byte-range read against Drive is ~30 bytes, settles
+    // in under a second on a reasonable connection.
+    if (isLcdPending(raceNumber)) {
+      const overlay = document.getElementById('raceJoyiBlock');
+      if (overlay) overlay.style.display = 'flex';
+      try { await awaitLcd(raceNumber); }
+      finally { if (overlay) overlay.style.display = 'none'; }
+      // Re-read race after the fetch so the new joyi_start_time is in
+      // raceData for the baseline calculation below.
+      raceData = (await getRace(raceNumber)) || raceData;
+    }
+
+    if (!raceData.start_time && !raceData.joyi_start_time) {
       showToast('Cannot capture finish: race has no start time', 'warning');
       return;
     }
@@ -849,7 +1376,10 @@ function attachHandlers() {
       if (!ok) return;
     }
 
-    const baseline = raceData.restart_time || raceData.start_time;
+    // FINISH elapsed time anchors on the effective start (Joyi-derived if
+    // available, manual otherwise), with restart_time overriding when the
+    // operator has explicitly re-baselined the timer.
+    const baseline = raceData.restart_time || raceData.joyi_start_time || raceData.start_time;
     const elapsedMs = new Date(captureISO).getTime() - new Date(baseline).getTime();
     raceData.p1_finish_time = captureISO;
     raceData.p1_finish_elapsed_ms = elapsedMs;
@@ -957,33 +1487,81 @@ function attachHandlers() {
     openFileFromFolder('12 Output_Results', raceNumber);
   };
 
-  // Joyi import — store handler ref for cleanup in unmount
-  const joyiInput = document.getElementById('joyiFileInput');
-  if (joyiInput) {
-    joyiChangeHandler = async () => {
-      const file = joyiInput.files[0];
-      if (!file) return;
-      try {
-        const parsed = await parseJoyiFile(file);
-        if (parsed.raceNumber !== raceNumber) {
-          if (!confirm(`This Joyi file is for Race ${parsed.raceNumber}, but you're on Race ${raceNumber}. Import anyway?`)) return;
-        }
-        await importJoyiToDb({ ...parsed, raceNumber });
-        const freshLanes = await getLaneResults(raceNumber);
-        const newGridData = buildGridData(freshLanes, configData?.lane_count || 6);
-        for (let i = 0; i < newGridData.length; i++) {
-          grid.setRowData(i, newGridData[i]);
-        }
-        raceData = await getRace(raceNumber);
-        recalculate();
-        showToast(`Joyi results imported for Race ${raceNumber} (${parsed.results.length} lanes)`, 'success');
-        broadcastChange('race-updated', { race_number: raceNumber });
-      } catch (err) {
-        showToast(`Joyi import failed: ${err.message}`, 'error');
+  // Import Joyi orchestrator:
+  //   1. Try auto-find in the Joyi folder (.jyd preferred for results,
+  //      .lcd kicked off in background for start time).
+  //   2. On miss, open a single-zone drag-drop modal that accepts any of
+  //      .jyd / .xls / .lcd (sorted by extension automatically) and runs
+  //      the same import + LCD-fetch pipeline.
+  window._importJoyi = async () => {
+    const [{ findJoyiTripletForRace }, { enqueueLcdFetch }] = await Promise.all([
+      import('../joyi-folder.js'),
+      import('../joyi-lcd-pending.js'),
+    ]);
+
+    // Try auto-find first.
+    try {
+      const found = await findJoyiTripletForRace(raceNumber);
+      const resultsFile = found.jyd || found.xls;
+      if (resultsFile) {
+        await runJoyiImport(resultsFile);
+        // Whether or not the .lcd is sitting alongside, kick off the
+        // ranged-fetch — it'll find the file via joyi-folder.js's own
+        // resolution logic.
+        enqueueLcdFetch(raceNumber);
+        showToast(`Imported ${resultsFile.name} from ${found.source === 'drive' ? 'Drive' : 'Joyi folder'}`, 'success', 3000);
+        return;
       }
-      joyiInput.value = '';
-    };
-    joyiInput.addEventListener('change', joyiChangeHandler);
+      if (found.source !== 'none') {
+        showToast(`Race ${raceNumber} not found in ${found.folderPath} — pick manually.`, 'info', 4000);
+      }
+    } catch (err) {
+      console.warn('Joyi auto-find failed:', err);
+    }
+
+    // Fallback: drag-drop picker.
+    await showJoyiDropPicker(async (files) => {
+      const results = files.find(f => /\.jyd$/i.test(f.name)) || files.find(f => /\.xlsx?$/i.test(f.name));
+      const lcd = files.find(f => /\.lcd$/i.test(f.name));
+      if (!results) {
+        showToast('Need a .jyd or .xls file with the results', 'warning');
+        return;
+      }
+      await runJoyiImport(results);
+      // If the operator handed us the .lcd directly, derive start time
+      // straight from the File (no folder lookup needed).
+      if (lcd) {
+        const { deriveJoyiStartTime, setJoyiStartTimeOnRace } = await import('../import.js');
+        const iso = await deriveJoyiStartTime(lcd);
+        if (iso) {
+          await setJoyiStartTimeOnRace(raceNumber, iso);
+          broadcastChange('race-updated', { race_number: raceNumber, joyi_start: true });
+        }
+      } else {
+        // Otherwise try the folder-based lazy lookup in case the .lcd is
+        // sitting alongside the .jyd in the configured Joyi folder.
+        enqueueLcdFetch(raceNumber);
+      }
+    });
+  };
+
+  // Shared inner pipeline used by both auto-find and the drop-picker.
+  async function runJoyiImport(file) {
+    const { parseJoyiAnyFile } = await import('../import.js');
+    const parsed = await parseJoyiAnyFile(file);
+    if (parsed.raceNumber !== raceNumber) {
+      if (!confirm(`This Joyi file is for Race ${parsed.raceNumber}, but you're on Race ${raceNumber}. Import anyway?`)) return;
+    }
+    await importJoyiToDb({ ...parsed, raceNumber });
+    const freshLanes = await getLaneResults(raceNumber);
+    const newGridData = buildGridData(freshLanes, configData?.lane_count || 6);
+    for (let i = 0; i < newGridData.length; i++) {
+      grid.setRowData(i, newGridData[i]);
+    }
+    raceData = await getRace(raceNumber);
+    recalculate();
+    notifyResultEntryStarted(raceNumber).catch(() => {});
+    broadcastChange('race-updated', { race_number: raceNumber });
   }
 
   // Batch adjustment — store handler ref for cleanup in unmount
@@ -1015,41 +1593,126 @@ function attachHandlers() {
     });
   }
 
-  // Photo Finish file picker — accepts .lcd + .jyd (and friendly .xls too,
-  // for the case the operator selected the whole Joyi triplet). If a .xls
-  // is in the selection it's also imported in the same go.
-  const pfInput = document.getElementById('photoFinishInput');
-  if (pfInput) {
-    pfInput.addEventListener('change', async () => {
-      const files = [...pfInput.files];
-      pfInput.value = '';
-      if (files.length === 0) return;
-
-      // Optional: import the .xls if it came along.
-      const xlsFile = files.find(f => /\.(xlsx?)$/i.test(f.name));
-      if (xlsFile) {
-        try {
-          const parsed = await parseJoyiFile(xlsFile);
-          await importJoyiToDb({ ...parsed, raceNumber });
-          showToast(`Imported Joyi results from ${xlsFile.name}`, 'success', 3000);
-          broadcastChange('race-updated', { race_number: raceNumber });
-        } catch (err) {
-          showToast(`Joyi .xls import failed: ${err.message}`, 'error');
-        }
-      }
-
-      const lcdFile = files.find(f => /\.lcd$/i.test(f.name));
-      if (!lcdFile) {
-        if (!xlsFile) showToast('Select at least a .lcd file', 'warning');
+  // Photo Finish — try to auto-find the .lcd/.jyd pair in the Joyi shared
+  // folder first (saves the operator a manual pick during race-day). On
+  // miss or no folder connection, fall through to the drag-and-drop picker.
+  window._photoFinish = async () => {
+    const [{ showPhotoFinishPicker, showPhotoFinishModal }, { findJoyiTripletForRace }] = await Promise.all([
+      import('../photo-finish.js'),
+      import('../joyi-folder.js'),
+    ]);
+    try {
+      const found = await findJoyiTripletForRace(raceNumber);
+      // Auto-open only when BOTH .lcd and .jyd are present — JYD is required
+      // for the time axis to anchor on race-start. Missing either falls
+      // through to the drag-and-drop picker so the operator can supply
+      // whatever's missing.
+      if (found.lcd && found.jyd) {
+        showToast(`Loaded ${found.lcd.name} + .jyd from ${found.source === 'drive' ? 'Drive' : 'Joyi folder'}`, 'success', 2500);
+        await showPhotoFinishModal(raceData, [found.lcd, found.jyd]);
         return;
       }
-      try {
-        const { showPhotoFinishModal } = await import('../photo-finish.js');
-        await showPhotoFinishModal(raceData, files);
-      } catch (err) {
-        showToast(`Photo finish failed: ${err.message}`, 'error', 5000);
-        console.error(err);
+      if (found.source !== 'none') {
+        const missing = !found.lcd ? '.lcd' : '.jyd';
+        showToast(`No ${missing} for race ${raceNumber} in ${found.folderPath} — pick manually.`, 'info', 4500);
       }
-    });
+      // Pre-fill picker with whatever we did find so the operator only
+      // has to provide the missing half.
+      await showPhotoFinishPicker(raceData, { lcd: found.lcd || null, jyd: found.jyd || null });
+      return;
+    } catch (err) {
+      console.warn('Photo finish auto-find failed:', err);
+    }
+    // Fallback: empty drag-and-drop picker.
+    await showPhotoFinishPicker(raceData);
+  };
+}
+
+/**
+ * Lightweight drag-drop modal used by Import Joyi when auto-find misses.
+ * Single combined zone accepting `.jyd`, `.xls`, `.xlsx`, `.lcd`. The
+ * `onAccept(files)` callback runs when the operator clicks "Open" with at
+ * least one valid file present.
+ */
+async function showJoyiDropPicker(onAccept) {
+  // Reuse styles from photo-finish picker for consistency.
+  const existing = document.getElementById('joyiDropPicker');
+  if (existing) existing.remove();
+
+  const files = [];
+  const refresh = () => {
+    const status = modal.querySelector('#joyiDropStatus');
+    const openBtn = modal.querySelector('#joyiDropOpen');
+    if (files.length === 0) {
+      status.innerHTML = '<span style="color:var(--text-tertiary);">drop here or click</span>';
+      openBtn.disabled = true;
+    } else {
+      status.innerHTML = files.map(f => `${f.name} <span style="color:var(--text-tertiary);">(${(f.size/1024).toFixed(1)} KB)</span>`).join('<br>');
+      // Need at least one results-bearing file (.jyd or .xls).
+      const hasResults = files.some(f => /\.(jyd|xlsx?)$/i.test(f.name));
+      openBtn.disabled = !hasResults;
+    }
+  };
+
+  const modal = document.createElement('div');
+  modal.id = 'joyiDropPicker';
+  modal.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:9998; display:flex; align-items:center; justify-content:center;';
+  modal.innerHTML = `
+    <div style="background:var(--bg-card); border-radius:var(--radius-lg); padding:18px 20px; width:min(540px,92vw); box-shadow:var(--shadow-lg);">
+      <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
+        <i class="material-icons" style="font-size:22px; color:var(--accent);">cloud_download</i>
+        <strong style="font-size:15px;">Import Joyi — Race ${raceNumber}</strong>
+        <span style="flex:1;"></span>
+        <button class="btn btn-ghost btn-sm" id="joyiDropClose"><i class="material-icons" style="font-size:18px;">close</i></button>
+      </div>
+      <p style="font-size:12px; color:var(--text-tertiary); margin:0 0 12px;">
+        Drop the <code>.jyd</code> (or <code>.xls</code>) for results, plus
+        the matching <code>.lcd</code> if you want the Joyi-derived start
+        time. Files are sorted by extension automatically — you can drop them
+        in any order.
+      </p>
+      <div id="joyiDropZone"
+           style="border:2px dashed var(--border); border-radius:var(--radius-sm); padding:24px;
+                  text-align:center; cursor:pointer; transition:all 0.15s; min-height:120px;
+                  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px;">
+        <i class="material-icons" style="font-size:28px; color:var(--text-tertiary);">upload_file</i>
+        <div style="font-weight:600;">.jyd / .xls / .lcd</div>
+        <div id="joyiDropStatus" style="font-size:11px; color:var(--text-tertiary); min-height:14px;"></div>
+      </div>
+      <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:14px;">
+        <button class="btn btn-ghost" id="joyiDropCancel">Cancel</button>
+        <button class="btn btn-primary" id="joyiDropOpen" disabled>
+          <i class="material-icons">open_in_new</i> Import
+        </button>
+      </div>
+      <input type="file" id="joyiDropInput" accept=".jyd,.xls,.xlsx,.lcd" multiple style="display:none;">
+    </div>
+  `;
+  document.body.appendChild(modal);
+  refresh();
+
+  const zone = modal.querySelector('#joyiDropZone');
+  const input = modal.querySelector('#joyiDropInput');
+
+  function acceptFiles(list) {
+    for (const f of list) {
+      if (/\.(jyd|xlsx?|lcd)$/i.test(f.name)) files.push(f);
+    }
+    refresh();
   }
+
+  zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.style.background = 'rgba(255,255,255,0.04)'; });
+  zone.addEventListener('dragleave', () => { zone.style.background = ''; });
+  zone.addEventListener('drop', (e) => { e.preventDefault(); zone.style.background = ''; acceptFiles(e.dataTransfer.files); });
+  zone.addEventListener('click', () => input.click());
+  input.addEventListener('change', () => { acceptFiles(input.files); input.value = ''; });
+
+  const close = () => modal.remove();
+  modal.querySelector('#joyiDropClose').addEventListener('click', close);
+  modal.querySelector('#joyiDropCancel').addEventListener('click', close);
+  modal.querySelector('#joyiDropOpen').addEventListener('click', async () => {
+    close();
+    try { await onAccept(files); }
+    catch (err) { showToast(`Joyi import failed: ${err.message}`, 'error'); }
+  });
 }
