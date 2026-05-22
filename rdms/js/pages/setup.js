@@ -7,6 +7,7 @@ import { getConfig, saveConfig } from '../db.js';
 import { showToast } from '../utils.js';
 import { broadcastChange } from '../app.js';
 import { requestSourceFolder, isSourceConnected } from '../file-access.js';
+import { initDriveApi, requestDriveAccess, isDriveApiConnected } from '../drive-api.js';
 import { renderDivisionsTab, cleanupDivisionHandlers } from './division-config.js';
 import { renderScheduleTab, cleanupScheduleHandlers } from './schedule-tab.js';
 import { renderNextRaceTab, cleanupNextRaceTab } from './next-race-tab.js';
@@ -14,7 +15,7 @@ import { renderUsersTab, cleanupUsersTab } from './users-page.js';
 import { renderUserGuideTab } from './user-guide.js';
 import { hasPermission } from '../rbac.js';
 
-export async function mountSetup(container) {
+export async function mountSetup(container, params) {
   // Tab-level gating. Admins see everything; editors see the Next Race
   // manual-fire tab + User Guide; viewers (if they somehow reach this
   // page — they shouldn't) see User Guide only.
@@ -26,13 +27,26 @@ export async function mountSetup(container) {
   const canGuide     = hasPermission('setup.tab.guide');
   const isAdmin      = canConfig; // legacy alias for the page title
 
-  // Pick the first tab the user can access as the default.
-  const firstTab = canConfig ? 'config'
+  // Sub-tab deep-link: callers (e.g. Flowchart audit) can navigate to
+  // `#/setup/divisions` so the right tab is opened on mount. We accept
+  // `next-race` and `nextrace` interchangeably since URL params strip
+  // hyphens often. Falls through to permission-default below if the
+  // requested tab isn't permitted for this role.
+  const requestedTab = (params?.[0] || '').toLowerCase().replace(/^nextrace$/, 'next-race');
+  const requestedPermKey = requestedTab === 'next-race'
+    ? 'setup.tab.next_race'
+    : `setup.tab.${requestedTab}`;
+  const requestedAllowed = requestedTab && hasPermission(requestedPermKey);
+
+  // Pick the first tab the user can access as the default. A valid
+  // requested sub-tab always wins over the default.
+  const defaultTab = canConfig ? 'config'
                  : canDivisions ? 'divisions'
                  : canSchedule ? 'schedule'
                  : canNextRace ? 'next-race'
                  : canUsers ? 'users'
                  : 'guide';
+  const firstTab = requestedAllowed ? requestedTab : defaultTab;
 
   container.innerHTML = `
     <div id="setupPage">
@@ -213,7 +227,7 @@ async function renderConfigTab(container) {
 
       <div class="form-group">
         <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
-          <input type="checkbox" id="cfgAutoStartList" ${c.auto_start_list_on_import ? 'checked' : ''}>
+          <input type="checkbox" id="cfgAutoStartList" ${c.auto_start_list_on_import !== false ? 'checked' : ''}>
           <span style="font-size:14px;">Auto-generate Joyi start list after draw import</span>
         </label>
         <small style="color:var(--text-tertiary); font-size:11px; margin-top:4px; display:block;">
@@ -230,27 +244,30 @@ async function renderConfigTab(container) {
 
       <div class="form-group">
         <label class="form-label">Event Folder (Local / Drive synced) <span style="color:var(--danger);">*</span></label>
-        <input class="form-input" id="cfgSourceFolder" type="text"
-               placeholder="e.g. /Users/me/Google Drive/Events/2026TN/"
-               value="${c.source_folder || ''}">
-        <small style="color:var(--text-tertiary); font-size:11px;">
-          Master event folder. Contains: 01 Input_Draw/, 11 Output_Start Lists/,
-          12 Output_Results/, 13 Output_Next Round Draws/, 20 Database Backup/
-        </small>
-        <!-- Inline connect button — same flow as the navbar folder icon
-             but reachable while editing config, so an admin can attach
-             the folder without leaving this tab. The label reflects
-             current connection state. -->
-        <div style="margin-top:8px; display:flex; align-items:center; gap:10px;">
-          <button class="btn btn-outline" type="button" id="cfgConnectSourceBtn">
+        <!-- Connect button comes FIRST — the actual file-system handle is
+             granted here. The text input below auto-fills with the picked
+             folder name so the config has a human-readable record, but
+             it's no longer something the operator types by hand. -->
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
+          <button class="btn btn-primary" type="button" id="cfgConnectSourceBtn">
             <i class="material-icons" style="font-size:16px;">folder_open</i>
             <span id="cfgConnectSourceLabel">Connect event folder</span>
           </button>
           <small id="cfgConnectSourceStatus" style="font-size:11px; color:var(--text-tertiary);">
-            Pick the root event folder (e.g. <code>2026TN/</code>) — RDMS finds the
-            <code>01 Input_Draw/</code>, <code>12 Output_Results/</code>, etc. subfolders inside it.
+            Click and pick the root event folder (e.g. <code>2026TN/</code>) — RDMS
+            finds the <code>01 Input_Draw/</code>, <code>12 Output_Results/</code>, etc.
+            subfolders inside it.
           </small>
         </div>
+        <input class="form-input" id="cfgSourceFolder" type="text"
+               placeholder="(auto-filled when you connect the folder)"
+               value="${c.source_folder || ''}"
+               style="background:var(--bg-elev); color:var(--text-secondary); font-size:12px;">
+        <small style="color:var(--text-tertiary); font-size:11px;">
+          Informational record of the connected folder name. The browser
+          permission grant above is what actually drives file I/O —
+          editing this text doesn't reconnect the folder.
+        </small>
       </div>
 
       <div class="section-header" style="margin-top:16px;">Shared Folder Paths (for external parties)</div>
@@ -259,28 +276,78 @@ async function renderConfigTab(container) {
         Leave blank if not sharing externally.
       </p>
 
+      <!-- Drive visibility reminder. RDMS writes via authenticated API
+           (folder handle or Drive API) — the public link role doesn't
+           gate RDMS at all. Public link is only for read-side consumers:
+           WhatsApp recipients opening results, the scoring team viewing
+           next-round draws, etc. The Joyi camera laptop should be signed
+           in with a Google account that has explicit edit access — don't
+           rely on the public link for that write path. -->
+      <div style="padding:10px 12px; margin-bottom:10px; border-radius:var(--radius-sm); background:rgba(245,158,11,0.10); border:1px solid var(--warning); font-size:12px; line-height:1.5;">
+        <i class="material-icons" style="font-size:16px; vertical-align:middle; color:var(--warning);">visibility</i>
+        <strong>Set Drive visibility on all three shared folders to "Anyone with the link — Viewer".</strong>
+        Otherwise recipients (WhatsApp readers, scoring team, etc.) hit a
+        "Request access" wall when they click the link.
+        <br>
+        <span style="color:var(--text-tertiary);">
+          In Drive: right-click folder → Share → General access → switch
+          from <em>Restricted</em> to <em>Anyone with the link</em> → role
+          <em>Viewer</em>.
+        </span>
+        <br>
+        <span style="color:var(--text-tertiary); font-size:11px;">
+          Write access (RDMS exports + the Joyi camera laptop's result
+          writes) goes through authenticated Google accounts that have
+          explicit edit permission on the folder — not via the public link.
+        </span>
+      </div>
+
       <div class="form-group">
         <label class="form-label">Shared Results Folder <span style="color:var(--danger);">*</span></label>
         <input class="form-input" id="cfgSharedResults" type="text"
-               placeholder="e.g. /Users/me/Google Drive/Shared/2026TN_Output_Results/"
+               placeholder="e.g. 80 Shared/2026TN_Output_Results"
                value="${c.shared_results_folder || ''}">
-        <small style="color:var(--text-tertiary); font-size:11px;">Exported results for scoring team / public. Use local synced path OR Google Drive shared link (URL used in WhatsApp messages).</small>
+        <small style="color:var(--text-tertiary); font-size:11px;">
+          <strong>Relative path under your connected event folder</strong> — not an
+          absolute filesystem path. The default convention is
+          <code>80 Shared/{event_ref}_Output_Results</code>. Leave blank to use that default.
+        </small>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Results Drive Share Link <span style="color:var(--text-tertiary);">— for WhatsApp message</span></label>
+        <input class="form-input" id="cfgSharedResultsUrl" type="text"
+               placeholder="e.g. https://drive.google.com/drive/folders/1AbCdEfGh…"
+               value="${c.shared_results_url || ''}">
+        <small style="color:var(--text-tertiary); font-size:11px;">
+          Full Drive share URL to the <em>same</em> shared results folder. This is what
+          gets pasted into the WhatsApp message body after each export. Get it from
+          Drive: right-click the folder → Share → Copy link. Set folder visibility to
+          <em>"Anyone with the link — Viewer"</em>.
+        </small>
       </div>
 
       <div class="form-group">
         <label class="form-label">Shared Next Round Draws Folder <span style="color:var(--text-tertiary);">optional</span></label>
         <input class="form-input" id="cfgSharedDraws" type="text"
-               placeholder="e.g. /Users/me/Google Drive/Shared/2026TN_Next_Round_Draws/"
+               placeholder="e.g. 80 Shared/2026TN_Next_Round_Draws"
                value="${c.shared_draws_folder || ''}">
-        <small style="color:var(--text-tertiary); font-size:11px;">Generated next-round draws written here for scoring team</small>
+        <small style="color:var(--text-tertiary); font-size:11px;">
+          Relative path. Default: <code>80 Shared/{event_ref}_Next_Round_Draws</code>.
+        </small>
       </div>
 
       <div class="form-group">
         <label class="form-label">Shared Joyi Folder <span style="color:var(--text-tertiary);">optional — leave blank to disable Joyi import</span></label>
         <input class="form-input" id="cfgSharedJoyi" type="text"
-               placeholder="e.g. /Users/me/Google Drive/Shared/2026TN_Joyi/"
+               placeholder="e.g. 80 Shared/2026TN_Joyi"
                value="${c.shared_joyi_folder || ''}">
-        <small style="color:var(--text-tertiary); font-size:11px;">Bidirectional: start lists written here, Joyi results read from here</small>
+        <small style="color:var(--text-tertiary); font-size:11px;">
+          <strong>Relative path under your connected event folder.</strong> Default:
+          <code>80 Shared/{event_ref}_Joyi</code>. Bidirectional — RDMS writes start
+          lists here, Joyi camera laptop writes result files here. The auto-watch
+          on Im/Export polls this folder.
+        </small>
       </div>
 
       <!-- Communication (optional) -->
@@ -352,11 +419,14 @@ async function renderConfigTab(container) {
         </div>
       </div>
 
-      <!-- Google Drive API (for web version) -->
-      <div class="section-header" style="margin-top:20px;">Google Drive API <span style="font-weight:400; font-size:10px; color:var(--text-tertiary);">optional — web version only</span></div>
+      <!-- Google Drive API -->
+      <div class="section-header" style="margin-top:20px;">Google Drive API <span style="font-weight:400; font-size:10px; color:var(--text-tertiary);">optional</span></div>
       <p style="font-size:12px; color:var(--text-tertiary); margin-bottom:8px;">
-        For web-hosted version only. Enables file read/write via Google Drive API when File System Access is unavailable.
-        Create an OAuth Client ID at <a href="https://console.cloud.google.com/apis/credentials" target="_blank" style="color:var(--accent);">Google Cloud Console</a>.
+        Enables direct Drive read/write — useful on Safari/mobile (no File System Access)
+        OR on Chrome desktop when you want the Joyi watcher to poll Drive directly instead of
+        waiting for Drive-for-Desktop to sync files locally. Create an OAuth Client ID at
+        <a href="https://console.cloud.google.com/apis/credentials" target="_blank" style="color:var(--accent);">Google Cloud Console</a>
+        (Web application; add this origin to Authorized JavaScript origins).
       </p>
       <div style="display:grid; grid-template-columns:2fr 1fr; gap:12px;">
         <div class="form-group">
@@ -369,12 +439,143 @@ async function renderConfigTab(container) {
         <div class="form-group">
           <label class="form-label">Drive Source Folder ID</label>
           <input class="form-input" id="cfgDriveFolderId" type="text"
-                 placeholder="Folder ID from Drive URL"
+                 placeholder="e.g. 1AbCdEfGh…"
                  value="${c.drive_source_folder_id || ''}"
                  style="font-family:monospace; font-size:11px;">
-          <small style="color:var(--text-tertiary); font-size:11px;">From the URL: drive.google.com/drive/folders/<strong>THIS_PART</strong></small>
+          <small style="color:var(--text-tertiary); font-size:11px;">
+            The Drive folder ID of <strong>this event's root folder</strong>
+            (e.g. <code>2026TN/</code>) — the same folder that contains
+            <code>01 Input_Draw/</code>, <code>12 Output_Results/</code>, etc.
+            <br><br>
+            <strong>How to get it:</strong> in Drive, right-click the event folder
+            → <em>Share</em> → <em>Copy link</em>. The URL looks like
+            <code>drive.google.com/drive/folders/<strong>1AbCdEfGh…</strong>?usp=…</code>
+            — paste only the bold part (strip everything after the <code>?</code>).
+            <br>
+            <strong>Don't use the URL bar</strong> when you're already on the
+            folder page (<code>/u/0/folders/…</code>) — that ID can point at a
+            shortcut in your own Drive rather than the target folder, and the
+            API can't navigate through it. Copy Link always gives the
+            canonical folder ID.
+          </small>
         </div>
       </div>
+      <!-- Explicit Drive connect button — without this, the Joyi
+           watcher's "drive" backend never activates on Chrome desktop
+           because the navbar folder icon auto-routes to File System
+           Access whenever it's available. -->
+      <!-- Feature flag: Drive polling. Default OFF — the OAuth scope +
+           folder access path is still being shaken out. With this off,
+           the Joyi and Draw watchers always use the local File System
+           Access backend (Drive-for-Desktop synced folder). -->
+      <div class="form-group" style="margin-top:8px;">
+        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+          <input type="checkbox" id="cfgDrivePolling" ${c.drive_polling_enabled ? 'checked' : ''}>
+          <span style="font-size:14px;">Enable Drive polling for Joyi + Draw watchers</span>
+        </label>
+        <small style="color:var(--text-tertiary); font-size:11px; margin-top:4px; display:block;">
+          <strong>Off (default):</strong> watchers poll the local synced folder via File System
+          Access — relies on Drive-for-Desktop syncing files locally.
+          <strong>On:</strong> watchers call the Drive REST API directly. Currently
+          experimental — only enable if you've verified the OAuth setup works end-to-end.
+        </small>
+      </div>
+
+      <div style="margin-top:8px; display:flex; align-items:center; gap:10px;">
+        <button class="btn btn-outline" type="button" id="cfgConnectDriveBtn">
+          <i class="material-icons" style="font-size:16px;">cloud</i>
+          <span id="cfgConnectDriveLabel">Connect Google Drive API</span>
+        </button>
+        <small id="cfgConnectDriveStatus" style="font-size:11px; color:var(--text-tertiary);">
+          Save the Client ID + Folder ID above first, then click to authenticate.
+          The Drive polling checkbox above must also be ticked for watchers to use it.
+        </small>
+      </div>
+
+      <!-- Live current-origin display: this is what must be in the
+           OAuth client's Authorized JavaScript origins list. Updated
+           on page load; can change if Vite bumps to a different port. -->
+      <div style="margin-top:8px; padding:8px 12px; background:var(--bg-elev); border-radius:var(--radius-sm); font-size:12px; line-height:1.5;">
+        <div>
+          <strong>This app's current origin:</strong>
+          <code id="cfgCurrentOrigin" style="font-family:monospace; background:var(--bg-card); padding:2px 6px; border-radius:3px; user-select:all;"></code>
+          <button class="btn btn-ghost btn-sm" type="button" id="cfgCopyOriginBtn"
+                  style="font-size:11px; padding:2px 8px; margin-left:4px;"
+                  title="Copy this origin to clipboard">
+            <i class="material-icons" style="font-size:13px; vertical-align:middle;">content_copy</i> Copy
+          </button>
+        </div>
+        <div style="color:var(--text-tertiary); margin-top:4px;">
+          This exact string must be in your OAuth client's Authorized JavaScript
+          origins. If Vite bumps the port (because another instance is running on
+          3000), this will reflect the actual port — add THAT to the list.
+        </div>
+      </div>
+
+      <!-- Troubleshooting block. Collapsed by default; expands when the
+           operator hits OAuth errors during connect. Keeps the most-asked
+           "no registered origin" diagnostic steps in the UI instead of
+           buried in a chat / wiki the operator can't reach offline. -->
+      <details style="margin-top:8px; padding:0;">
+        <summary style="cursor:pointer; font-size:12px; font-weight:600; color:var(--text-secondary); padding:6px 0; user-select:none;">
+          <i class="material-icons" style="font-size:14px; vertical-align:middle;">help_outline</i>
+          Troubleshooting OAuth errors ("no registered origin", "invalid_client", …)
+        </summary>
+        <div style="padding:8px 12px 4px; font-size:12px; line-height:1.6;">
+          <p><strong>Error: "no registered origin" / "invalid_client" / "doesn't comply with Google's OAuth 2.0 policy"</strong></p>
+          <p>All three mean the same thing: the origin RDMS is running on isn't in your OAuth client's <em>Authorized JavaScript origins</em> list. Walk through these:</p>
+
+          <ol style="margin:6px 0 6px 18px; padding:0;">
+            <li><strong>Confirm the current origin</strong> — see the boxed string above. That's what RDMS is running on. Every character matters.</li>
+            <li>
+              <strong>Add it to the OAuth client:</strong>
+              <a href="https://console.cloud.google.com/apis/credentials" target="_blank" style="color:var(--accent);">Cloud Console → Credentials</a>
+              → click your OAuth Client ID → under <em>Authorized JavaScript origins</em> click <em>+ ADD URI</em> → paste the origin → <em>Save</em>.
+              No trailing slash. No path. Just <code>protocol://host:port</code>.
+            </li>
+            <li>
+              <strong>Add EVERY local port you might use.</strong> Vite picks the
+              next free port if 3000 is busy — and it can jump well past 3003
+              (we've seen 3009+) if other tools are hogging ports. There's no
+              wildcard, so each port you actually launch on must be in the list.
+              Pragmatic option: pre-register a range up-front, e.g.<br>
+              <code>http://localhost:3000</code> &nbsp;…&nbsp; <code>http://localhost:3010</code>
+              (or further, as needed).<br>
+              Or just add the current port (shown in the box above) each time it
+              changes — you'll only hit it once per port.<br>
+              <strong>Don't forget the deployed origin too</strong> (e.g. <code>https://sdbafinishing.github.io</code>).
+            </li>
+            <li>
+              <strong>Wait 2–5 minutes</strong> after saving before retrying — Google propagates the change through their CDN. Sometimes up to 15 min.
+            </li>
+            <li>
+              <strong>Check Authorized redirect URIs is BLANK.</strong> RDMS uses the implicit token flow; a redirect URI here actually changes the flow and breaks it.
+            </li>
+            <li>
+              <strong>Confirm you're editing the right Cloud project.</strong> The Client ID has the project number embedded (digits before the dash). It must match the project shown in the picker at the top of the Cloud Console.
+            </li>
+            <li>
+              <strong>Distinct origins (gotchas):</strong>
+              <ul style="margin:4px 0 4px 16px; padding:0;">
+                <li><code>localhost</code> ≠ <code>127.0.0.1</code> — add both if you sometimes use one and sometimes the other.</li>
+                <li><code>http://</code> ≠ <code>https://</code> — local Vite is http; deployed GitHub Pages is https.</li>
+                <li><code>http://localhost:3000/</code> ≠ <code>http://localhost:3000</code> — no trailing slash.</li>
+              </ul>
+            </li>
+          </ol>
+
+          <p style="margin-top:10px;"><strong>Error: "Access blocked: This app is unverified" / consent-screen error</strong></p>
+          <p>Your OAuth Consent Screen is in <em>Testing</em> mode and only listed test users can sign in.
+            <a href="https://console.cloud.google.com/apis/credentials/consent" target="_blank" style="color:var(--accent);">Cloud Console → OAuth consent screen</a>
+            → <em>Test users</em> → add the Google account you're signing in with.</p>
+
+          <p style="margin-top:10px;"><strong>Error: "popup blocked"</strong></p>
+          <p>The OAuth popup must be triggered by a user click. If you arrive at the Connect button via JS (some automation), the browser blocks the popup. Click the button manually.</p>
+
+          <p style="margin-top:10px;"><strong>Token expired mid-event</strong></p>
+          <p>Google OAuth access tokens expire after ~1 hour. RDMS auto-refreshes silently when a Drive call hits 401 — you shouldn't notice. If something does get stuck, click <em>Reconnect Google Drive</em> above (or clear <code>sessionStorage['rdms-drive-token']</code> in DevTools).</p>
+        </div>
+      </details>
 
       <div style="margin-top:20px; display:flex; gap:12px; flex-wrap:wrap; align-items:center;">
         <button class="btn btn-primary" onclick="window._saveConfig()">
@@ -410,7 +611,7 @@ async function renderConfigTab(container) {
     } else {
       cfgConnectLabel.textContent = 'Connect event folder';
       cfgConnectStat.innerHTML = `
-        Pick the root event folder (e.g. <code>${(c.event_short_ref || '2026XX')}/</code>) —
+        Pick the root event folder (e.g. <code>${(c.event_short_ref || '2026TN')}/</code>) —
         RDMS finds the <code>01 Input_Draw/</code>, <code>12 Output_Results/</code>, etc.
         subfolders inside it.
       `;
@@ -421,9 +622,94 @@ async function renderConfigTab(container) {
     cfgConnectBtn.addEventListener('click', async () => {
       const handle = await requestSourceFolder();
       if (handle) {
+        // Auto-fill the path field with the picked folder name so the
+        // config record carries a human-readable label. Picker only
+        // exposes the folder NAME (browsers won't reveal the absolute
+        // filesystem path for privacy), so that's what we store.
+        const pathInput = document.getElementById('cfgSourceFolder');
+        if (pathInput) pathInput.value = handle.name;
         showToast(`Event folder connected: ${handle.name}`, 'success', 3000);
       }
       refreshConnectState();
+      // Also kick the navbar icon over to "Connected" — otherwise the
+      // operator gets confused state (Setup says connected, top bar
+      // still shows "Connect Folder").
+      if (typeof window._rdmsUpdateFolderIcons === 'function') {
+        window._rdmsUpdateFolderIcons();
+      }
+    });
+  }
+
+  // ── Google Drive API connect (explicit opt-in) ──
+  // Without this button the Drive backend never activates on Chrome
+  // desktop because the navbar folder icon routes to File System
+  // Access whenever it's available. Clicking here runs the OAuth
+  // popup, populates an access token in sessionStorage, and lets
+  // the Joyi watcher prefer the Drive backend over local sync.
+  // Populate the current-origin display + copy button used by the
+  // OAuth troubleshooting block. Reads window.location.origin live,
+  // so if Vite bumped the port (3009 etc.) the operator sees the real
+  // value to register in Cloud Console.
+  const cfgCurrentOriginEl = document.getElementById('cfgCurrentOrigin');
+  if (cfgCurrentOriginEl) cfgCurrentOriginEl.textContent = window.location.origin;
+  const cfgCopyOriginBtn = document.getElementById('cfgCopyOriginBtn');
+  if (cfgCopyOriginBtn) {
+    cfgCopyOriginBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(window.location.origin);
+        showToast(`Copied: ${window.location.origin}`, 'success', 2500);
+      } catch {
+        showToast('Clipboard not available — copy manually from the box.', 'warning', 3000);
+      }
+    });
+  }
+
+  const cfgConnectDriveBtn   = document.getElementById('cfgConnectDriveBtn');
+  const cfgConnectDriveLabel = document.getElementById('cfgConnectDriveLabel');
+  const cfgConnectDriveStat  = document.getElementById('cfgConnectDriveStatus');
+  const refreshDriveState = () => {
+    if (!cfgConnectDriveBtn || !cfgConnectDriveLabel || !cfgConnectDriveStat) return;
+    if (isDriveApiConnected()) {
+      cfgConnectDriveLabel.textContent = 'Reconnect Google Drive';
+      cfgConnectDriveStat.innerHTML = `
+        <span style="color:var(--success);">✓ Connected</span> — Joyi watcher
+        will poll Drive directly. Disconnect by clearing the session
+        (DevTools → Application → sessionStorage → remove <code>rdms-drive-token</code>).
+      `;
+    } else {
+      cfgConnectDriveLabel.textContent = 'Connect Google Drive API';
+      cfgConnectDriveStat.innerHTML = `
+        Save the Client ID + Folder ID above first, then click to authenticate.
+        Joyi watcher will prefer the Drive backend over local sync.
+      `;
+    }
+  };
+  refreshDriveState();
+  if (cfgConnectDriveBtn) {
+    cfgConnectDriveBtn.addEventListener('click', async () => {
+      const clientId = document.getElementById('cfgGoogleClientId').value.trim();
+      const folderId = document.getElementById('cfgDriveFolderId').value.trim();
+      if (!clientId) {
+        showToast('Enter the Google OAuth Client ID above first, then Save Configuration.', 'warning', 5000);
+        return;
+      }
+      if (!folderId) {
+        showToast('Enter the Drive Source Folder ID above too — Drive needs to know which folder to scan.', 'warning', 5000);
+        return;
+      }
+      // initDriveApi reads google_client_id from the saved config, so
+      // remind the operator to save first if they just typed it.
+      const cfg = await getConfig();
+      if (cfg?.google_client_id !== clientId) {
+        showToast('Click Save Configuration first so the new Client ID is loaded, then click Connect again.', 'warning', 6000);
+        return;
+      }
+      await initDriveApi();
+      const ok = await requestDriveAccess();
+      refreshDriveState();
+      if (ok && typeof window._rdmsUpdateFolderIcons === 'function') {
+        window._rdmsUpdateFolderIcons();
+      }
     });
   }
 
@@ -440,6 +726,7 @@ async function renderConfigTab(container) {
       time_format_mode: document.getElementById('cfgTimeFormat').value,
       source_folder: document.getElementById('cfgSourceFolder').value.trim(),
       shared_results_folder: document.getElementById('cfgSharedResults').value.trim(),
+      shared_results_url: document.getElementById('cfgSharedResultsUrl').value.trim(),
       shared_draws_folder: document.getElementById('cfgSharedDraws').value.trim(),
       shared_joyi_folder: document.getElementById('cfgSharedJoyi').value.trim(),
       supabase_url: document.getElementById('cfgSupabaseUrl').value.trim(),
@@ -447,6 +734,7 @@ async function renderConfigTab(container) {
       supabase_service_key: document.getElementById('cfgSupabaseServiceKey').value.trim(),
       google_client_id: document.getElementById('cfgGoogleClientId').value.trim(),
       drive_source_folder_id: document.getElementById('cfgDriveFolderId').value.trim(),
+      drive_polling_enabled: document.getElementById('cfgDrivePolling').checked,
       whatsapp_group: document.getElementById('cfgWhatsApp').value.trim(),
       next_race_signal_api: document.getElementById('cfgNextRaceApi').value.trim(),
       next_race_signal_racename: (() => {
@@ -470,10 +758,10 @@ async function renderConfigTab(container) {
       missing.push('Event Date (must be YYYYMMDD)');
     }
 
-    // Validate folder path format (must end with / or \)
-    if (data.source_folder && !data.source_folder.endsWith('/') && !data.source_folder.endsWith('\\')) {
-      missing.push('Source Folder must end with /');
-    }
+    // Source folder no longer needs a manual path format. The field is
+    // auto-filled with the picked folder NAME (browsers don't expose
+    // absolute paths to JS) and is informational only — actual I/O uses
+    // the browser handle. No trailing-slash check needed.
 
     if (missing.length > 0) {
       showToast(`Missing or invalid: ${missing.join(', ')}`, 'error', 5000);

@@ -53,8 +53,8 @@ export async function mountFlowchartPage(container) {
 
   const divOptions = divisions.map(d => ({
     value: d.id,
-    label: d.div_short_ref || d.division_name || `Div ${d.id}`,
-    sublabel: d.division_name && d.div_short_ref && d.division_name !== d.div_short_ref ? d.division_name : '',
+    label: d.division_name || `Div ${d.id}`,
+    sublabel: '',
   }));
 
   container.innerHTML = `
@@ -152,6 +152,10 @@ async function renderFlowchart(divisions, races, raceMap) {
   // Build flowchart data per division
   let svgContent = '';
   let yOffset = 0;
+  // Track the widest division so the outer SVG viewBox is sized to fit
+  // the largest bracket — otherwise the right edge of multi-column
+  // brackets gets clipped by the hardcoded 800px viewBox.
+  let svgMaxWidth = 480;
 
   for (const div of filteredDivs) {
     const rounds = await getDivisionRounds(div.id);
@@ -159,123 +163,165 @@ async function renderFlowchart(divisions, races, raceMap) {
 
     if (rounds.length === 0) continue;
 
-    // Group rounds by round_number
+    // ── Bracket-style column assignment ──
+    // Column index for each round is the LENGTH OF THE LONGEST CHAIN OF
+    // PROGRESSIONS leading INTO it, not the operator-typed round_number.
+    // This way "Cup Semi" and "Plate Semi" both reachable in one hop from
+    // Heats land in column 1, and the 4 finals all sit in column 2 —
+    // exactly the layout the official bracket diagrams use. round_number
+    // is still preserved for tie-breaking within a column.
+    const depthByRoundId = computeRoundDepths(rounds, progs);
     const roundGroups = {};
-    rounds.forEach(r => {
-      if (!roundGroups[r.round_number]) roundGroups[r.round_number] = [];
-      roundGroups[r.round_number].push(r);
-    });
-    const roundNums = Object.keys(roundGroups).sort((a, b) => a - b);
+    for (const r of rounds) {
+      const depth = depthByRoundId.get(r.id) ?? 0;
+      if (!roundGroups[depth]) roundGroups[depth] = [];
+      roundGroups[depth].push(r);
+    }
+    // Sort tiers within each column by round_number then tier_name so
+    // the layout is stable across reloads.
+    for (const k of Object.keys(roundGroups)) {
+      roundGroups[k].sort((a, b) =>
+        (a.round_number || 0) - (b.round_number || 0) ||
+        String(a.tier_name || '').localeCompare(String(b.tier_name || '')));
+    }
+    const roundNums = Object.keys(roundGroups).sort((a, b) => Number(a) - Number(b));
 
-    // Layout constants
-    const nodeW = 160, nodeH = 50, gapX = 60, gapY = 16;
+    // Layout constants. ONE BOX PER TIER (round-row in DB), not per
+    // individual race — matches the official bracket diagrams. Each
+    // box's label includes the tier name + the race-number list.
+    const nodeW = 220, nodeH = 56, gapX = 80, gapY = 18;
     const colWidth = nodeW + gapX;
     const divLabelH = 30;
 
-    // Calculate max rows per column
+    // Rows per column = number of TIERS in that column (no longer
+    // multiplied out by race count, because each tier collapses to a
+    // single node now).
     let maxRows = 0;
     roundNums.forEach(rn => {
-      let rowCount = 0;
-      roundGroups[rn].forEach(tier => {
-        rowCount += (tier.race_numbers || []).length || 1;
-      });
-      maxRows = Math.max(maxRows, rowCount);
+      maxRows = Math.max(maxRows, roundGroups[rn].length);
     });
 
     const divHeight = divLabelH + maxRows * (nodeH + gapY) + 20;
     const divWidth = roundNums.length * colWidth + 40;
+    if (divWidth > svgMaxWidth) svgMaxWidth = divWidth;
 
     // Division header
     svgContent += `<g transform="translate(0, ${yOffset})">`;
     svgContent += `<rect x="0" y="0" width="${divWidth}" height="${divHeight}" rx="8" fill="none" stroke="${div.colour_hex || '#9ca3af'}" stroke-width="1.5" stroke-dasharray="4"/>`;
-    svgContent += `<text x="10" y="18" font-size="13" font-weight="600" fill="${div.colour_hex || '#333'}">${div.division_name || div.div_short_ref || 'Division'}</text>`;
+    svgContent += `<text x="10" y="18" font-size="13" font-weight="600" fill="${div.colour_hex || '#333'}">${div.division_name || 'Division'}</text>`;
 
-    // Render nodes per column (round)
-    const nodePositions = {}; // key: raceNumber → { x, y, roundIdx }
+    // Render nodes per column. ONE NODE PER TIER (a row in the
+    // division_rounds table). The label lists the race numbers
+    // belonging to that tier, matching the printed bracket diagram.
+    const tierPositions = {}; // key: round.id → { x (right edge), y (centre), lx (left edge) }
 
-    roundNums.forEach((rn, colIdx) => {
-      const tiers = roundGroups[rn];
-      let rowIdx = 0;
+    roundNums.forEach((depth, colIdx) => {
+      const tiers = roundGroups[depth];
       const x = 20 + colIdx * colWidth;
 
-      // Column header
-      svgContent += `<text x="${x + nodeW / 2}" y="${divLabelH + 10}" font-size="10" fill="var(--text-tertiary)" text-anchor="middle" font-weight="500">Round ${rn}</text>`;
+      // Vertically centre when this column has fewer tiers than the
+      // tallest one — mirrors the centred look of a printed bracket
+      // where the final-round box sits across from the middle of the
+      // semi-final column.
+      const colRows = tiers.length;
+      const colTopPad = ((maxRows - colRows) * (nodeH + gapY)) / 2;
 
-      tiers.forEach(tier => {
-        (tier.race_numbers || []).forEach(raceNum => {
-          const race = raceMap[raceNum];
-          const y = divLabelH + 20 + rowIdx * (nodeH + gapY);
+      // Column header reads "Round N" where N is depth+1 (1-indexed
+      // for the operator).
+      svgContent += `<text x="${x + nodeW / 2}" y="${divLabelH + 10}" font-size="10" fill="var(--text-tertiary)" text-anchor="middle" font-weight="500">Round ${Number(depth) + 1}</text>`;
 
-          // Node color based on status
-          let fillColor = 'var(--bg-input)';
-          let strokeColor = 'var(--border)';
-          if (race) {
-            if (race.status === 'cancelled') { fillColor = 'var(--danger-bg)'; strokeColor = 'var(--danger)'; }
-            else if (race.status === 'sent' || race.status === 'exported') { fillColor = 'var(--success-bg)'; strokeColor = 'var(--success)'; }
-            else if (race.status === 'started') { fillColor = 'var(--info-bg)'; strokeColor = 'var(--info)'; }
+      tiers.forEach((tier, tierIdx) => {
+        const y = divLabelH + 20 + colTopPad + tierIdx * (nodeH + gapY);
+        const tierRaceNums = tier.race_numbers || [];
+
+        // Per-tier status — derived from the rolled-up race statuses.
+        const tierRaceObjs = tierRaceNums.map(rn => raceMap[rn]).filter(Boolean);
+        const allDone = tierRaceObjs.length > 0 && tierRaceObjs.every(r =>
+          r.status === 'exported' || r.status === 'sent');
+        const anyStarted   = tierRaceObjs.some(r => r.status === 'started');
+        const anyCancelled = tierRaceObjs.some(r => r.status === 'cancelled');
+        let fillColor = 'var(--bg-input)';
+        let strokeColor = 'var(--border)';
+        if (allDone)         { fillColor = 'var(--success-bg)'; strokeColor = 'var(--success)'; }
+        else if (anyStarted) { fillColor = 'var(--info-bg)';    strokeColor = 'var(--info)'; }
+        else if (anyCancelled) { fillColor = 'var(--danger-bg)'; strokeColor = 'var(--danger)'; }
+
+        // Team highlight: any race in this tier matches a selected team.
+        const highlight = selectedTeamCodes.size > 0 &&
+          tierRaceNums.some(rn => highlightedRaces.has(rn));
+
+        // Tier box.
+        svgContent += `<rect x="${x}" y="${y}" width="${nodeW}" height="${nodeH}" rx="6" fill="${fillColor}" stroke="${highlight ? 'var(--accent)' : strokeColor}" stroke-width="${highlight ? 2.5 : 1}"/>`;
+
+        // Top line: tier name. Falls back to "Round N" when blank.
+        const tierLabel = tier.tier_name || `Round ${tier.round_number || '?'}`;
+        const shortLabel = tierLabel.length > 28 ? tierLabel.slice(0, 26) + '…' : tierLabel;
+        svgContent += `<text x="${x + 10}" y="${y + 20}" font-size="12" font-weight="600" fill="var(--text-primary)">${escapeXml(shortLabel)}</text>`;
+
+        // Bottom line: race-number list. Compact ranges for runs of 3+.
+        let racesStr = '(no races)';
+        if (tierRaceNums.length > 0) {
+          const sorted = [...tierRaceNums].sort((a, b) => a - b);
+          // Compact: e.g. [1,2,3,5,7,8,9] → "1-3, 5, 7-9"
+          const parts = [];
+          let runStart = sorted[0], runEnd = sorted[0];
+          for (let i = 1; i <= sorted.length; i++) {
+            const cur = sorted[i];
+            if (cur === runEnd + 1) { runEnd = cur; }
+            else {
+              parts.push(runEnd === runStart ? `${runStart}`
+                       : runEnd === runStart + 1 ? `${runStart}, ${runEnd}`
+                       : `${runStart}-${runEnd}`);
+              runStart = cur; runEnd = cur;
+            }
           }
+          racesStr = `Race ${parts.join(', ')}`;
+          if (racesStr.length > 30) racesStr = racesStr.slice(0, 28) + '…';
+        }
+        svgContent += `<text x="${x + 10}" y="${y + 40}" font-size="10" fill="var(--text-secondary)">${escapeXml(racesStr)}</text>`;
 
-          // Team highlight — driven by the precomputed team→races map so we
-          // catch the actual lane assignments, not just title text matches.
-          const highlight = selectedTeamCodes.size > 0 && highlightedRaces.has(raceNum);
+        // Roll-up status dot at top-right.
+        if (allDone || anyStarted || anyCancelled) {
+          const dot = allDone ? '#10b981' : (anyStarted ? '#3b82f6' : '#ef4444');
+          svgContent += `<circle cx="${x + nodeW - 12}" cy="${y + 12}" r="4" fill="${dot}"/>`;
+        }
 
-          svgContent += `<rect x="${x}" y="${y}" width="${nodeW}" height="${nodeH}" rx="6" fill="${fillColor}" stroke="${highlight ? 'var(--accent)' : strokeColor}" stroke-width="${highlight ? 2.5 : 1}"/>`;
-          svgContent += `<text x="${x + 8}" y="${y + 18}" font-size="12" font-weight="600" fill="var(--text-primary)">Race ${raceNum}</text>`;
-
-          const title = race?.race_title || tier.tier_name || '';
-          const shortTitle = title.length > 20 ? title.slice(0, 18) + '...' : title;
-          svgContent += `<text x="${x + 8}" y="${y + 33}" font-size="10" fill="var(--text-secondary)">${shortTitle}</text>`;
-
-          // Status badge
-          if (race?.status && race.status !== 'pending') {
-            const badgeColors = { started: '#3b82f6', exported: '#10b981', sent: '#10b981', cancelled: '#ef4444' };
-            svgContent += `<circle cx="${x + nodeW - 10}" cy="${y + 10}" r="4" fill="${badgeColors[race.status] || '#9ca3af'}"/>`;
-          }
-
-          nodePositions[raceNum] = { x: x + nodeW, y: y + nodeH / 2, lx: x, colIdx };
-          rowIdx++;
-        });
+        tierPositions[tier.id] = {
+          x: x + nodeW,
+          y: y + nodeH / 2,
+          lx: x,
+        };
       });
     });
 
-    // Render progression arrows
+    // Render progression arrows — one per (from_tier → to_tier).
+    // Arrows now connect TIER boxes, not individual race nodes, so the
+    // chart looks like a real bracket diagram.
     for (const prog of progs) {
-      const fromRound = rounds.find(r => r.id === prog.from_round_id);
-      const toRound = rounds.find(r => r.id === prog.to_round_id);
-      if (!fromRound || !toRound) continue;
+      const from = tierPositions[prog.from_round_id];
+      const to   = tierPositions[prog.to_round_id];
+      if (!from || !to) continue;
 
-      const fromRaces = fromRound.race_numbers || [];
-      const toRaces = toRound.race_numbers || [];
+      const strokeCol = 'var(--text-tertiary)';
+      const midX = from.x + (to.lx - from.x) / 2;
 
-      for (const fr of fromRaces) {
-        for (const tr of toRaces) {
-          const from = nodePositions[fr];
-          const to = nodePositions[tr];
-          if (!from || !to) continue;
+      if (prog.is_scored) {
+        // Double line (====) for scored progressions.
+        svgContent += `<path d="M${from.x},${from.y - 2} C${midX},${from.y - 2} ${midX},${to.y - 2} ${to.lx},${to.y - 2}" fill="none" stroke="${strokeCol}" stroke-width="1.5"/>`;
+        svgContent += `<path d="M${from.x},${from.y + 2} C${midX},${from.y + 2} ${midX},${to.y + 2} ${to.lx},${to.y + 2}" fill="none" stroke="${strokeCol}" stroke-width="1.5"/>`;
+      } else {
+        svgContent += `<path d="M${from.x},${from.y} C${midX},${from.y} ${midX},${to.y} ${to.lx},${to.y}" fill="none" stroke="${strokeCol}" stroke-width="1.2"/>`;
+      }
 
-          const strokeCol = 'var(--text-tertiary)';
-          const midX = from.x + (to.lx - from.x) / 2;
+      // Arrow head at the destination tier's left edge.
+      svgContent += `<polygon points="${to.lx},${to.y} ${to.lx - 7},${to.y - 5} ${to.lx - 7},${to.y + 5}" fill="${strokeCol}"/>`;
 
-          if (prog.is_scored) {
-            // Double line (====) for scored progressions
-            svgContent += `<path d="M${from.x},${from.y - 2} C${midX},${from.y - 2} ${midX},${to.y - 2} ${to.lx},${to.y - 2}" fill="none" stroke="${strokeCol}" stroke-width="1.5"/>`;
-            svgContent += `<path d="M${from.x},${from.y + 2} C${midX},${from.y + 2} ${midX},${to.y + 2} ${to.lx},${to.y + 2}" fill="none" stroke="${strokeCol}" stroke-width="1.5"/>`;
-          } else {
-            // Single line for tournament progression
-            svgContent += `<path d="M${from.x},${from.y} C${midX},${from.y} ${midX},${to.y} ${to.lx},${to.y}" fill="none" stroke="${strokeCol}" stroke-width="1"/>`;
-          }
-
-          // Arrow head
-          svgContent += `<polygon points="${to.lx},${to.y} ${to.lx - 6},${to.y - 4} ${to.lx - 6},${to.y + 4}" fill="${strokeCol}"/>`;
-
-          // Position range label
-          if (prog.position_range && prog.position_range !== 'all') {
-            svgContent += `<text x="${midX}" y="${(from.y + to.y) / 2 - 5}" font-size="9" fill="var(--text-tertiary)" text-anchor="middle">${prog.position_range}</text>`;
-          }
-          if (prog.is_scored) {
-            svgContent += `<text x="${midX}" y="${(from.y + to.y) / 2 + 10}" font-size="8" fill="var(--text-tertiary)" text-anchor="middle" font-style="italic">scored</text>`;
-          }
-        }
+      // Position-range label at the curve midpoint.
+      if (prog.position_range && prog.position_range !== 'all') {
+        svgContent += `<text x="${midX}" y="${(from.y + to.y) / 2 - 5}" font-size="10" fill="var(--text-tertiary)" text-anchor="middle" font-weight="500">${escapeXml(prog.position_range)}</text>`;
+      }
+      if (prog.is_scored) {
+        svgContent += `<text x="${midX}" y="${(from.y + to.y) / 2 + 12}" font-size="9" fill="var(--text-tertiary)" text-anchor="middle" font-style="italic">scored</text>`;
       }
     }
 
@@ -286,7 +332,9 @@ async function renderFlowchart(divisions, races, raceMap) {
   // Render SVG. The outer `flowchart-scroll` wrapper lets phones swipe
   // horizontally when the chart is wider than the viewport (mobile CSS
   // strips the max-width cap so the SVG can extend past the viewport).
-  const totalWidth = 800;
+  // totalWidth is the widest division's box width plus a small margin,
+  // so multi-column brackets aren't clipped on the right.
+  const totalWidth = Math.max(svgMaxWidth + 20, 800);
   container.innerHTML = `
     <div class="flowchart-scroll">
       <svg width="100%" viewBox="0 0 ${totalWidth} ${yOffset || 100}" style="max-width:${totalWidth}px; min-width:${Math.min(totalWidth, 480)}px;">
@@ -326,7 +374,7 @@ function renderNotReadyState(audit) {
       </p>
       <div style="margin-top:18px; display:flex; gap:10px; justify-content:center; flex-wrap:wrap;">
         ${haveRaces
-          ? `<a class="btn btn-primary" href="#/setup">
+          ? `<a class="btn btn-primary" href="#/setup/divisions">
                <i class="material-icons">tune</i> Configure Divisions
              </a>`
           : `<a class="btn btn-primary" href="#/import">
@@ -376,7 +424,7 @@ function renderAuditPanel(audit) {
           ${renderFindingList(m)}
         ` : ''}
         <div style="margin-top:10px; font-size:11px; color:var(--text-tertiary);">
-          Fix issues in <a href="#/setup" style="color:var(--accent);">Setup → Divisions</a>
+          Fix issues in <a href="#/setup/divisions" style="color:var(--accent);">Setup → Divisions</a>
           ${audit.stats.uncoveredRaces > 0 ? ` — ${audit.stats.uncoveredRaces} race(s) aren't in any round yet.` : ''}
         </div>
       </div>
@@ -424,4 +472,61 @@ function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   }[c]));
+}
+
+// SVG text content also needs <>& escaped. Quote forms are fine inside
+// the text node so we don't bother — keeping the helper minimal.
+function escapeXml(s) {
+  return String(s ?? '').replace(/[&<>]/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;',
+  }[c]));
+}
+
+/**
+ * Compute each round's column depth in the bracket using BFS over the
+ * progression edges. depth = length of the longest chain of
+ * progressions leading INTO this round.
+ *   - Rounds with no incoming progressions live at depth 0.
+ *   - A round reachable in one hop from depth 0 lives at depth 1.
+ *   - Parallel tiers (Cup Semi + Plate Semi both fed by Heats) share
+ *     a depth and end up in the same column visually.
+ * Cycles are tolerated — any round in a cycle gets depth 0 and any
+ * second-visit recursion bails to avoid infinite descent.
+ *
+ * @returns {Map<round.id, number>} depth keyed by round id
+ */
+function computeRoundDepths(rounds, progs) {
+  const depthByRoundId = new Map();
+  // Adjacency list: for each round, the set of rounds that progress
+  // INTO it. Used as the recursion's parent lookup.
+  const parentsOf = new Map();
+  for (const r of rounds) parentsOf.set(r.id, []);
+  for (const p of progs) {
+    if (parentsOf.has(p.to_round_id) && parentsOf.has(p.from_round_id)) {
+      parentsOf.get(p.to_round_id).push(p.from_round_id);
+    }
+  }
+
+  function depthOf(roundId, visiting) {
+    if (depthByRoundId.has(roundId)) return depthByRoundId.get(roundId);
+    if (visiting.has(roundId)) return 0; // cycle — break here
+    visiting.add(roundId);
+    const parents = parentsOf.get(roundId) || [];
+    if (parents.length === 0) {
+      depthByRoundId.set(roundId, 0);
+      visiting.delete(roundId);
+      return 0;
+    }
+    let best = 0;
+    for (const pid of parents) {
+      const d = depthOf(pid, visiting) + 1;
+      if (d > best) best = d;
+    }
+    depthByRoundId.set(roundId, best);
+    visiting.delete(roundId);
+    return best;
+  }
+
+  for (const r of rounds) depthOf(r.id, new Set());
+  return depthByRoundId;
 }

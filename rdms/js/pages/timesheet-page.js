@@ -86,7 +86,7 @@ export async function mountTimesheetPage(container) {
           ${rows.map(r => {
             const div = r.division_id ? divMap[r.division_id] : null;
             const divColor = div?.colour_hex || '#9ca3af';
-            const divName = div?.div_short_ref || '';
+            const divName = div?.division_name || '';
             return `<tr>
               <td><strong>${r.race_number}</strong></td>
               <td><span class="division-color" style="background:${divColor};"></span>${divName}</td>

@@ -23,6 +23,7 @@ export function renderUserGuideTab(container) {
             <li><a href="javascript:void(0)" onclick="document.getElementById('g-config').scrollIntoView({behavior:'smooth'})" style="color:var(--accent);">Config Reference</a></li>
             <li><a href="javascript:void(0)" onclick="document.getElementById('g-scoring').scrollIntoView({behavior:'smooth'})" style="color:var(--accent);">Scoring</a></li>
             <li><a href="javascript:void(0)" onclick="document.getElementById('g-nextround').scrollIntoView({behavior:'smooth'})" style="color:var(--accent);">Next Round Draws</a></li>
+            <li><a href="javascript:void(0)" onclick="document.getElementById('g-export').scrollIntoView({behavior:'smooth'})" style="color:var(--accent);">Result Export (bundled template)</a></li>
             <li><a href="javascript:void(0)" onclick="document.getElementById('g-archive').scrollIntoView({behavior:'smooth'})" style="color:var(--accent);">Past Events Archive</a></li>
             <li><a href="javascript:void(0)" onclick="document.getElementById('g-lock').scrollIntoView({behavior:'smooth'})" style="color:var(--accent);">Event Lock</a></li>
             <li><a href="javascript:void(0)" onclick="document.getElementById('g-auth').scrollIntoView({behavior:'smooth'})" style="color:var(--accent);">Login, Roles & Default Mode</a></li>
@@ -96,7 +97,7 @@ export function renderUserGuideTab(container) {
             <tr><th>Step</th><th>Action</th><th>Notes</th></tr>
             <tr><td>1</td><td>${ic('play_arrow')} <strong>START RACE</strong></td><td>Click when race begins. Millisecond precision. Click again to restart. The original start time is preserved when restarting.</td></tr>
             <tr><td>1b</td><td>${ic('undo')} <strong>Reset start</strong></td><td>Ghost button next to FINISH, visible only when race was started but not yet exported. Clears start_time / joyi_start_time / restart_time / p1_finish and returns the race to PENDING. Use only for misclicks.</td></tr>
-            <tr><td>1c</td><td>${ic('delete_forever')} <strong>Reset race</strong> <span style="color:var(--danger); font-size:11px;">danger</span></td><td>Draconian — clears EVERYTHING (start times AND every lane's raw_time / penalty / remarks / position / Joyi data). Preserves the team draw + export history audit trail. Gated behind type-the-race-number confirmation. Only for confirmed re-race scenarios on the water.</td></tr>
+            <tr><td>1c</td><td>${ic('delete_forever')} <strong>Reset race</strong> <span style="color:var(--danger); font-size:11px;">danger</span></td><td>Draconian — clears EVERYTHING (start times, every lane's raw_time / penalty / remarks / position / Joyi data, AND export_time / export_version / send_time so the race returns to PENDING). Available at any state except <em>cancelled</em>, including after export or send. Preserves the team draw + export_history audit trail. Gated behind type-the-race-number confirmation. Use for confirmed re-races OR to redo a wrongly-exported race from scratch.</td></tr>
             <tr><td>1d</td><td>${ic('backspace')} <strong>Clear inputs</strong></td><td>Sits next to <em>Import Joyi</em> on the Results Input card. Wipes only the entered cells (Lane, Time, TP, Remarks) for every row. Preserves team draws, start/joyi/export times, status, Joyi-imported result columns. Use when you want to re-key the times without nuking the whole race.</td></tr>
             <tr><td>1e</td><td>${ic('restart_alt')} <strong>Revive Race</strong></td><td>Replaces the Cancel button only when status = cancelled. Restores status to where it logically should be based on what's been recorded — pending (no times yet), started (has start_time), exported / sent (has export_time). Lane results stay untouched.</td></tr>
             <tr><td>2a</td><td><strong>Manual Input</strong></td><td>Type lane + time (mss00: 05591 = 0:55.91) in yellow grid. Enter in finishing order. Arrow keys / Tab / Enter to navigate. <strong>First non-empty entry</strong> auto-fires the next-race signal + flips the digital flag red (see §6).</td></tr>
@@ -279,7 +280,17 @@ export function renderUserGuideTab(container) {
         <div id="g-scoring" class="gs">
           <h4>9. Scoring</h4>
           <ul>
-            <li>Set scoring flags in Setup &rarr; Schedule: <strong>R1</strong>, <strong>R2</strong>, <strong>RFinal</strong>.</li>
+            <li><strong>Auto-determination on division save.</strong> Whenever you save a division (rounds + progressions), RDMS recomputes <code>scoring_flag</code> for every race in that division based on the progression graph.</li>
+            <li><strong>1:1 chain rule.</strong> A progression edge is "1:1" when the from-round has exactly one outgoing progression AND the to-round has exactly one incoming progression. Rounds linked by 1:1 edges form a chain:
+              <ul>
+                <li>Chain of 2 → <code>R1</code> &rarr; <code>RFinal</code></li>
+                <li>Chain of 3 → <code>R1</code> &rarr; <code>R2</code> &rarr; <code>RFinal</code></li>
+                <li>Chain of 4+ → <code>R1</code> &rarr; <code>R2</code> &rarr; <code>N</code>… &rarr; <code>RFinal</code></li>
+                <li>Any round NOT on a 1:1 chain → <code>N</code></li>
+              </ul>
+            </li>
+            <li><strong>Example (Cup + Plate bracket).</strong> Heat has two outgoing edges (top 4 → Cup Semi, rest → Plate Semi), so Heat is off-chain &rarr; <code>N</code>. Cup Semi&rarr;Cup Final is a 1:1 pair &rarr; <code>R1</code> + <code>RFinal</code>. Plate Semi&rarr;Plate Final is a separate 1:1 pair &rarr; also <code>R1</code> + <code>RFinal</code>.</li>
+            <li><strong>Manual override.</strong> Edit the Scored column on Setup &rarr; Schedule for any race; your edit wins until the next division save reruns auto-determination.</li>
             <li>Points: 1st = lane_count + 1, 2nd = lane_count - 1, ... DNS/DNF/DSQ/DQ = 0.</li>
             <li>Tiebreaker: RFinal &times;1.001 &gt; R2 &times;1.00001 &gt; R1 &times;1.0000001.</li>
             <li>Flowchart: single line = tournament progression, double line (══) = scored series.</li>
@@ -304,10 +315,33 @@ export function renderUserGuideTab(container) {
           <p><strong>File output</strong></p>
           <ul>
             <li><strong>IndexedDB</strong> — the resolved <code>lane_results</code> are written immediately; the dashboard reflects the change without re-import.</li>
-            <li><strong>Local .xls</strong> — a clean <code>{race_number}.xls</code> (header + lanes, no footnote) is written to <code>13 Output_Next Round Draws/</code>.</li>
+            <li><strong>Local .xls</strong> — patched from the bundled xlsx template (preserves all original visual formatting — borders, fonts, fills, alignment, merges) and written to <code>13 Output_Next Round Draws/</code> as <code>{race_number}.xls</code>. The file is xlsx content under an .xls filename; downstream tools (and Excel itself) sniff content, not extension, so it opens cleanly.</li>
             <li><strong>Shared .xls</strong> — also mirrored to <code>80 Shared/{ref}_Next_Round_Draws/</code> for the scoring team's paper backup.</li>
           </ul>
           <div class="gtip"><strong>Edge cases:</strong> Cancelled source races resolve to their last known team but warn. Source races still in <code>pending</code> / <code>started</code> are skipped with a warning toast — the placeholder stays as-is and the lane shows in the audit until you export.</div>
+        </div>
+
+        <!-- 10b. Result Export -->
+        <div id="g-export" class="gs">
+          <h4>10b. Result Export &mdash; bundled template</h4>
+          <p>Result exports (and next-round draws) use a <strong>single bundled xlsx template</strong> baked into the app — <code>templates/race-template.xlsx</code>. Per-race data is patched into specific cells; everything else (header band, column widths, merged cells, footnote box layout, signature row, fonts, borders) comes from the template and is preserved bit-for-bit.</p>
+
+          <p><strong>Cells patched per race</strong></p>
+          <table class="gt">
+            <tr><th>Cell</th><th>Source</th></tr>
+            <tr><td><code>A1</code></td><td><code>race.race_title_raw</code> — the original A1 text from the imported draw (full long form, suffixes preserved). Fallback to <code>race.race_title</code> (sanitised UI title) on legacy races.</td></tr>
+            <tr><td><code>D1</code></td><td><code>race.race_time</code></td></tr>
+            <tr><td><code>B4..B10</code></td><td>Team names for lanes 1..7 from <code>lane_results</code></td></tr>
+            <tr><td><code>C4..C10</code></td><td>Team codes for lanes 1..7</td></tr>
+            <tr><td><code>D4..D10</code></td><td>Time (m.ss.00 format) — blank for DSQ/DQ/DNS/DNF</td></tr>
+            <tr><td><code>E4..E10</code></td><td>Place (numeric) — blank for DSQ/DQ/DNS/DNF</td></tr>
+            <tr><td><code>I4..I10</code></td><td>Remarks (DSQ/DQ/DNS/DNF marker OR free text)</td></tr>
+            <tr><td><code>A11</code></td><td><code>race.progression_text</code> — the footnote/progression rules from the imported draw. On revisions (v2+), the revision marker is appended after the original text with a newline.</td></tr>
+          </table>
+
+          <p><strong>Filename</strong> is always <code>{race_number}.xls</code> (downstream contract). The bytes are xlsx-format (zip + XML); Excel/Numbers/VBA tools sniff content, so the filename lie is invisible.</p>
+
+          <div class="gtip"><strong>Re-import to refresh.</strong> If a race's exported A1 or A11 looks wrong, re-import its source draw. The import pass writes <code>race_title_raw</code> and <code>progression_text</code> back to the race record; the next export uses the refreshed values. Races imported before this feature existed may have those fields empty — re-import to populate.</div>
         </div>
 
         <!-- 11. Past Events Archive -->

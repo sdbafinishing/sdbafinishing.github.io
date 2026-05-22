@@ -19,10 +19,14 @@ export async function mountImportPage(container) {
   container.innerHTML = `
     <h4 style="font-size:18px; font-weight:600; margin-bottom:16px;">Im/Export</h4>
 
+    <!-- Tab order follows the race-day chronology: import the draws, then
+         generate start lists for the timing systems, then import Joyi
+         results as races finish, then generate next-round draws when a
+         round wraps. -->
     <div class="tabs">
       <button class="tab active" data-tab="draws" onclick="window._importTab('draws')">Import Draws</button>
-      <button class="tab" data-tab="joyi" onclick="window._importTab('joyi')">Import Joyi Results</button>
       <button class="tab" data-tab="startlists" onclick="window._importTab('startlists')">Generate Start Lists</button>
+      <button class="tab" data-tab="joyi" onclick="window._importTab('joyi')">Import Joyi Results</button>
       <button class="tab" data-tab="nextround" onclick="window._importTab('nextround')">Generate Next Round Draws</button>
     </div>
 
@@ -369,7 +373,10 @@ async function handleDrawFiles(files) {
     try {
       const { getConfig } = await import('../db.js');
       const cfg = await getConfig();
-      if (cfg?.auto_start_list_on_import) {
+      // Default is ON: only skip when explicitly set to false. A brand-
+      // new event (config undefined for this field) gets the start list
+      // regenerated automatically.
+      if (cfg?.auto_start_list_on_import !== false) {
         await generateJoyiStartList();
         showToast('Joyi start list regenerated.', 'info', 3000);
       }
@@ -458,7 +465,7 @@ async function renderNextRoundDrawsTab(container) {
       grid.innerHTML = `
         <div style="padding:24px; text-align:center; color:var(--text-tertiary);">
           No divisions configured.
-          <a href="#/setup" style="color:var(--accent);">Set up divisions</a> first.
+          <a href="#/setup/divisions" style="color:var(--accent);">Set up divisions</a> first.
         </div>`;
       return;
     }
@@ -515,10 +522,21 @@ function renderRoundRow(division, round, idx) {
   const isFirstRowForDiv = idx === 0;
   const progressColour = round.isComplete ? 'var(--success)' : 'var(--text-secondary)';
   const hasNext = round.nextRaces.length > 0;
-  const btnDisabled = !round.isComplete || !hasNext;
-  const btnLabel = !hasNext
-    ? '✓ Generated'
-    : (round.isComplete ? `Resolve ${round.nextRaces.length}` : 'Waiting…');
+  const isTerminal = !round.hasOutgoing;
+  // Three cases:
+  //  - Terminal (no progressions out): there's no next-round draw to
+  //    generate. Show a quiet "—" / "Final round" hint, never "Generated".
+  //  - hasOutgoing && !hasNext: this round feeds downstream rounds, but
+  //    every dependent next-round race already has resolved teams →
+  //    "✓ Generated".
+  //  - hasOutgoing && hasNext: there's pending work. Either source not
+  //    complete ("Waiting…") or complete ("Resolve N").
+  const btnDisabled = isTerminal || !round.isComplete || !hasNext;
+  const btnLabel = isTerminal
+    ? '— Final round'
+    : !hasNext
+      ? '✓ Generated'
+      : (round.isComplete ? `Resolve ${round.nextRaces.length}` : 'Waiting…');
 
   return `
     <tr>
@@ -535,7 +553,9 @@ function renderRoundRow(division, round, idx) {
       <td style="font-size:12px; color:var(--text-secondary);">
         ${hasNext
           ? round.nextRaces.map(nr => `<span title="${escapeAttr(nr.race_title)}" style="display:inline-block; padding:1px 6px; margin:1px 2px; border:1px solid var(--border); border-radius:3px; background:var(--bg-elev);">Race ${nr.race_number} <span style="color:var(--text-tertiary);">(${nr.placeholder_count})</span></span>`).join('')
-          : '<span style="color:var(--text-tertiary);">no pending</span>'}
+          : isTerminal
+            ? '<span style="color:var(--text-tertiary);">no downstream rounds</span>'
+            : '<span style="color:var(--text-tertiary);">no pending</span>'}
       </td>
       <td>
         <button class="btn btn-${btnDisabled ? 'ghost' : 'primary'} btn-sm"

@@ -31,10 +31,13 @@ export async function generateJoyiStartList() {
 
   const wsData = [];
 
-  // Header
+  // Header — matches the Joyi reference template (99 Reference/
+  // Joyi_StartList_<RACEREF>_<RACEDATE>.xls). The labels in row 2 and
+  // column headers in row 3 are what Joyi expects to find; the legacy
+  // VBA tool wrote these and our flat output was missing them.
   wsData.push([eventName]);
-  wsData.push(['', '', '', '', `.（${eventRef}）`]);
-  wsData.push([]); // blank row before data
+  wsData.push(['考点：', '', '', '项目：', `.（${eventRef}）`]);
+  wsData.push(['组号', '道次', '准考证号', '姓名']);
 
   // Generate race blocks
   const allRaceNums = [...sortedRaces.map(r => r.race_number), 9991, 9992, 9993, 9994, 9995];

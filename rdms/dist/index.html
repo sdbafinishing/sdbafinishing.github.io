@@ -19,8 +19,8 @@
 
   <!-- PWA Manifest -->
   <link rel="manifest" href="./assets/manifest-CxMu6RPC.json">
-  <script type="module" crossorigin src="./assets/index-BVRkey-w.js"></script>
-  <link rel="stylesheet" crossorigin href="./assets/index-DuL4MHlb.css">
+  <script type="module" crossorigin src="./assets/index-BHb4b4px.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-qNdC3BqV.css">
 </head>
 <body>
   <!-- Top Navigation Bar -->
@@ -46,10 +46,13 @@
         <i class="material-icons">account_tree</i> Flowchart
       </a>
       <a href="#/import" class="nav-link" data-page="import">
-        <i class="material-icons">upload_file</i> Import
+        <i class="material-icons">swap_horiz</i> Im/Export
       </a>
       <a href="#/setup" class="nav-link" data-page="setup">
         <i class="material-icons">settings</i> Setup
+      </a>
+      <a href="#/archive" class="nav-link" data-page="archive">
+        <i class="material-icons">archive</i> Archive
       </a>
       <a href="#/admin" class="nav-link" data-page="admin">
         <i class="material-icons">storage</i> DB
@@ -108,11 +111,37 @@
     };
   </script>
 
-  <!-- Service Worker Registration -->
+  <!-- Service Worker Registration
+       Skipped on localhost because Vite's dev server doesn't play nicely
+       with a cache-first SW — a 404 during HMR / port-bump can poison the
+       cache and the next load returns unstyled HTML (the classic "raw
+       HTML, Cmd+Shift+R fixes it" symptom). Production hosting (GitHub
+       Pages) still gets the offline PWA behavior. -->
   <script>
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('./sw.js').catch(() => {});
-    }
+    (function () {
+      var host = window.location.hostname;
+      var isLocal = host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0';
+      if (isLocal) {
+        // Aggressively tear down anything a previous prod-deploy build
+        // (or an earlier dev session that DID register the SW) might
+        // have left behind. This guarantees a clean dev session after
+        // updating to a build that skips registration.
+        if ('serviceWorker' in navigator) {
+          navigator.serviceWorker.getRegistrations().then(function (regs) {
+            regs.forEach(function (r) { r.unregister(); });
+          }).catch(function () {});
+        }
+        if (window.caches && caches.keys) {
+          caches.keys().then(function (keys) {
+            keys.forEach(function (k) { caches.delete(k); });
+          }).catch(function () {});
+        }
+        return;
+      }
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('./sw.js').catch(function () {});
+      }
+    })();
   </script>
 
   <!-- App Entry -->

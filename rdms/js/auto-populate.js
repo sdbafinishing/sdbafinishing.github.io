@@ -255,7 +255,6 @@ export async function saveProposedDivisions(proposals) {
     const divId = await saveDivision({
       division_name: prop.division_name,
       div_code_prefix: '',
-      div_short_ref: '',
       colour_hex: prop.colour_hex,
     });
 

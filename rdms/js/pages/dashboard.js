@@ -11,6 +11,7 @@ import { isoToTime, showToast } from '../utils.js';
 import { getSignalStatus, forceSignalRace } from '../next-race-signal.js';
 import { renderSignalPanel, cleanupSignalPanel } from './signal-panel.js';
 import { isRaceDayComplete, showLockModal } from '../event-lock.js';
+import { summariseDivisions } from '../round-completion.js';
 import { hasPermission } from '../rbac.js';
 
 let refreshInterval = null;
@@ -363,7 +364,7 @@ async function renderDashboard() {
   await renderCurrentNext(races);
   renderDelayTracking(races);
   await renderNextRacePanel();
-  renderAlerts(races);
+  await renderAlerts(races);
 
   const activeSort = document.querySelector('.btn-sort.active');
   renderRaces(activeSort ? activeSort.dataset.sort : 'race', races, divisions);
@@ -456,7 +457,7 @@ async function renderCurrentNext(races) {
     return `
       <div style="display:flex; align-items:center; gap:12px; padding:12px 16px; border-bottom:1px solid var(--border); ${tint}">
         <span class="badge ${badgeCls}">${badgeText}</span>
-        <span title="${div?.div_short_ref || div?.division_name || ''}" style="display:inline-block; width:8px; height:24px; border-radius:2px; background:${divColour}; flex-shrink:0;"></span>
+        <span title="${div?.division_name || ''}" style="display:inline-block; width:8px; height:24px; border-radius:2px; background:${divColour}; flex-shrink:0;"></span>
         <strong>Race ${r.race_number}</strong> — ${r.race_title || 'Untitled'}
         <span style="color:var(--text-tertiary); margin-left:auto;">${rightText}</span>
         <a href="#/race/${r.race_number}" class="btn ${openCls}" style="padding:4px 12px; font-size:12px;">Open</a>
@@ -477,7 +478,7 @@ async function renderCurrentNext(races) {
   el.innerHTML = html;
 }
 
-function renderAlerts(races) {
+async function renderAlerts(races) {
   const el = document.getElementById('alertsPanel');
   if (!el) return;
 
@@ -501,9 +502,36 @@ function renderAlerts(races) {
     alerts.push({ type: 'danger', msg: `${fmt(startedNotExported)}: started > 10 min ago, not exported` });
   }
 
-  const noDraw = races.filter(r => !r.teams_loaded && r.status === 'pending').map(r => r.race_number);
-  if (noDraw.length > 0) {
-    alerts.push({ type: 'info', msg: `${fmt(noDraw)}: draws not yet imported` });
+  // "Draws not yet imported" — narrowed to races that are actually ready
+  // to have draws generated/imported RIGHT NOW. A race is ready when its
+  // source rounds (the rounds that progress INTO it via the flowchart)
+  // are all complete. Round 1 races with no incoming progressions aren't
+  // listed here — those need manual import at event setup, not a runtime
+  // nudge during racing.
+  try {
+    const summaries = await summariseDivisions();
+    const readyForDraw = new Set();
+    for (const div of summaries) {
+      for (const round of div.rounds) {
+        if (!round.isComplete) continue;        // source not done → don't nag
+        if (!round.nextRaces?.length) continue; // no waiting next races
+        for (const nr of round.nextRaces) readyForDraw.add(nr.race_number);
+      }
+    }
+    // Intersect with races that genuinely lack draws + are still pending.
+    // (`nextRaces` from summariseDivisions already filters to races with
+    // unresolved placeholders, but cross-reference with the race table to
+    // be safe against any data-shape drift.)
+    const noDraw = [...readyForDraw].filter(rn => {
+      const r = races.find(x => x.race_number === rn);
+      return r && !r.teams_loaded && r.status === 'pending';
+    }).sort((a, b) => a - b);
+    if (noDraw.length > 0) {
+      alerts.push({ type: 'info', msg: `${fmt(noDraw)}: prior round complete — next round draws ready to generate` });
+    }
+  } catch (err) {
+    // Don't let the alerts panel die if the audit walk throws.
+    console.warn('renderAlerts: noDraw scan failed', err);
   }
 
   if (alerts.length === 0) { el.innerHTML = ''; return; }
@@ -659,7 +687,7 @@ async function renderRaces(sortMode = 'race', racesArg, divisionsArg) {
   const renderRaceRow = (r) => {
     const div = r.division_id ? divMap[r.division_id] : null;
     const divColor = div ? div.colour_hex || '#9ca3af' : '#9ca3af';
-    const divName = div ? (div.div_short_ref || div.division_name || '') : '';
+    const divName = div ? (div.division_name || '') : '';
     return `
       <tr>
         <td><strong>${r.race_number}</strong></td>
@@ -706,7 +734,7 @@ async function renderRaces(sortMode = 'race', racesArg, divisionsArg) {
     const parts = [];
     for (const divId of sortedDivIds) {
       const div = divMap[divId];
-      const label = div ? (div.div_short_ref ? `${div.div_short_ref} — ${div.division_name || ''}` : (div.division_name || `Division ${divId}`)) : `Division ${divId}`;
+      const label = div ? (div.division_name || `Division ${divId}`) : `Division ${divId}`;
       const colour = div?.colour_hex || '#9ca3af';
       parts.push(groupHeader(label, colour));
       byDiv.get(divId).sort((a, b) => a.race_number - b.race_number).forEach(r => parts.push(renderRaceRow(r)));

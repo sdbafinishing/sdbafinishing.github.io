@@ -4,6 +4,7 @@
  */
 import { db } from '../db.js';
 import { showToast } from '../utils.js';
+import { autoBackup } from '../backup.js';
 
 const TABLE_NAMES = [
   'config', 'races', 'lane_results', 'timesheet',
@@ -199,10 +200,13 @@ async function saveEdit() {
   }
 
   try {
-    await db[editingTable].put(data);
+    // Capture editingTable BEFORE cancelEdit clears it — otherwise the
+    // loadTable below sees null and `db[null].toArray()` throws.
+    const tableName = editingTable;
+    await db[tableName].put(data);
     showToast('Record saved', 'success');
     cancelEdit();
-    await loadTable(editingTable);
+    await loadTable(tableName);
   } catch (e) {
     showToast('Save failed: ' + e.message, 'error');
   }
@@ -232,26 +236,13 @@ async function exportTableJson() {
 }
 
 async function backupAll() {
-  const backup = {};
-  for (const table of TABLE_NAMES) {
-    backup[table] = await db[table].toArray();
-  }
-  backup._meta = {
-    exported_at: new Date().toISOString(),
-    version: 1,
-    app: 'sdba-rdms',
-  };
-
-  const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `rdms_backup_${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
-
-  const totalRows = Object.values(backup).filter(Array.isArray).reduce((sum, arr) => sum + arr.length, 0);
-  showToast(`Backup saved: ${totalRows} records across ${TABLE_NAMES.length} tables`, 'success');
+  // Route through autoBackup() so the result lands in the connected
+  // event folder's "20 Database Backup/" subfolder (or Drive's, if
+  // that's the connected backend). Previously this function had its
+  // own download-only implementation that ignored the connected
+  // folder — so even with a local folder attached, backups went to
+  // the browser's Downloads.
+  await autoBackup('manual');
 }
 
 async function restoreAll(file) {

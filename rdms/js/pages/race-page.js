@@ -76,7 +76,7 @@ export async function mountRacePage(container, params) {
     divisionInfo = divs.find(d => d.id === raceData.division_id) || null;
   }
   const divColour = divisionInfo?.colour_hex || '#9ca3af';
-  const divLabel = divisionInfo ? (divisionInfo.div_short_ref || divisionInfo.division_name || '') : '';
+  const divLabel = divisionInfo ? (divisionInfo.division_name || '') : '';
 
   // Snapshot draws keyed by the actual boat lane. Output uses this so changing
   // lane_input remaps the team correctly (previously the row index won).
@@ -333,6 +333,12 @@ export async function mountRacePage(container, params) {
     columns: gridColumns,
     data: gridData,
     onChange: onCellChange,
+    // Strict validation runs on cell blur (after change), not on every
+    // keystroke. The first digit you type is always "invalid" against
+    // the full mss00 format, so flagging mid-typing is noise. The blur
+    // recompute calls the same recalculate() — it just sees focusedRow
+    // === null and so applies the -2 flags to every row.
+    onBlur: onCellBlur,
   });
 
   // Initial ranking
@@ -463,7 +469,7 @@ async function renderRacePicker(container) {
     container.innerHTML = `<div class="card" style="text-align:center; padding:40px;">
       <i class="material-icons" style="font-size:48px; color:var(--text-tertiary);">event_busy</i>
       <h3 style="margin-top:12px;">No races loaded</h3>
-      <p style="color:var(--text-tertiary);">Go to <a href="#/setup">Setup</a> → Import Draws first.</p>
+      <p style="color:var(--text-tertiary);">Go to <a href="#/import">Im/Export → Import Draws</a> first.</p>
     </div>`;
     return;
   }
@@ -497,7 +503,7 @@ async function renderRacePicker(container) {
           ${sorted.map(r => {
             const div = r.division_id ? divMap[r.division_id] : null;
             const divCol = div?.colour_hex || '#9ca3af';
-            const divName = div ? (div.div_short_ref || div.division_name || '') : '';
+            const divName = div ? (div.division_name || '') : '';
             return `<tr>
               <td><strong>${r.race_number}</strong></td>
               <td>${r.race_title || '—'}</td>
@@ -574,12 +580,27 @@ function onCellChange(rowIndex, colKey, newValue, rowData) {
     notifyResultEntryStarted(raceNumber).catch(() => {});
   }
 
-  // Recalculate rankings
+  // Recalculate rankings (live — leniently skips -2 flag on the
+  // currently-focused row to avoid mid-typing red flashes).
   recalculate();
 
   // Debounced save to IndexedDB
   clearTimeout(saveDebounceTimer);
   saveDebounceTimer = setTimeout(() => persistCurrentRow(rowIndex), 200);
+}
+
+/**
+ * Fires when the operator leaves a cell after a value change (or
+ * presses Enter). At this point grid.focusedRow has been cleared by
+ * the blur handler, so recalculate() now applies strict validation
+ * (including the -2 flags we deferred during live typing). Also
+ * commits any pending debounced save immediately — operator's done
+ * with this row, no need to wait 200ms.
+ */
+function onCellBlur(rowIndex, colKey, newValue, rowData) {
+  recalculate();
+  clearTimeout(saveDebounceTimer);
+  persistCurrentRow(rowIndex);
 }
 
 function recalculate() {
@@ -600,20 +621,30 @@ function recalculate() {
 
   const laneCount = configData?.lane_count || 6;
 
-  // Validation checks (G21/H22 equivalents)
+  // Validation checks (G21/H22 equivalents).
+  // The currently-focused row (if any) is treated leniently: partial
+  // input like "1" or "10" isn't yet a valid mss00 time and would
+  // flash the row red on every keystroke. We hold off on the -2 flag
+  // for that one row until the operator blurs out — at which point
+  // the onCellBlur handler triggers a fresh recalculate() with
+  // focusedRow === null and the strict check runs.
+  const focusedIdx = grid?.focusedRow ?? null;
   data.forEach((row, i) => {
+    const isLive = i === focusedIdx;
     if (!row.raw_time && !row.remarks) {
       row.validation = null; // empty row
     } else if (row.raw_time && row.effective_time_ms != null) {
       row.validation = 1; // ok
       // Check time format
       if (row.raw_time && !isValidTime(row.raw_time, timeMode)) {
-        row.validation = -2;
+        row.validation = isLive ? null : -2;
       }
     } else if (row.remarks) {
       row.validation = 1; // has remark, ok
     } else {
-      row.validation = -2; // has time but invalid
+      // Has raw_time but no parsed time → either invalid format or
+      // user still typing. Defer to blur for the row being edited.
+      row.validation = isLive ? null : -2;
     }
   });
 
@@ -628,21 +659,25 @@ function recalculate() {
       laneCounts.set(lane, (laneCounts.get(lane) || 0) + 1);
     }
   });
-  data.forEach(row => {
+  data.forEach((row, i) => {
     if (!row.raw_time && !row.remarks) return;
     if (row.validation === -2) return; // already invalid for another reason
+    const isLive = i === focusedIdx;
     const laneStr = (row.lane_input ?? '').toString().trim();
     if (laneStr === '') {
-      row.validation = -2; // blank lane while row has data
+      // While the operator is still typing in this row, an empty lane
+      // is expected — they may not have entered it yet. Skip the -2
+      // flag for the focused row; blur will reapply strictly.
+      if (!isLive) row.validation = -2;
       return;
     }
     const lane = parseInt(laneStr, 10);
     if (!Number.isInteger(lane) || lane < 1 || lane > laneCount) {
-      row.validation = -2; // out of range
+      if (!isLive) row.validation = -2; // out of range
       return;
     }
     if ((laneCounts.get(lane) || 0) > 1) {
-      row.validation = -2; // duplicate lane across rows
+      row.validation = -2; // duplicate lane across rows — flag always
     }
   });
 
@@ -897,10 +932,14 @@ function renderStartStopButton() {
   const startCls = everStarted ? 'btn-primary' : 'btn-success';
   const finishDisabled = (!everStarted || cancelled) ? 'disabled' : '';
 
-  // "Reset start" is an escape hatch for a misclick on START — only useful
-  // before any results land (export or any raw_time entered). Once data has
-  // been captured, hide it; the operator must go via DB Admin instead.
-  const canReset = everStarted && !raceData.export_time && !cancelled;
+  // "Reset start" is a light escape hatch for a misclick on START — only
+  // useful before any results land. Hidden once results are exported.
+  const canResetStart = everStarted && !raceData.export_time && !cancelled;
+  // "Reset race" is the draconian re-race button. Available at any point
+  // EXCEPT when the race is cancelled. After export/send it also clears
+  // export markers so the race genuinely returns to a pre-start state
+  // (export_history is preserved as an audit trail).
+  const canResetRace = !cancelled;
 
   wrap.innerHTML = `
     <button class="btn ${startCls}" style="flex:7;" onclick="window._startRace()" id="startBtn" ${cancelled ? 'disabled' : ''}>
@@ -910,13 +949,15 @@ function renderStartStopButton() {
             title="Capture first-boat finish timestamp at click moment">
       <i class="material-icons">flag</i> FINISH
     </button>
-    ${canReset ? `
+    ${canResetStart ? `
     <button class="btn btn-ghost btn-sm" style="flex:0 0 auto;" onclick="window._resetStart()" id="resetStartBtn"
             title="Undo START — clears start_time and goes back to PENDING. Hidden once results are exported.">
       <i class="material-icons" style="font-size:16px;">undo</i> Reset start
     </button>
+    ` : ''}
+    ${canResetRace ? `
     <button class="btn btn-ghost btn-sm" style="flex:0 0 auto; color:var(--danger);" onclick="window._resetRace()" id="resetRaceBtn"
-            title="Draconian reset — clears start times AND all lane results. Use only for a confirmed re-race.">
+            title="Draconian reset — clears start times, all lane results, and export/send markers. Use only for a confirmed re-race.">
       <i class="material-icons" style="font-size:16px;">delete_forever</i> Reset race
     </button>
     ` : ''}
@@ -1106,8 +1147,10 @@ function attachHandlers() {
       `  • start_time / restart_time / joyi_start_time\n` +
       `  • p1 finish time\n` +
       `  • EVERY lane's raw_time, penalty, remarks, computed position\n` +
-      `  • EVERY lane's Joyi result fields\n\n` +
-      `Team draw (lane assignments) is preserved.\n\n` +
+      `  • EVERY lane's Joyi result fields\n` +
+      `  • export_time / export_version / send_time\n\n` +
+      `Team draw (lane assignments) is preserved.\n` +
+      `Export history (audit trail) is preserved.\n\n` +
       `Type the race number (${raceNumber}) to confirm:`
     );
     if (typed == null) return; // cancelled
@@ -1125,9 +1168,15 @@ function attachHandlers() {
     raceData.result_entry_signaled = false;
     raceData.joyi_imported = false;
     raceData.status = 'pending';
-    // Export history is not cleared — the audit trail of what WAS exported
-    // before the reset is still useful. The next export will increment as
-    // a new version anyway.
+    // Clear export and send markers so the race genuinely returns to a
+    // pre-start state (status badge, dashboard tile, next-race signal,
+    // etc. all read these). export_history is preserved as the audit
+    // trail of what WAS exported before the reset; the next export
+    // will create a fresh v1 entry alongside the prior versions.
+    raceData.export_time = null;
+    raceData.export_version = 0;
+    raceData.send_time = null;
+    raceData.re_send_time = null;
     await saveRace(raceData);
 
     // 2) Clear lane-result fields. Preserve identity (lane_number, team).
@@ -1414,9 +1463,10 @@ function attachHandlers() {
 
   window._exportAndSend = async () => {
     await showExportModal(raceNumber, async () => {
-      await sendToWhatsApp(raceNumber);
+      // Mark "sent" the moment we're about to surface the WhatsApp
+      // copy-modal — the operator's intent is to send, and asking
+      // them to confirm afterwards adds a click without value.
       raceData = await getRace(raceNumber);
-      // Track previous send time so the header can render it struck through.
       if (raceData.send_time) raceData.prev_send_time = raceData.send_time;
       raceData.send_time = nowISO();
       raceData.status = 'sent';
@@ -1428,6 +1478,10 @@ function attachHandlers() {
       document.getElementById('raceStatus').textContent = 'SENT';
       document.getElementById('raceStatus').className = 'badge badge-sent';
       broadcastChange('race-updated', { race_number: raceNumber });
+      // Show the WhatsApp copy modal AFTER state is marked sent. The
+      // modal auto-copies the message to clipboard; operator just
+      // pastes. Resolves on OK / close.
+      await sendToWhatsApp(raceNumber);
       await promptNextRaceSignal(raceNumber);
       await checkPreviousRaces(raceNumber);
     });
@@ -1457,8 +1511,8 @@ function attachHandlers() {
       showExportModal(raceNumber);
       return;
     }
-    await sendToWhatsApp(raceNumber);
-    raceData = await getRace(raceNumber);
+    // Mark sent BEFORE showing the copy-modal — modal-open means
+    // operator intent to send. Same semantics as _exportAndSend.
     if (raceData.send_time) raceData.prev_send_time = raceData.send_time;
     raceData.send_time = nowISO();
     raceData.status = 'sent';
@@ -1470,6 +1524,7 @@ function attachHandlers() {
     document.getElementById('raceStatus').textContent = 'SENT';
     document.getElementById('raceStatus').className = 'badge badge-sent';
     broadcastChange('race-updated', { race_number: raceNumber });
+    await sendToWhatsApp(raceNumber);
     await promptNextRaceSignal(raceNumber);
     await checkPreviousRaces(raceNumber);
   };
@@ -1552,7 +1607,21 @@ function attachHandlers() {
     if (parsed.raceNumber !== raceNumber) {
       if (!confirm(`This Joyi file is for Race ${parsed.raceNumber}, but you're on Race ${raceNumber}. Import anyway?`)) return;
     }
-    await importJoyiToDb({ ...parsed, raceNumber });
+    // Confirm before clobbering manually-entered times. We probe with
+    // skipIfHasUserData first — if it returns skipped=true the race has
+    // user data and a re-import would overwrite it. The auto-watcher
+    // gets the same protection in joyi-watch.js (no prompt, just skip
+    // + toast). Here, since this IS the operator's explicit action,
+    // we ask whether to proceed.
+    const probe = await importJoyiToDb({ ...parsed, raceNumber }, { skipIfHasUserData: true });
+    if (probe.skipped) {
+      const ok = confirm(
+        `Race ${raceNumber} has manually-entered times. ` +
+        `Overwrite with Joyi results from this file?`);
+      if (!ok) return;
+      // Re-run without the skip flag so the import actually lands.
+      await importJoyiToDb({ ...parsed, raceNumber });
+    }
     const freshLanes = await getLaneResults(raceNumber);
     const newGridData = buildGridData(freshLanes, configData?.lane_count || 6);
     for (let i = 0; i < newGridData.length; i++) {

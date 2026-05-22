@@ -8,6 +8,7 @@
 import { db } from './db.js';
 import { showToast } from './utils.js';
 import { writeToSourceSubfolder, downloadFallback, isSourceConnected } from './file-access.js';
+import { isDriveApiConnected, writeDriveFile } from './drive-api.js';
 
 const TABLE_NAMES = [
   'config', 'races', 'lane_results', 'timesheet',
@@ -30,8 +31,24 @@ export async function autoBackup(trigger = 'manual', opts = {}) {
   for (const table of TABLE_NAMES) {
     backup[table] = await db[table].toArray();
   }
+  // Local timestamp in `YYYY-MM-DD-HH-MM-SS` form. We do this manually
+  // rather than via toISOString() because that returns UTC, which on a
+  // race day in HK reads back 8 hours behind wall-clock — confusing
+  // when comparing backup filenames against the actual event timeline.
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const localTs =
+    `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}` +
+    `-${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
+  // ISO-ish local string for the meta field (kept human-readable; not
+  // a true ISO 8601 UTC stamp anymore). Restore code only displays this
+  // back to the operator, so format choice is fine.
+  const localIso =
+    `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}` +
+    `T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
   backup._meta = {
-    exported_at: new Date().toISOString(),
+    exported_at: localIso,
     trigger,
     version: 1,
     app: 'sdba-rdms',
@@ -39,31 +56,53 @@ export async function autoBackup(trigger = 'manual', opts = {}) {
 
   const config = backup.config?.[0];
   const eventRef = config?.event_short_ref || 'RDMS';
-  const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-');
-  const filename = `rdms_backup_${eventRef}_${trigger}_${timestamp}.json`;
+  const filename = `rdms_backup_${eventRef}_${trigger}_${localTs}.json`;
   const jsonStr = JSON.stringify(backup);
 
-  // Skip the disk write when no folder is connected — popping a picker
-  // here interrupts whatever the operator was doing. The browser-download
-  // fallback IS still ok for explicit manual backups; we only suppress it
-  // for automatic triggers (setup-complete, R*_export).
-  const isManual  = trigger === 'manual';
-  const connected = isSourceConnected();
-  if (!connected && !isManual) {
+  // Write target priority:
+  //   1. Local FS handle if connected → 20 Database Backup/ via FS Access.
+  //   2. Drive API if connected → 20 Database Backup/ via Drive REST.
+  //   3. Manual trigger: browser download fallback.
+  //   4. Automatic trigger with nothing connected: skip silently (avoid
+  //      popping a folder picker mid-import).
+  const isManual      = trigger === 'manual';
+  const localConn     = isSourceConnected();
+  const driveConn     = isDriveApiConnected();
+  const anyConnected  = localConn || driveConn;
+
+  if (!anyConnected && !isManual) {
     if (!opts.silent) {
       showToast(
-        `Auto-backup skipped (no event folder connected). Use DB Admin → Backup to download a copy.`,
+        `Auto-backup skipped (no folder connected). Use DB Admin → Backup to download a copy.`,
         'info', 3500);
     }
     return null;
   }
 
-  const written = connected
-    ? await writeToSourceSubfolder('20 Database Backup', filename, jsonStr)
-    : false;
+  let written = false;
+  let backend = null;
+  if (localConn) {
+    written = await writeToSourceSubfolder('20 Database Backup', filename, jsonStr);
+    if (written) backend = 'local';
+  }
+  if (!written && driveConn) {
+    // Drive API write — operator opted into Drive backend explicitly
+    // via Setup → Google Drive API. Backups land in the same
+    // "20 Database Backup" subfolder of the event's Drive folder
+    // (the folder ID configured in drive_source_folder_id).
+    try {
+      written = await writeDriveFile('20 Database Backup', filename, jsonStr, 'application/json');
+      if (written) backend = 'drive';
+    } catch (err) {
+      console.warn('Drive backup write failed:', err);
+    }
+  }
 
   if (written) {
-    if (!opts.silent) showToast(`Backup saved: ${filename}`, 'info', 2000);
+    if (!opts.silent) {
+      const where = backend === 'drive' ? 'Drive' : 'event folder';
+      showToast(`Backup saved to ${where}: ${filename}`, 'info', 2000);
+    }
   } else if (isManual) {
     // Only fall through to browser-download for explicit manual triggers.
     downloadFallback(filename, jsonStr);

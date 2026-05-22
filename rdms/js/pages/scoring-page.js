@@ -48,7 +48,7 @@ export async function mountScoringPage(container) {
   let tabsHtml = '<div class="tabs">';
   divIds.forEach((divId, idx) => {
     const div = divisions.find(d => d.id === parseInt(divId));
-    const name = div?.div_short_ref || div?.division_name || `Division ${divId}`;
+    const name = div?.division_name || `Division ${divId}`;
     const colour = div?.colour_hex || '#9ca3af';
     tabsHtml += `<button class="tab ${idx === 0 ? 'active' : ''}" data-tab="scoring-${divId}"
                           onclick="window._scoringTab('${divId}')"

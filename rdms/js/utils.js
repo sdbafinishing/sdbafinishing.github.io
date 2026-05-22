@@ -172,9 +172,13 @@ export function sanitiseTitle(raw) {
     title = title.substring(dashIdx + 3).trim();
   }
 
-  // Strip suffix "- 場次 Race N" or "- Race N"
-  const suffixMatch = title.match(/\s*-\s*場次\s*Race\s*\d+\s*$/i)
-    || title.match(/\s*-\s*Race\s*\d+\s*$/i);
+  // Strip suffix starting from "- 場次 Race" (or "- Race") all the way to
+  // the end of the title. Anything after the Race token is treated as
+  // operator-suffix noise — race numbers can be plain (e.g. "Race 52"),
+  // qualified (e.g. "Race 53 (S)"), or anything else the draw author
+  // added; none of it belongs in the displayed race title.
+  const suffixMatch = title.match(/\s*-\s*場次\s*Race\b.*$/i)
+    || title.match(/\s*-\s*Race\b.*$/i);
   if (suffixMatch) {
     title = title.substring(0, suffixMatch.index).trim();
   }

@@ -112,11 +112,37 @@
     };
   </script>
 
-  <!-- Service Worker Registration -->
+  <!-- Service Worker Registration
+       Skipped on localhost because Vite's dev server doesn't play nicely
+       with a cache-first SW — a 404 during HMR / port-bump can poison the
+       cache and the next load returns unstyled HTML (the classic "raw
+       HTML, Cmd+Shift+R fixes it" symptom). Production hosting (GitHub
+       Pages) still gets the offline PWA behavior. -->
   <script>
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('./sw.js').catch(() => {});
-    }
+    (function () {
+      var host = window.location.hostname;
+      var isLocal = host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0';
+      if (isLocal) {
+        // Aggressively tear down anything a previous prod-deploy build
+        // (or an earlier dev session that DID register the SW) might
+        // have left behind. This guarantees a clean dev session after
+        // updating to a build that skips registration.
+        if ('serviceWorker' in navigator) {
+          navigator.serviceWorker.getRegistrations().then(function (regs) {
+            regs.forEach(function (r) { r.unregister(); });
+          }).catch(function () {});
+        }
+        if (window.caches && caches.keys) {
+          caches.keys().then(function (keys) {
+            keys.forEach(function (k) { caches.delete(k); });
+          }).catch(function () {});
+        }
+        return;
+      }
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('./sw.js').catch(function () {});
+      }
+    })();
   </script>
 
   <!-- App Entry -->

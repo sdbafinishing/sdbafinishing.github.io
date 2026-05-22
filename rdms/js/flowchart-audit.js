@@ -63,6 +63,24 @@ export async function runFlowchartAudit() {
   // signal would be noise.
   const ready = divisions.length > 0 && allRounds.length > 0;
 
+  // Short-circuit when no divisions exist yet. The "no divisions" state
+  // is configuration-pending, not data-broken — emitting N findings of
+  // "race X has no division" wrongly tells the operator they have N
+  // problems when really they just haven't started the divisions step.
+  // Surface the count via stats (.divisions === 0) so callers can render
+  // a friendly "add a division to get started" prompt instead.
+  if (divisions.length === 0) {
+    return {
+      ready: false,
+      stats: {
+        races: races.length, divisions: 0, rounds: 0, progressions: 0,
+        uncoveredRaces: races.length,
+      },
+      conflicts: [],
+      missing: [],
+    };
+  }
+
   // ── Conflicts ──
 
   // (1) A race that lives in multiple rounds. The same race can't be in
@@ -144,11 +162,16 @@ export async function runFlowchartAudit() {
   // (5) Same race used as source for two non-related destinations with the
   // SAME position range — likely a copy-paste mistake (operator duplicated
   // a row in the progression editor and forgot to change the source).
-  // We only flag this when both progressions claim rank 1 (the common
-  // copy-paste outcome) to avoid false positives on legitimate splits
-  // like "1-3 → final" + "4-6 → consolation".
+  // We only flag this when MULTIPLE EXPLICIT progressions claim rank 1
+  // (the common copy-paste outcome). "rest" is the complement of the
+  // explicit ranges from the same source, so a "rest" progression never
+  // independently claims any specific rank — skip those entirely to
+  // avoid false positives like "Heat → Cup (1-4)" + "Heat → Plate (rest)"
+  // which is a legitimate split, not a duplicate.
   const fromRoundFirstRankUses = new Map(); // from_round_id → [progression]
   for (const p of allProgs) {
+    const token = String(p.position_range || '').trim().toLowerCase();
+    if (token === 'rest') continue; // complement — handled by range_overlap check, not here
     if (isRangeIncludingRank(p.position_range, 1)) {
       if (!fromRoundFirstRankUses.has(p.from_round_id)) {
         fromRoundFirstRankUses.set(p.from_round_id, []);
@@ -202,7 +225,7 @@ export async function runFlowchartAudit() {
     if (rs.length === 0) {
       missing.push({
         code: 'division.no_rounds',
-        message: `Division "${d.division_name || d.div_short_ref}" has no rounds defined.`,
+        message: `Division "${d.division_name || ('#' + d.id)}" has no rounds defined.`,
         refs: { division_id: d.id },
       });
     }
@@ -232,7 +255,7 @@ export async function runFlowchartAudit() {
       if (nums[i] - nums[i - 1] > 1) {
         missing.push({
           code: 'round.gap',
-          message: `Division "${d.division_name || d.div_short_ref}" has a gap between round ${nums[i - 1]} and round ${nums[i]}.`,
+          message: `Division "${d.division_name || ('#' + d.id)}" has a gap between round ${nums[i - 1]} and round ${nums[i]}.`,
           refs: { division_id: d.id, gap: [nums[i - 1], nums[i]] },
         });
       }
@@ -299,7 +322,7 @@ export async function runFlowchartAudit() {
 function nameOfDivision(divisions, id) {
   const d = divisions.find(x => x.id === id);
   if (!d) return `#${id}`;
-  return d.div_short_ref || d.division_name || `#${id}`;
+  return d.division_name || `#${id}`;
 }
 
 function nameOfRound(roundMap, id) {

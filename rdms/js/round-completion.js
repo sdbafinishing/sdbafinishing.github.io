@@ -76,12 +76,21 @@ export async function summariseDivisions() {
       // Next-round dependents: progressions whose from_round_id === this
       // round. We then expand to actual race numbers via the destination
       // round's race_numbers list.
+      const outgoingProgs = progs.filter(p => p.from_round_id === round.id);
       const nextRaceNumbers = new Set();
-      for (const p of progs.filter(p => p.from_round_id === round.id)) {
+      for (const p of outgoingProgs) {
         const toRound = rounds.find(r => r.id === p.to_round_id);
         if (!toRound) continue;
         for (const rn of (toRound.race_numbers || [])) nextRaceNumbers.add(rn);
       }
+      // Whether this round feeds anywhere at all. Terminal rounds
+      // (Finals) have zero outgoing progressions — used by the UI to
+      // distinguish "nothing to generate, all done" (intermediate
+      // round with every dependent already resolved) from "this is the
+      // last round of its branch, never had downstream draws to
+      // generate". Same nextRaces.length === 0 means very different
+      // things in those two cases.
+      const hasOutgoing = outgoingProgs.length > 0;
       // Of those next-round races, keep only the ones still holding
       // placeholders (resolved races don't need action).
       const nextRaces = [];
@@ -103,13 +112,14 @@ export async function summariseDivisions() {
         total: raceNums.length,
         complete,
         isComplete,
+        hasOutgoing,
         nextRaces,
       });
     }
 
     out.push({
       division_id: div.id,
-      division_name: div.div_short_ref || div.division_name || `Division ${div.id}`,
+      division_name: div.division_name || `Division ${div.id}`,
       colour: div.colour_hex || '#9ca3af',
       rounds: roundsOut,
     });
@@ -206,7 +216,7 @@ function showAutoPrompt(division, round, targets) {
         Round complete — generate next-round draws?
       </h5>
       <p style="font-size:13px; color:var(--text-secondary); margin-bottom:12px;">
-        Every race in <strong>${escapeHtml(division.div_short_ref || division.division_name || '')} ·
+        Every race in <strong>${escapeHtml(division.division_name || '')} ·
         ${escapeHtml(round.tier_name || ('Round ' + round.round_number))}</strong> has been exported.
         ${targets.length} next-round race${targets.length === 1 ? '' : 's'} still hold R{n}P{n}
         placeholders waiting on these results.

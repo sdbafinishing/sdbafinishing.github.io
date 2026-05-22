@@ -122,13 +122,17 @@ export async function logout() {
 }
 
 /**
- * Resolve user's role + default landing mode from rdms_users table.
+ * Resolve user's role + default landing station from rdms_users table.
  *
- * default_mode is whichever RDMS route the user prefers to start on:
- *   'dashboard' | 'race' | 'finish' | 'starter' | 'race-control'
- *   | 'timesheet' | 'scoring' | …
- * Falls back to 'finish' for admins (race-day default) and 'dashboard' for
- * everyone else when no value is configured.
+ * default_mode names the physical race-day station the user runs:
+ *   'race-control' | 'starter' | 'finish'
+ * The router redirects to the matching standalone Firebase station page.
+ * Anything else (or blank) lands on the Dashboard; admins default to
+ * 'finish' on race day, others to 'dashboard'.
+ *
+ * Legacy values that pre-dated this constraint (e.g. 'race', 'scoring',
+ * 'timesheet') are still accepted on read for back-compat — the router
+ * just falls back to dashboard if they aren't routable to a station URL.
  */
 async function resolveUser(authUser) {
   currentUser = authUser;

@@ -187,9 +187,13 @@ export async function notifyResultEntryStarted(raceNumber) {
 
   // (1) Firebase digital flag → red.
   tasks.push((async () => {
+    // Quietly flip the flag — no toast on success. The mini-flag widget
+    // in the race header is the visible signal; an info toast here just
+    // adds noise during result entry. We still surface a warning if the
+    // write fails, since silent loss of a critical signal is worse than
+    // a brief toast.
     const ok = await setFinishingFlag(false);
-    if (ok) showToast(`Digital flag set to RED (scoring race ${raceNumber})`, 'info', 2500);
-    else showToast('Digital flag write failed (offline?)', 'warning', 3000);
+    if (!ok) showToast('Digital flag write failed (offline?)', 'warning', 3000);
   })());
 
   // (2) Lambda nextraceedit — advance public mobile app to race N+1.

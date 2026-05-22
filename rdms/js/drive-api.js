@@ -17,6 +17,15 @@ import { showToast } from './utils.js';
 
 let accessToken = null;
 let driveInitialized = false;
+// Cached token client — created once, reused for silent refresh. The
+// GIS library is happy to call requestAccessToken({prompt: ''}) on the
+// same client to renew without re-prompting the user (works as long as
+// the user has previously granted the scope and the consent is still
+// valid).
+let cachedTokenClient = null;
+// Single-flight guard: avoid kicking off multiple parallel refreshes
+// when several concurrent requests all 401 at once.
+let refreshInflight = null;
 
 // Google API config — set from event config
 let googleClientId = null;
@@ -59,7 +68,34 @@ export async function initDriveApi() {
 }
 
 /**
+ * Get or create the cached GIS token client. We reuse it for both the
+ * initial connect (with user prompt) and silent refreshes (no prompt).
+ */
+function getTokenClient() {
+  if (cachedTokenClient) return cachedTokenClient;
+  if (typeof google === 'undefined' || !google.accounts?.oauth2) return null;
+  cachedTokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: googleClientId,
+    // Use full `drive` scope, not `drive.file`. drive.file only allows
+    // access to files the app itself created OR that the user opened
+    // via Google Picker API — it CANNOT list/read arbitrary folders
+    // by ID. Since RDMS needs to scan the operator's shared Joyi
+    // folder by ID (configured in drive_source_folder_id + relative
+    // subpath), full drive scope is necessary. This is considered a
+    // sensitive scope by Google: for Internal-mode consent screens
+    // (Workspace orgs) it's free; for External-Testing mode it works
+    // for up to 100 listed test users without verification.
+    scope: 'https://www.googleapis.com/auth/drive',
+    callback: () => { /* per-call callback set via .callback = ... before each requestAccessToken() */ },
+  });
+  return cachedTokenClient;
+}
+
+/**
  * Request Drive access via Google Sign-In.
+ * Initial connect: shows the OAuth popup so the user can pick an account
+ * and grant the scope. Subsequent silent refreshes go through
+ * `refreshDriveToken()` below.
  * @returns {boolean} true if access granted
  */
 export async function requestDriveAccess() {
@@ -71,22 +107,62 @@ export async function requestDriveAccess() {
   if (accessToken) return true;
 
   return new Promise((resolve) => {
-    const client = google.accounts.oauth2.initTokenClient({
-      client_id: googleClientId,
-      scope: 'https://www.googleapis.com/auth/drive.file',
-      callback: (tokenResponse) => {
-        if (tokenResponse.access_token) {
-          accessToken = tokenResponse.access_token;
-          sessionStorage.setItem('rdms-drive-token', accessToken);
-          showToast('Google Drive connected', 'success');
-          resolve(true);
-        } else {
-          resolve(false);
-        }
-      },
-    });
+    const client = getTokenClient();
+    if (!client) { resolve(false); return; }
+    client.callback = (tokenResponse) => {
+      if (tokenResponse.access_token) {
+        accessToken = tokenResponse.access_token;
+        sessionStorage.setItem('rdms-drive-token', accessToken);
+        showToast('Google Drive connected', 'success');
+        resolve(true);
+      } else {
+        resolve(false);
+      }
+    };
+    // Empty prompt allows the popup; user picks account on first connect.
     client.requestAccessToken();
   });
+}
+
+/**
+ * Silently refresh the Drive access token without user interaction.
+ * Works as long as the user has previously granted the scope and the
+ * grant hasn't been revoked. Returns true on success.
+ *
+ * Single-flight: parallel callers all get the same in-flight Promise so
+ * we don't pop multiple OAuth windows on a burst of 401s.
+ */
+export async function refreshDriveToken() {
+  if (refreshInflight) return refreshInflight;
+  if (!googleClientId) return false;
+  // GIS script must be loaded — initDriveApi normally handles this.
+  if (typeof google === 'undefined' || !google.accounts?.oauth2) {
+    await loadScript('https://accounts.google.com/gsi/client');
+  }
+  refreshInflight = new Promise((resolve) => {
+    const client = getTokenClient();
+    if (!client) { resolve(false); return; }
+    client.callback = (tokenResponse) => {
+      if (tokenResponse.access_token) {
+        accessToken = tokenResponse.access_token;
+        sessionStorage.setItem('rdms-drive-token', accessToken);
+        resolve(true);
+      } else {
+        // Silent refresh failed — usually because the user revoked the
+        // grant or hasn't connected yet this browser session. The
+        // caller's next user-driven action should re-trigger
+        // requestDriveAccess() (with a popup) instead.
+        accessToken = null;
+        sessionStorage.removeItem('rdms-drive-token');
+        resolve(false);
+      }
+    };
+    // `prompt: ''` = silent reauth. No popup, no consent screen, just
+    // returns a fresh token if the grant is still live.
+    client.requestAccessToken({ prompt: '' });
+  });
+  try { return await refreshInflight; }
+  finally { refreshInflight = null; }
 }
 
 /**
@@ -108,7 +184,7 @@ async function findFolder(folderName, parentId = 'root') {
   const query = `name='${folderName}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
   const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=files(id,name)`;
 
-  const resp = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+  const resp = await fetchWithRefresh(url);
   if (!resp.ok) return null;
 
   const data = await resp.json();
@@ -122,12 +198,9 @@ async function findFolder(folderName, parentId = 'root') {
  * @returns {string} Folder ID
  */
 async function createFolder(folderName, parentId = 'root') {
-  const resp = await fetch('https://www.googleapis.com/drive/v3/files', {
+  const resp = await fetchWithRefresh('https://www.googleapis.com/drive/v3/files', {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       name: folderName,
       mimeType: 'application/vnd.google-apps.folder',
@@ -147,14 +220,25 @@ async function createFolder(folderName, parentId = 'root') {
  */
 async function getOrCreateFolder(subfolderPath) {
   const config = await getConfig();
-  let parentId = config?.drive_source_folder_id;
+  let parentId = sanitizeDriveFolderId(config?.drive_source_folder_id);
 
   if (!parentId) {
-    showToast('Drive source folder ID not configured', 'warning');
+    showToast('Drive source folder ID not configured (or looks like a URL — paste only the ID from Copy Link).', 'warning', 5000);
     return null;
   }
 
-  const parts = subfolderPath.split('/');
+  // Sanitize the path too. If the operator pasted a Drive URL into
+  // shared_joyi_folder by mistake, the split('/') would produce
+  // ['https:', '', 'drive.google.com', …] and we'd uselessly search
+  // for folders named "https:" etc. Surface a clear error instead.
+  const cleanPath = sanitizeDriveSubpath(subfolderPath);
+  if (cleanPath === null) {
+    showToast('Shared folder path looks like a URL. Use a RELATIVE path like "80 Shared/2026TN_Joyi" — not a Drive link.', 'warning', 6000);
+    return null;
+  }
+  if (!cleanPath) return parentId; // empty path = the root itself
+
+  const parts = cleanPath.split('/').filter(Boolean);
   for (const part of parts) {
     let folderId = await findFolder(part, parentId);
     if (!folderId) {
@@ -164,6 +248,67 @@ async function getOrCreateFolder(subfolderPath) {
   }
 
   return parentId;
+}
+
+/**
+ * Strip noise from a configured Drive folder ID:
+ *   - "1AbCd...?usp=drive_link"  → "1AbCd..."   (query stripped)
+ *   - "https://drive.google.com/drive/folders/1AbCd...?usp=…" → "1AbCd..."
+ *   - "  1AbCd...  "             → "1AbCd..."   (trimmed)
+ * Returns null if no plausible ID was found.
+ */
+function sanitizeDriveFolderId(raw) {
+  if (!raw) return null;
+  let s = String(raw).trim();
+  if (!s) return null;
+  // Pull ID out of a folders/ URL if pasted by mistake.
+  const m = s.match(/folders\/([A-Za-z0-9_-]+)/);
+  if (m) s = m[1];
+  // Strip query string if present.
+  s = s.split('?')[0].split('#')[0];
+  // Plausibility: Drive IDs are 25+ chars of [A-Za-z0-9_-].
+  if (!/^[A-Za-z0-9_-]{10,}$/.test(s)) return null;
+  return s;
+}
+
+/**
+ * Cull a configured shared-folder subpath. Returns:
+ *   - "" if the input is blank.
+ *   - a cleaned relative path (no leading/trailing slashes) for valid input.
+ *   - null if the input looks like a URL (operator paste mistake), so
+ *     the caller can surface a helpful error.
+ */
+function sanitizeDriveSubpath(raw) {
+  if (!raw) return '';
+  const s = String(raw).trim();
+  if (!s) return '';
+  if (/^https?:\/\//i.test(s)) return null;
+  // Strip leading/trailing slashes but preserve internal ones.
+  return s.replace(/^\/+|\/+$/g, '');
+}
+
+/**
+ * Wrap a fetch call so that a 401 (token expired) triggers a silent
+ * refresh and one retry. After the retry, errors propagate normally.
+ * All Drive REST calls below go through this so the operator doesn't
+ * have to re-authenticate after the ~1-hour token lifetime.
+ */
+async function fetchWithRefresh(input, init = {}) {
+  const buildInit = () => ({
+    ...init,
+    headers: {
+      ...(init.headers || {}),
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+  let resp = await fetch(input, buildInit());
+  if (resp.status === 401 || resp.status === 403) {
+    const ok = await refreshDriveToken();
+    if (ok) {
+      resp = await fetch(input, buildInit());
+    }
+  }
+  return resp;
 }
 
 /**
@@ -182,7 +327,7 @@ export async function listDriveFiles(subfolderPath) {
   // last-scanline byte offset without downloading the full image.
   const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=files(id,name,mimeType,modifiedTime,size)&orderBy=name`;
 
-  const resp = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+  const resp = await fetchWithRefresh(url);
   if (!resp.ok) return [];
 
   const data = await resp.json();
@@ -196,7 +341,7 @@ export async function listDriveFiles(subfolderPath) {
  */
 export async function readDriveFile(fileId) {
   const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
-  const resp = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+  const resp = await fetchWithRefresh(url);
   if (!resp.ok) throw new Error(`Failed to read file: ${resp.statusText}`);
   return resp.arrayBuffer();
 }
@@ -214,11 +359,8 @@ export async function readDriveFile(fileId) {
  */
 export async function readDriveFileRange(fileId, start, end) {
   const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
-  const resp = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      Range: `bytes=${start}-${end}`,
-    },
+  const resp = await fetchWithRefresh(url, {
+    headers: { Range: `bytes=${start}-${end}` },
   });
   // 206 Partial Content is the success case; 200 indicates the server
   // ignored Range and sent the whole thing — still usable.
@@ -251,9 +393,9 @@ export async function writeDriveFile(subfolderPath, filename, content, mimeType 
   if (existing) {
     // Update existing file
     const url = `https://www.googleapis.com/upload/drive/v3/files/${existing.id}?uploadType=media`;
-    const resp = await fetch(url, {
+    const resp = await fetchWithRefresh(url, {
       method: 'PATCH',
-      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': mimeType },
+      headers: { 'Content-Type': mimeType },
       body: blob,
     });
     return resp.ok;
@@ -264,9 +406,8 @@ export async function writeDriveFile(subfolderPath, filename, content, mimeType 
     form.append('metadata', new Blob([metadata], { type: 'application/json' }));
     form.append('file', blob);
 
-    const resp = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+    const resp = await fetchWithRefresh('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${accessToken}` },
       body: form,
     });
     return resp.ok;

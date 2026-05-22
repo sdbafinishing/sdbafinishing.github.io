@@ -117,7 +117,17 @@ export async function importDrawToDb(parsed) {
   };
 
   race.race_title = parsed.sanitisedTitle;
+  // Preserve the original A1 text from the imported draw, so the export
+  // can stamp the title back exactly as it appeared in the source —
+  // suffixes, spacing and all. `race_title` keeps the sanitised form
+  // for clean display in the UI; `race_title_raw` is the export-faithful
+  // copy.
+  race.race_title_raw = parsed.rawTitle || parsed.sanitisedTitle || '';
   race.race_time = parsed.raceTime;
+  // Persist the progression/footnote text so exports can stamp it back
+  // into the result sheet's footnote cell (A11). Without this the
+  // bundled template's race-1 footnote would leak into every race.
+  race.progression_text = parsed.progressionText || '';
   // A draw is "loaded" once at least one lane has a real team. A real team
   // is any non-empty team_name that ISN'T an R{n}P{n} placeholder. Note:
   // some templates park the placeholder in team_code (column C) with
@@ -487,16 +497,42 @@ export async function parseJoyiFile(file) {
 /**
  * Import Joyi results into IndexedDB for a specific race.
  * Updates lane_results with Joyi data and auto-populates raw_time + lane_input.
- * @param {Object} parsed - Output from parseJoyiFile
- * @returns {Object} { success, raceNumber, count }
+ *
+ * @param {Object} parsed - Output from parseJoyiFile / parseJoyiAnyFile
+ * @param {Object} [opts]
+ * @param {boolean} [opts.skipIfHasUserData] - if true AND the race has
+ *   manually-entered raw_time / remarks (but isn't already a Joyi import),
+ *   return without writing. Used by the auto-watcher so a stray
+ *   late-arriving file doesn't clobber operator-entered times.
+ * @returns {Object} { success, skipped, hasUserData, raceNumber, count }
  */
-export async function importJoyiToDb(parsed) {
+export async function importJoyiToDb(parsed, opts = {}) {
   const config = await getConfig();
   const laneCount = config?.lane_count || 6;
   const race = await getRace(parsed.raceNumber);
 
   if (!race) {
     throw new Error(`Race ${parsed.raceNumber} not found. Import draws first.`);
+  }
+
+  // Detect user-entered data on this race. If the race was already
+  // imported from Joyi previously (race.joyi_imported === true) then any
+  // raw_time present is itself from Joyi — safe to overwrite with a
+  // newer Joyi run. Only flag when user typed times BEFORE any Joyi
+  // import happened.
+  const existingLanes = await getLaneResults(parsed.raceNumber);
+  const hasUserData = !race.joyi_imported && existingLanes.some(lr =>
+    (lr.raw_time && String(lr.raw_time).trim() !== '') ||
+    (lr.remarks && String(lr.remarks).trim() !== ''));
+
+  if (hasUserData && opts.skipIfHasUserData) {
+    return {
+      success: false,
+      skipped: true,
+      hasUserData: true,
+      raceNumber: parsed.raceNumber,
+      count: 0,
+    };
   }
 
   // Build lane_results updates
@@ -537,5 +573,11 @@ export async function importJoyiToDb(parsed) {
 
   await addImportLog({ filename: parsed.filename, type: 'joyi', race_number: parsed.raceNumber });
 
-  return { success: true, raceNumber: parsed.raceNumber, count: parsed.results.length };
+  return {
+    success: true,
+    skipped: false,
+    hasUserData,
+    raceNumber: parsed.raceNumber,
+    count: parsed.results.length,
+  };
 }

@@ -26,11 +26,21 @@
  * source race somehow has two lanes with the same computed_position, the
  * first one encountered wins and a warning surfaces in the return value.
  */
-import * as XLSX from 'xlsx';
 import {
   getConfig, getRace, getLaneResults, bulkSaveLaneResults, saveRace,
 } from './db.js';
 import { writeToBoth, downloadFallback } from './file-access.js';
+import { patchXlsxCells } from './xlsx-patcher.js';
+import raceTemplateUrl from '../templates/race-template.xlsx?url';
+
+let _drawTemplateBytes = null;
+async function loadDrawTemplate() {
+  if (_drawTemplateBytes) return _drawTemplateBytes;
+  const res = await fetch(raceTemplateUrl);
+  if (!res.ok) throw new Error(`Failed to load draw template: ${res.status}`);
+  _drawTemplateBytes = await res.arrayBuffer();
+  return _drawTemplateBytes;
+}
 
 // Placeholder pattern. Examples: R16P3, R5P1, R20P7. Stripped to capture
 // race-number and position. Anchored — partial matches don't count
@@ -217,42 +227,36 @@ export async function generateNextRoundDraws(raceNumbers) {
 async function writeDrawFile(race, laneRows) {
   const config = await getConfig();
   const ref = config?.event_short_ref || 'RDMS';
-  const laneCount = config?.lane_count || 6;
+  const raceNumber = race.race_number;
+  const filename = `${raceNumber}.xls`;
 
-  // Header mirrors the production template enough that parseDrawFile can
-  // re-import this file if the operator ever needs to. We deliberately
-  // omit the progression footnote — the file is downstream-of-record,
-  // not the source of truth.
-  const wsData = [
-    [`Race No. ${race.race_number} --- ${race.race_title || ''}`, '', '', race.race_time || '', '', ''],
-    ['BOAT 船號', 'Team Name 隊伍名稱', 'Code 編號', 'Time 時間', 'Place 名次', 'Score 分數'],
-    ['', '', '', '', '', ''],
+  // Same bundled xlsx template the result export uses. For a next-round
+  // draw we patch: race title (A1), race time (D1), team names (B4-B10),
+  // team codes (C4-C10), footnote (A11). Time/Place/Remarks cells stay
+  // blank — this is a draw, not a result sheet.
+  const TEMPLATE_LANE_COUNT = 7;
+  const byLane = new Map(laneRows.map(l => [l.lane_number, l]));
+
+  const mods = [
+    { addr: 'A1', value: race.race_title_raw || race.race_title || `Race ${raceNumber}` },
+    { addr: 'D1', value: race.race_time || '' },
+    { addr: 'A11', value: (race.progression_text || '').trim() },
   ];
-  // Lane rows. We sort by lane_number to defend against IndexedDB returning
-  // out-of-order rows after edits.
-  const sortedLanes = [...laneRows].sort((a, b) => a.lane_number - b.lane_number);
-  // Pad up to lane_count so even empty lanes show their boat number
-  // (matches what the operator sees in the production templates).
-  const byLane = new Map(sortedLanes.map(l => [l.lane_number, l]));
-  for (let i = 1; i <= laneCount; i++) {
-    const l = byLane.get(i);
-    wsData.push([
-      i,
-      l?.team_name || '',
-      l?.team_code || '',
-      '', '', '',
-    ]);
+  for (let lane = 1; lane <= TEMPLATE_LANE_COUNT; lane++) {
+    const rowNum = 3 + lane;
+    const lr = byLane.get(lane);
+    mods.push({ addr: `B${rowNum}`, value: lr?.team_name || '' });
+    mods.push({ addr: `C${rowNum}`, value: lr?.team_code || '' });
+    // Clear result columns so the bundled template's race-1 data
+    // can't leak through.
+    mods.push({ addr: `D${rowNum}`, value: '' });
+    mods.push({ addr: `E${rowNum}`, value: '' });
+    mods.push({ addr: `I${rowNum}`, value: '' });
   }
 
-  const ws = XLSX.utils.aoa_to_sheet(wsData);
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Draw');
-
-  // Match the production naming convention: just "{race_number}.xls". The
-  // existing extractRaceNumber() parses both "5.xls" and "Second Round -
-  // 27.xls" — we use the cleaner short form for generated files.
-  const filename = `${race.race_number}.xls`;
-  const blob = new Blob([XLSX.write(wb, { bookType: 'xls', type: 'array' })]);
+  const templateBytes = await loadDrawTemplate();
+  const patched = patchXlsxCells(templateBytes, mods);
+  const blob = new Blob([patched]);
 
   // writeToBoth puts a local copy in 13 Output_Next Round Draws/ and a
   // mirror in 80 Shared/{ref}_Next_Round_Draws/. Either can be missing

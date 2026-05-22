@@ -53,7 +53,7 @@ export async function renderScheduleTab(container) {
                           ${divisions.map(d =>
                             `<option value="${d.id}" ${r.division_id === d.id ? 'selected' : ''}
                                      style="color:${d.colour_hex || '#333'};">
-                              ${d.div_short_ref || d.division_name}
+                              ${d.division_name}
                             </option>`
                           ).join('')}
                         </select></td>

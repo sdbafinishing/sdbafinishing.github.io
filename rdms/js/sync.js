@@ -242,7 +242,10 @@ async function doSync(sb) {
     // Get all pending items (synced_at is null)
     const allPending = (await db.sync_queue.toArray()).filter(item => !item.synced_at);
 
-    if (allPending.length === 0) { isSyncing = false; return; }
+    // Dead-code-cleanup: `isSyncing` was an earlier boolean lock that
+    // got replaced by syncPromise above; this assignment used to clear
+    // the legacy flag. Nothing references it now, so we just early-out.
+    if (allPending.length === 0) return;
 
     // Dedup: keep latest per table+key
     const deduped = {};

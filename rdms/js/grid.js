@@ -22,6 +22,11 @@ export class ExcelGrid {
    * @param {number} config.rowCount - Number of rows (= lane_count)
    * @param {GridColumn[]} config.columns - Column definitions
    * @param {function} config.onChange - Called with (rowIndex, colKey, newValue, rowData)
+   *   on every keystroke. Use for live recomputation (display_time, ranks).
+   * @param {function} config.onBlur - Called with (rowIndex, colKey, newValue, rowData)
+   *   when the user leaves the cell (or commits via Enter on an input). Use
+   *   for strict validation that shouldn't fire mid-typing (e.g. partial
+   *   "1" doesn't match the full mss00 format until 5 chars are typed).
    * @param {Object[]} [config.data] - Initial row data
    */
   constructor(container, config) {
@@ -29,6 +34,11 @@ export class ExcelGrid {
     this.rowCount = config.rowCount;
     this.columns = config.columns;
     this.onChange = config.onChange || (() => {});
+    this.onBlur   = config.onBlur   || (() => {});
+    // Public: which row currently has keyboard focus, or null if no
+    // input cell is focused. Callers can read this to know whether to
+    // skip "in-progress" validation flags for the actively-edited row.
+    this.focusedRow = null;
     this.data = config.data || Array.from({ length: this.rowCount }, () => ({}));
     this.cells = []; // 2D array: cells[row][colIdx] = DOM element
     this.focusRow = 0;
@@ -112,12 +122,30 @@ export class ExcelGrid {
             cellEl.select();
             this.focusRow = r;
             this.focusCol = c;
+            this.focusedRow = r;
           });
 
-          // Change handler (on blur or immediate for rapid input)
+          // Change handler (live on every keystroke)
           cellEl.addEventListener('input', () => {
             this.data[r][col.key] = cellEl.value;
             this.onChange(r, col.key, cellEl.value, this.data[r]);
+          });
+
+          // Commit handler (fires on blur after the value changed, or on
+          // Enter). Used by the host page to run strict validation that
+          // shouldn't fire mid-typing.
+          cellEl.addEventListener('change', () => {
+            this.data[r][col.key] = cellEl.value;
+            this.onBlur(r, col.key, cellEl.value, this.data[r]);
+          });
+
+          // Always clear focusedRow on blur so recalculate() can apply
+          // strict validation to every row when no cell is being typed
+          // into. We do this in addition to the `change` listener
+          // because `change` only fires when the value changed —
+          // `blur` fires unconditionally.
+          cellEl.addEventListener('blur', () => {
+            if (this.focusedRow === r) this.focusedRow = null;
           });
 
         } else if (col.editable && col.type === 'select') {

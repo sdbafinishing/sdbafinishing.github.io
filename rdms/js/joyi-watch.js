@@ -80,12 +80,20 @@ export function getJoyiWatchStatus() {
  */
 export async function startJoyiWatch(statusCallback, intervalMs = DEFAULT_INTERVAL_MS) {
   if (intervalId) return; // already running
-  if (isDriveApiConnected()) {
+  // Backend selection. Drive API path is feature-flagged via
+  // `config.drive_polling_enabled` — currently defaulting to OFF
+  // because the OAuth scope + folder access path needs more shaking
+  // out. Operators stay on local FS polling unless they explicitly
+  // opt in (Setup → Event → Google Drive API → "Enable Drive
+  // polling" checkbox).
+  const cfg = await getConfig();
+  const drivePollingEnabled = !!cfg?.drive_polling_enabled;
+  if (drivePollingEnabled && isDriveApiConnected()) {
     backend = 'drive';
   } else if (isSourceConnected()) {
     backend = 'local';
   } else {
-    showToast('Connect Drive or source folder first (top-right icons).', 'warning');
+    showToast('Connect the source folder first (top-right folder icon).', 'warning');
     return;
   }
   onTick = statusCallback || null;
@@ -129,6 +137,15 @@ async function scanOnce() {
       bootstrapDone = true;
       lastScanAt = new Date().toISOString();
       lastError = null;
+      // Diagnostic: if the bootstrap saw zero candidates, the configured
+      // folder is empty OR mis-pathed. Surface a hint so the operator
+      // doesn't wait for files that will never arrive.
+      if (candidates.length === 0) {
+        showToast(
+          `Joyi watcher: 0 files found in ${backend === 'drive' ? 'Drive folder' : 'local folder'} "${folderPath}". ` +
+          `Check Setup → Shared Joyi Folder uses a RELATIVE path under your event folder (e.g. "80 Shared/2026TN_Joyi"), not an absolute filesystem path.`,
+          'warning', 8000);
+      }
       if (onTick) onTick(getJoyiWatchStatus());
       return;
     }
@@ -144,7 +161,20 @@ async function scanOnce() {
         // parseJoyiAnyFile picks the right parser by extension — supports
         // both .xls(x) and .jyd that may live in the Joyi folder.
         const parsed = await parseJoyiAnyFile(file);
-        await importJoyiToDb(parsed);
+        // Auto-watch never silently overwrites manually-entered times.
+        // skipIfHasUserData returns early with skipped=true when the
+        // operator has typed in any lane and the race isn't already a
+        // Joyi import. The toast tells them to apply manually from the
+        // race page if they want to overwrite.
+        const result = await importJoyiToDb(parsed, { skipIfHasUserData: true });
+        if (result.skipped) {
+          seenMtimes.set(c.key, c.mtime); // don't loop on the same file
+          showToast(
+            `Joyi (${c.name}) → Race ${parsed?.raceNumber ?? '?'} has manual times — skipped. ` +
+            `Use Race page → Import Joyi to overwrite.`,
+            'warning', 6000);
+          continue;
+        }
         seenMtimes.set(c.key, c.mtime);
         importedSinceStart++;
         broadcastChange('race-updated', { race_number: parsed?.raceNumber });

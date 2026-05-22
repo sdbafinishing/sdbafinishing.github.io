@@ -416,7 +416,7 @@ export async function showPhotoFinishModal(race, files) {
   //     the photo-finish export. If both empty, fall back to the existing
   //     short event_long_name_en (RDMS internal name), then to short ref.
   //   - div_main_name_en/tc are optional long division names with similar
-  //     fallback to the short division_name / div_short_ref.
+  //     fallback to the short division_name.
   //   - Lane draw rows skip lanes with no team name, with "---" team name,
   //     or with remarks === "DNS" (operator already marked DNS).
   const { getConfig: _getCfg, getAllDivisions: _getDivs, getLaneResults: _getLanes } = await import('./db.js');
@@ -449,7 +449,7 @@ export async function showPhotoFinishModal(race, files) {
     raceDate: _cfg?.race_date || '',
     divEn: _divInfo?.div_main_name_en || '',
     divTc: _divInfo?.div_main_name_tc || '',
-    divShort: _divInfo?.division_name || _divInfo?.div_short_ref || '',
+    divShort: _divInfo?.division_name || '',
     divColour: _divInfo?.colour_hex || '',
     raceNumber: race?.race_number,
     raceTitle: race?.race_title || '',

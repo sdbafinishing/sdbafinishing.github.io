@@ -102,6 +102,13 @@ async function navigate() {
   // Sticky lock banner — refresh on every navigation so it stays visible
   // even after page swaps. Fire-and-forget; never blocks routing.
   refreshLockBanner().catch(() => {});
+
+  // Navbar folder icon — also resync on every navigation. Connection
+  // state can change from inside the Setup page (its own Connect button)
+  // and the navbar didn't know about that until next render. Calling
+  // updateFolderIcons here guarantees the icon reflects current state
+  // whenever the user lands on a new page.
+  try { updateFolderIcons(); } catch {}
   if (!pages[page]) {
     container.innerHTML = `
       <div class="card" style="text-align:center; padding:40px;">
@@ -227,6 +234,11 @@ function updateFolderIcons() {
     }
   }
 }
+
+// Expose so other modules (notably Setup → Event's inline Connect button)
+// can refresh the navbar icon state without a hard re-render. Avoids a
+// stale "Connect Folder" label after connecting from a non-navbar path.
+window._rdmsUpdateFolderIcons = updateFolderIcons;
 
 // ──── Init ────
 

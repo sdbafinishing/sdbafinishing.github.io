@@ -75,12 +75,16 @@ export function getDrawWatchStatus() {
  */
 export async function startDrawWatch(statusCallback, intervalMs = DEFAULT_INTERVAL_MS) {
   if (intervalId) return;
-  if (isDriveApiConnected()) {
+  // Backend selection mirrors joyi-watch — Drive API path is
+  // feature-flagged via `config.drive_polling_enabled` (default OFF).
+  const cfg = await getConfig();
+  const drivePollingEnabled = !!cfg?.drive_polling_enabled;
+  if (drivePollingEnabled && isDriveApiConnected()) {
     backend = 'drive';
   } else if (isSourceConnected()) {
     backend = 'local';
   } else {
-    showToast('Connect Drive or source folder first (top-right folder icon).', 'warning', 4500);
+    showToast('Connect the source folder first (top-right folder icon).', 'warning', 4500);
     return;
   }
   onTick = statusCallback || null;
@@ -157,7 +161,9 @@ async function scanOnce() {
       broadcastChange('draw-imported');
       try {
         const cfg = await getConfig();
-        if (cfg?.auto_start_list_on_import) {
+        // Default is ON — only skip if explicitly false. Keeps the Joyi
+        // start list in sync with the latest draw without an extra click.
+        if (cfg?.auto_start_list_on_import !== false) {
           await generateJoyiStartList();
         }
       } catch (err) {

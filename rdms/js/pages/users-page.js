@@ -7,18 +7,17 @@ import { showToast } from '../utils.js';
 import { getRole, hasPermission } from '../rbac.js';
 import { isLocal, emailToUsername } from '../auth.js';
 
-// Pages a user can default-land on after login. Kept in sync with the
-// page registry in app.js + signal modes available in signal-panel.js.
-// 'finish' / 'starter' / 'race-control' route to the standalone Firebase
-// signal panels embedded on the dashboard (see signal-panel.js modes).
+// Stations the user lands on after login. Deliberately limited to the
+// three physical race-day stations — the standalone Firebase digital-flag
+// pages on sdbafinishing.github.io. Users who shouldn't default to a
+// station (admins, scoring helpers, viewers) leave this unset and land
+// on Dashboard. We don't expose RDMS internal routes (race / scoring /
+// timesheet / …) as default landings — those aren't roles, they're
+// pages anyone can navigate to.
 const DEFAULT_MODES = [
-  { value: 'dashboard',    label: 'Dashboard (general)' },
-  { value: 'race',         label: 'Race (input/scoring)' },
-  { value: 'finish',       label: 'Finish station' },
-  { value: 'starter',      label: 'Starter station' },
   { value: 'race-control', label: 'Race Control station' },
-  { value: 'timesheet',    label: 'TimeSheet' },
-  { value: 'scoring',      label: 'Scoring' },
+  { value: 'starter',      label: 'Starter station' },
+  { value: 'finish',       label: 'Finish station' },
 ];
 
 // Mirror of USERNAME_SUFFIX from auth.js — kept duplicated here only because
@@ -131,7 +130,7 @@ async function renderUserList(container) {
             <th>Username</th>
             <th>Display Name</th>
             <th>Role</th>
-            <th>Default Mode</th>
+            <th>Default Station</th>
             <th>Created</th>
             <th>Actions</th>
           </tr>
@@ -231,14 +230,16 @@ function showUserModal(existingUser, listContainer) {
       </div>
 
       <div class="form-group">
-        <label class="form-label">Default Mode (landing page)</label>
+        <label class="form-label">Default Station <span style="color:var(--text-tertiary); font-weight:400;">— optional</span></label>
         <select class="form-select" id="userDefaultMode">
-          <option value="">— Auto (admin→finish, others→dashboard)</option>
+          <option value="">— None (lands on Dashboard)</option>
           ${modeOptions}
         </select>
         <small style="color:var(--text-tertiary); font-size:11px;">
-          Which RDMS page this user lands on after login. Editors/viewers will be
-          bounced back to dashboard if the chosen page isn't permitted for their role.
+          Pick the physical race-day station this user runs. On login they're
+          redirected to that station's digital-flag page (<code>/race-control</code>,
+          <code>/starter</code>, or <code>/finish</code>). Leave blank for users
+          who don't man a station — they land on the Dashboard.
         </small>
       </div>
 
