@@ -385,6 +385,16 @@ export async function setJoyiStartTimeOnRace(raceNumber, isoTime) {
     race.status = 'started';
     changed = true;
   }
+  // Mirror the Joyi-derived start into start_time when the operator
+  // hasn't clicked START. Most code reads start_time / joyi_start_time
+  // interchangeably, but a few legacy/external paths only check
+  // start_time — copying lets them work without manual intervention.
+  // We only fill the gap; if the operator HAS clicked START, their
+  // ms-precision value wins and is preserved.
+  if (!race.start_time) {
+    race.start_time = isoTime;
+    changed = true;
+  }
   if (changed) await saveRace(race);
   return changed;
 }
