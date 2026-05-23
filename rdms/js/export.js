@@ -221,12 +221,15 @@ export async function exportResults(raceNumber, options = {}) {
     const timeStr = isMarker ? '' : timeToDotFormat(lr.raw_time, timeMode);
     mods.push({ addr: `D${rowNum}`, value: timeStr });
 
+    // The template's E-column cells use numFmtId="49" (text format @).
+    // Writing a numeric value into a text-formatted cell renders blank
+    // in some downstream tools (the VBA reader was showing nothing).
+    // Write Place as a string so the cell's intended formatting holds.
     const placeVal = isMarker ? '' : (lr.computed_position ?? '');
-    if (placeVal === '' || placeVal == null) {
-      mods.push({ addr: `E${rowNum}`, value: '' });
-    } else {
-      mods.push({ addr: `E${rowNum}`, value: Number(placeVal), type: 'n' });
-    }
+    mods.push({
+      addr: `E${rowNum}`,
+      value: (placeVal === '' || placeVal == null) ? '' : String(placeVal),
+    });
 
     const remarkOut = isMarker ? rawRemark.toUpperCase() : rawRemark;
     mods.push({ addr: `I${rowNum}`, value: remarkOut || '' });
