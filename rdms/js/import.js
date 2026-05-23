@@ -3,7 +3,7 @@
  * Parse draw .xls files and Joyi result .xls files via SheetJS.
  */
 import * as XLSX from 'xlsx';
-import { getConfig, getRace, saveRace, bulkSaveLaneResults, bulkSaveRaces, addImportLog } from './db.js';
+import { getConfig, getRace, saveRace, getLaneResults, bulkSaveLaneResults, bulkSaveRaces, addImportLog } from './db.js';
 import { sanitiseTitle, extractRaceNumber, extractJoyiRaceNumber, joyiTimeToRaw, msToTime, showToast } from './utils.js';
 
 /**
