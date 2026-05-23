@@ -3,7 +3,8 @@
  * Export results to .xls (stamp into original draw file).
  * Generate start lists (Joyi + SprintTimer formats).
  */
-import { getConfig, getRace, saveRace, getLaneResults, getAllRaces, saveTimesheet, getTimesheet } from './db.js';
+import { getConfig, getRace, saveRace, getLaneResults, bulkSaveLaneResults, getAllRaces, saveTimesheet, getTimesheet } from './db.js';
+import { computeRankings } from './race.js';
 import { timeToDisplay, nowISO, isoToTime, showToast } from './utils.js';
 import { broadcastChange } from './app.js';
 import { backupAfterExport } from './backup.js';
@@ -68,6 +69,23 @@ export async function exportResults(raceNumber, options = {}) {
   if (!race) throw new Error(`Race ${raceNumber} not found`);
 
   const laneCount = config?.lane_count || 6;
+
+  // Re-run rankings from raw_time across every lane in the DB before
+  // exporting. Two real bugs make a fresh recompute necessary:
+  //   1. persistCurrentRow on the race page only writes the focused row
+  //      back, so when a later entry demotes an earlier row's position,
+  //      the earlier row's DB computed_position goes stale (showed up
+  //      as duplicated places in the export, e.g. two rows ranked 1).
+  //   2. Joyi import writes lane_input + raw_time but doesn't compute
+  //      positions; the grid's recalculate runs in memory but never
+  //      persists back, so the DB has null computed_position for every
+  //      Joyi-imported lane (places came out blank in the export).
+  // computeRankings mutates the array in place, so the same `lanes`
+  // reference flows into the rest of the export.
+  computeRankings(lanes, timeMode, 0);
+  // Write the refreshed positions back so the dashboard / scoring page
+  // / next-round-draw resolution all see consistent values.
+  await bulkSaveLaneResults(lanes);
 
   // Snapshot draws keyed by the actual boat lane. Source of truth for
   // team name/code at export time, no matter which grid row the operator
