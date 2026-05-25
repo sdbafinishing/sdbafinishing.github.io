@@ -165,6 +165,10 @@ export async function getDivisionRounds(divisionId) {
   return db.division_rounds.where('division_id').equals(divisionId).toArray();
 }
 
+export async function getAllDivisionRounds() {
+  return db.division_rounds.toArray();
+}
+
 export async function saveDivisionRound(data) {
   await assertNotLocked();
   return db.division_rounds.put(data);
@@ -174,6 +178,10 @@ export async function saveDivisionRound(data) {
 
 export async function getDivisionProgressions(divisionId) {
   return db.division_progressions.where('division_id').equals(divisionId).toArray();
+}
+
+export async function getAllDivisionProgressions() {
+  return db.division_progressions.toArray();
 }
 
 export async function saveDivisionProgression(data) {

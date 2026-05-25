@@ -10,7 +10,7 @@ import { broadcastChange } from './app.js';
 import { backupAfterExport } from './backup.js';
 import { writeToBoth, downloadFallback } from './file-access.js';
 import { queueRaceSync } from './sync.js';
-import { patchXlsxCells } from './xlsx-patcher.js';
+import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx } from './xlsx-patcher.js';
 import raceTemplateUrl from '../templates/race-template.xlsx?url';
 
 // Single bundled xlsx template used for ALL race exports (results + next
@@ -225,7 +225,12 @@ export async function exportResults(raceNumber, options = {}) {
   // Cols F/G/H (Score / Total Score / Total Place) are cumulative-
   // series fields, not per-race, so they stay blank.
   const MARKER_SET = new Set(['DSQ', 'DQ', 'DNS', 'DNF']);
-  const TEMPLATE_LANE_COUNT = 7; // rows 4..10
+  // The bundled xlsx template carries 7 hard-coded lane rows. We use
+  // resizeLaneRowsXlsx (below, when we actually call the patcher) to
+  // grow or shrink that block to laneCount rows. The footnote /
+  // signature rows shift accordingly, so the footnote address is no
+  // longer a fixed A11 — compute it from laneCount.
+  const FOOTNOTE_ROW = 4 + laneCount; // lanes occupy rows 4..(3+laneCount)
   const mods = [];
 
   // Header: race title (raw, exactly as it appeared in the imported
@@ -251,8 +256,10 @@ export async function exportResults(raceNumber, options = {}) {
   }
   const isRFinal = scoreCtx?.scoringFlag === 'RFinal';
 
-  // Lane rows
-  for (let lane = 1; lane <= TEMPLATE_LANE_COUNT; lane++) {
+  // Lane rows — resize moves the row structure to match laneCount, so
+  // the loop range is the canonical 1..laneCount with no trailing-row
+  // cleanup needed.
+  for (let lane = 1; lane <= laneCount; lane++) {
     const rowNum = 3 + lane; // lane 1 → row 4
     const drawLane = drawsByLane[lane];
     const lr = inputByLane[lane];
@@ -351,10 +358,22 @@ export async function exportResults(raceNumber, options = {}) {
     const revStamp = `Results v${newVersion} (revised ${isoToTime(nowISO())})${options.revisionNote ? ' — ' + options.revisionNote : ''}`;
     footnoteValue = footnoteValue ? `${footnoteValue}\n${revStamp}` : revStamp;
   }
-  mods.push({ addr: 'A11', value: footnoteValue });
+  mods.push({ addr: `A${FOOTNOTE_ROW}`, value: footnoteValue });
 
   // Patch the bundled xlsx template and emit under .xls filename.
-  const templateBytes = await loadRaceTemplate();
+  // Resize the lane block to match the event's configured lane count
+  // BEFORE patching cells. resizeLaneRowsXlsx clones / drops lane rows
+  // and shifts the footnote + signature rows accordingly; the mod list
+  // above already targets the post-resize footnote address.
+  let templateBytes = await loadRaceTemplate();
+  templateBytes = resizeLaneRowsXlsx(templateBytes, laneCount);
+  // Stamp the dynamic page header (printed at the top of every page
+  // when Excel renders the sheet). Long EN on line 1, long TC on line 2.
+  templateBytes = setPageHeaderXlsx(
+    templateBytes,
+    config?.event_long_name_en || '',
+    config?.event_official_name_tc || config?.event_long_name_tc || '',
+  );
   const patched = patchXlsxCells(templateBytes, mods);
   const xlsBlob = new Blob([patched]);
   const { local, shared } = await writeToBoth(

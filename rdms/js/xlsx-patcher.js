@@ -18,6 +18,148 @@ import { unzipSync, zipSync, strToU8, strFromU8 } from 'fflate';
 const SHEET_PATH = 'xl/worksheets/sheet1.xml';
 const SST_PATH = 'xl/sharedStrings.xml';
 
+// Bundled template ships with 7 hard-coded lane rows (rows 4..10).
+// resizeLaneRowsXlsx adapts this to any laneCount by either cloning the
+// last lane row (for laneCount > 7) or dropping tail rows (laneCount < 7),
+// then shifting everything below the lane block (footnote, signature,
+// etc.) by the delta. Merge cell refs that touch the shifted region are
+// updated too. <dimension> is left alone — readers tolerate a stale
+// dimension that's larger than the actual data; smaller would cause
+// rendering issues. Returns a fresh xlsx Uint8Array.
+const TEMPLATE_LANE_COUNT = 7;
+const TEMPLATE_LANE_START_ROW = 4; // rows 4..10 in bundled template
+
+export function resizeLaneRowsXlsx(xlsxBytes, laneCount) {
+  if (!Number.isFinite(laneCount) || laneCount < 1) return xlsxBytes;
+  const delta = laneCount - TEMPLATE_LANE_COUNT;
+  if (delta === 0) return xlsxBytes;
+
+  const input = xlsxBytes instanceof Uint8Array ? xlsxBytes : new Uint8Array(xlsxBytes);
+  const files = unzipSync(input);
+  if (!files[SHEET_PATH]) return xlsxBytes;
+  const dec = new TextDecoder('utf-8');
+  let sheetXml = dec.decode(files[SHEET_PATH]);
+
+  // The last lane row in the bundled template (row 10). We use its
+  // XML as the prototype when CLONING new rows on expansion.
+  const lastLaneRow = TEMPLATE_LANE_START_ROW + TEMPLATE_LANE_COUNT - 1; // 10
+  const lastLaneMatch = sheetXml.match(new RegExp(`<row r="${lastLaneRow}"[^>]*>[\\s\\S]*?<\\/row>`));
+  if (!lastLaneMatch) return xlsxBytes; // unexpected template layout
+
+  const firstPostLaneRow = lastLaneRow + 1; // 11
+  if (delta > 0) {
+    // EXPAND. Shift post-lane rows DOWN first (row 11 → row 11+delta)
+    // so the slot at row 11..10+delta is empty for the new clones —
+    // without this we'd end up with duplicate row numbers when the
+    // cloned lane rows collide with the still-original footnote row.
+    sheetXml = shiftRowsBy(sheetXml, firstPostLaneRow, delta);
+    sheetXml = shiftMergesBy(sheetXml, firstPostLaneRow, delta);
+
+    const protoXml = lastLaneMatch[0];
+    let added = '';
+    for (let i = 1; i <= delta; i++) {
+      const newRowNum = lastLaneRow + i;
+      let cloned = protoXml
+        .replace(`<row r="${lastLaneRow}"`, `<row r="${newRowNum}"`)
+        .replace(new RegExp(`r="([A-Z]+)${lastLaneRow}"`, 'g'), (m, col) => `r="${col}${newRowNum}"`);
+      // Boat number value in col A (row 10's first <c> is <v>7</v>) →
+      // next boat #. Match within the leading A-column cell only.
+      cloned = cloned.replace(
+        /(<c r="A\d+"[^>]*>)<v>\d+<\/v>/,
+        (m, prefix) => `${prefix}<v>${TEMPLATE_LANE_COUNT + i}</v>`,
+      );
+      added += cloned;
+    }
+    sheetXml = sheetXml.replace(protoXml, protoXml + added);
+  } else {
+    // SHRINK. Delete tail lane rows FIRST so the freed row numbers
+    // (e.g. 10 when shrinking by 1) don't conflict with the shifted
+    // footnote that would otherwise also land at 10.
+    const negDelta = -delta;
+    for (let i = 0; i < negDelta; i++) {
+      const rowToDelete = lastLaneRow - i;
+      const re = new RegExp(`<row r="${rowToDelete}"[^>]*>[\\s\\S]*?<\\/row>`);
+      sheetXml = sheetXml.replace(re, '');
+    }
+    sheetXml = shiftRowsBy(sheetXml, firstPostLaneRow, delta);
+    sheetXml = shiftMergesBy(sheetXml, firstPostLaneRow, delta);
+  }
+
+  files[SHEET_PATH] = strToU8(sheetXml);
+  return zipSync(files);
+}
+
+function shiftRowsBy(xml, startRow, delta) {
+  return xml.replace(/<row r="(\d+)"([^>]*)>([\s\S]*?)<\/row>/g, (m, n, attrs, inner) => {
+    const num = parseInt(n, 10);
+    if (num < startRow) return m;
+    const newNum = num + delta;
+    // Each cell inside this row has r="<col><num>" — update only when
+    // the cell row matches the row we're shifting (defensive).
+    const newInner = inner.replace(/r="([A-Z]+)(\d+)"/g, (mm, col, rn) => {
+      return parseInt(rn, 10) === num ? `r="${col}${newNum}"` : mm;
+    });
+    return `<row r="${newNum}"${attrs}>${newInner}</row>`;
+  });
+}
+
+/**
+ * Set the printed page header (the band Excel prints at the top of each
+ * page, controlled by sheet1.xml `<headerFooter>` → `<oddHeader>`).
+ * Two lines:
+ *   line 1: long English event name
+ *   line 2: long Chinese event name
+ *
+ * Existing `<headerFooter>` block is replaced. If none exists, one is
+ * inserted before the sheet's closing tag.
+ *
+ * Escapes user text minimally — `&` < > " are XML-encoded.
+ * The OOXML header DSL uses `&L` / `&C` / `&R` for left/center/right and
+ * `&"font,style"&size` for typography. We center everything by default.
+ *
+ * @returns {Uint8Array} patched xlsx bytes
+ */
+export function setPageHeaderXlsx(xlsxBytes, lineEn, lineTc) {
+  const input = xlsxBytes instanceof Uint8Array ? xlsxBytes : new Uint8Array(xlsxBytes);
+  const files = unzipSync(input);
+  if (!files[SHEET_PATH]) return xlsxBytes;
+  const dec = new TextDecoder('utf-8');
+  let sheetXml = dec.decode(files[SHEET_PATH]);
+
+  const escape = (s) => String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  // Page-header DSL uses literal & escaping (we already XML-escape to &amp;);
+  // the && double-encode is what's emitted by Excel for centred headers.
+  const en = escape(lineEn || '');
+  const tc = escape(lineTc || '');
+  const headerText = `&amp;C&amp;14${en}&#10;${tc}`;
+
+  const headerFooter = `<headerFooter differentFirst="0" differentOddEven="0"><oddHeader>${headerText}</oddHeader></headerFooter>`;
+
+  if (/<headerFooter[\s\S]*?<\/headerFooter>/.test(sheetXml)) {
+    sheetXml = sheetXml.replace(/<headerFooter[\s\S]*?<\/headerFooter>/, headerFooter);
+  } else {
+    // Insert just before </worksheet>. OOXML schema lets headerFooter
+    // sit near the end; placement before the closing tag is safe.
+    sheetXml = sheetXml.replace(/<\/worksheet>\s*$/, `${headerFooter}</worksheet>`);
+  }
+
+  files[SHEET_PATH] = strToU8(sheetXml);
+  return zipSync(files);
+}
+
+function shiftMergesBy(xml, startRow, delta) {
+  return xml.replace(/<mergeCell ref="([A-Z]+)(\d+):([A-Z]+)(\d+)"\s*\/>/g, (m, c1, r1, c2, r2) => {
+    const n1 = parseInt(r1, 10);
+    const n2 = parseInt(r2, 10);
+    const newN1 = n1 >= startRow ? n1 + delta : n1;
+    const newN2 = n2 >= startRow ? n2 + delta : n2;
+    return `<mergeCell ref="${c1}${newN1}:${c2}${newN2}"/>`;
+  });
+}
+
 function decodeXml(s) {
   return s
     .replace(/&lt;/g, '<')

@@ -369,6 +369,162 @@ export function positionToPoints(position, laneCount) {
 }
 
 /**
+ * Variance warnings — surface "this race looks off" and "this team's
+ * time looks off vs their own previous round" so the operator can
+ * sanity-check before exporting.
+ *
+ * Soft block only — these become entries in `warnings` (yellow) or
+ * `errors` (red); export modal will require explicit confirmation if
+ * thresholds are hit.
+ *
+ * Thresholds:
+ *   - 5 s (5000 ms) → yellow warning
+ *   - 7 s (7000 ms) → red error (still NOT a hard block per user spec)
+ *
+ * Two checks:
+ *   A. Race vs cohort — 1st-boat time of THIS race vs mean 1st-boat of
+ *      "races sharing the same preceding round". Heats compare against
+ *      other heats in the same division. Finals derived from Cup Semi
+ *      compare against other Cup-derived finals (NOT Bowl-derived) —
+ *      the boundary is the division_progressions DAG.
+ *   B. Team vs own previous round — for each team in the current race,
+ *      look up their result in the immediately-preceding round of this
+ *      division. If delta > threshold, warn that team specifically.
+ *
+ * @param {Object} ctx
+ *   - race: focal race
+ *   - lanes: this race's current lane_results (from grid or DB)
+ *   - allRaces: all races in DB
+ *   - allLaneResultsByRace: Map<race_number, lane_results[]>
+ *   - divRounds: all division_rounds rows
+ *   - divProgs: all division_progressions rows
+ *   - laneCount, timeMode
+ * @returns {{ warnings: string[], errors: string[] }} keyed by severity
+ */
+export function computeVarianceWarnings(ctx) {
+  const {
+    race, lanes, allRaces, allLaneResultsByRace,
+    divRounds, divProgs, laneCount, timeMode,
+  } = ctx;
+  const out = { warnings: [], errors: [] };
+  if (!race?.division_id) return out;
+
+  const SOFT_MS = 5000;
+  const HARD_MS = 7000;
+
+  // Helper: race → its division_round (the row that lists this race in
+  // race_numbers). Returns null if not found.
+  function roundForRace(raceNumber, divisionId) {
+    return divRounds.find(r =>
+      r.division_id === divisionId &&
+      Array.isArray(r.race_numbers) &&
+      r.race_numbers.includes(raceNumber),
+    ) || null;
+  }
+
+  // Helper: ranked 1st-boat time (ms) for a race. Uses raw_time_ms when
+  // available, else timeToMs of raw_time. Returns null if no winner.
+  function firstBoatMs(raceLanes) {
+    const winner = (raceLanes || []).find(lr => lr.computed_position === 1);
+    if (!winner) return null;
+    if (Number.isFinite(winner.raw_time_ms)) return winner.raw_time_ms;
+    return timeToMs(winner.raw_time, timeMode);
+  }
+
+  const myRound = roundForRace(race.race_number, race.division_id);
+  if (!myRound) return out;
+
+  // ── Check A: race vs cohort 1st-boat time ───────────────────────────
+  // Cohort = other races in the SAME division_round (i.e. the rounds
+  // configured together by the operator — naturally groups Cup-derived
+  // finals separately from Bowl-derived finals as long as the operator
+  // listed them in distinct division_rounds rows).
+  const cohortRaceNums = (myRound.race_numbers || []).filter(rn => rn !== race.race_number);
+  const cohortTimes = [];
+  for (const rn of cohortRaceNums) {
+    const rLanes = allLaneResultsByRace.get(rn);
+    if (!rLanes) continue;
+    const ms = firstBoatMs(rLanes);
+    if (ms && ms > 0) cohortTimes.push(ms);
+  }
+  const myFirstMs = firstBoatMs(lanes);
+  if (myFirstMs && cohortTimes.length >= 1) {
+    const cohortMean = cohortTimes.reduce((a, b) => a + b, 0) / cohortTimes.length;
+    const delta = Math.abs(myFirstMs - cohortMean);
+    if (delta >= HARD_MS) {
+      out.errors.push(
+        `1st-boat time ${(myFirstMs / 1000).toFixed(2)}s is ${(delta / 1000).toFixed(1)}s off the cohort mean (${(cohortMean / 1000).toFixed(2)}s across ${cohortTimes.length} race${cohortTimes.length === 1 ? '' : 's'}). Verify the start time / Joyi import.`,
+      );
+    } else if (delta >= SOFT_MS) {
+      out.warnings.push(
+        `1st-boat time ${(myFirstMs / 1000).toFixed(2)}s is ${(delta / 1000).toFixed(1)}s off the cohort mean (${(cohortMean / 1000).toFixed(2)}s). Worth a sanity-check.`,
+      );
+    }
+  }
+
+  // ── Check B: team vs own previous-round time ────────────────────────
+  // Find rounds that progress INTO mine. For each team in the current
+  // race, look them up in those preceding rounds' lane_results and
+  // compute the delta vs their current effective time.
+  const precedingRoundIds = divProgs
+    .filter(p => p.to_round_id === myRound.id)
+    .map(p => p.from_round_id);
+  if (precedingRoundIds.length > 0 && Array.isArray(race.draw_lanes)) {
+    // Build a team_code → previous-time map by scanning all preceding-
+    // round races' draw_lanes + lane_results.
+    const teamPrevMs = new Map();
+    for (const prevRoundId of precedingRoundIds) {
+      const prevRound = divRounds.find(r => r.id === prevRoundId);
+      if (!prevRound) continue;
+      for (const prevRaceNum of (prevRound.race_numbers || [])) {
+        const prevRace = allRaces.find(r => r.race_number === prevRaceNum);
+        const prevLanes = allLaneResultsByRace.get(prevRaceNum);
+        if (!prevRace || !prevLanes) continue;
+        const prevDraw = Array.isArray(prevRace.draw_lanes) ? prevRace.draw_lanes : [];
+        for (const dl of prevDraw) {
+          if (!dl?.team_code) continue;
+          // Find this team's row by lane_input matching the boat lane.
+          const lr = prevLanes.find(l => parseInt(l.lane_input, 10) === dl.lane_number);
+          if (!lr) continue;
+          const ms = Number.isFinite(lr.raw_time_ms) ? lr.raw_time_ms : timeToMs(lr.raw_time, timeMode);
+          if (ms && ms > 0) {
+            // If a team raced multiple preceding races (unusual), keep
+            // the most recent — favour later race_number.
+            const existing = teamPrevMs.get(dl.team_code);
+            if (!existing || prevRaceNum > existing.race_number) {
+              teamPrevMs.set(dl.team_code, { ms, race_number: prevRaceNum });
+            }
+          }
+        }
+      }
+    }
+    // Compare each current-race team's time against their previous.
+    for (const dl of race.draw_lanes) {
+      if (!dl?.team_code) continue;
+      const prev = teamPrevMs.get(dl.team_code);
+      if (!prev) continue;
+      const curLane = lanes.find(l => parseInt(l.lane_input, 10) === dl.lane_number);
+      if (!curLane) continue;
+      const curMs = Number.isFinite(curLane.raw_time_ms) ? curLane.raw_time_ms : timeToMs(curLane.raw_time, timeMode);
+      if (!curMs || curMs === 0) continue;
+      const delta = Math.abs(curMs - prev.ms);
+      const teamLabel = `${dl.team_name || dl.team_code} (lane ${dl.lane_number})`;
+      if (delta >= HARD_MS) {
+        out.errors.push(
+          `${teamLabel}: ${(curMs / 1000).toFixed(2)}s now vs ${(prev.ms / 1000).toFixed(2)}s in Race ${prev.race_number} — Δ${(delta / 1000).toFixed(1)}s. Verify.`,
+        );
+      } else if (delta >= SOFT_MS) {
+        out.warnings.push(
+          `${teamLabel}: ${(curMs / 1000).toFixed(2)}s now vs ${(prev.ms / 1000).toFixed(2)}s in Race ${prev.race_number} — Δ${(delta / 1000).toFixed(1)}s.`,
+        );
+      }
+    }
+  }
+
+  return out;
+}
+
+/**
  * Compute the cross-round scoring context for the given race's division.
  *
  * Caller provides:

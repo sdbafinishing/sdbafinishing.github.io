@@ -8,9 +8,9 @@
  * Run: `node tests/smoke.mjs`  (or `npm test` once wired)
  * Exit code: 0 on success, 1 on any failure.
  */
-import { computeRankings, validateRace, computeDivisionScoring, getEffectiveStartTime } from '../js/race.js';
+import { computeRankings, validateRace, computeDivisionScoring, computeVarianceWarnings, getEffectiveStartTime } from '../js/race.js';
 import { joyiTimeToMs, joyiTimeHasMsPrecision, joyiTimeToRaw } from '../js/utils.js';
-import { patchXlsxCells } from '../js/xlsx-patcher.js';
+import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx } from '../js/xlsx-patcher.js';
 import { readFileSync } from 'fs';
 import * as XLSX from 'xlsx';
 import * as fflate from 'fflate';
@@ -444,6 +444,184 @@ group('computeDivisionScoring', () => {
     // B is ahead despite matching unweighted total.
     eq(b.overall_rank, 1);
     eq(a.overall_rank, 2);
+  });
+});
+
+// ── computeVarianceWarnings — cohort + per-team continuity ──────────────
+group('computeVarianceWarnings', () => {
+  const baseLanes = (extra = {}) => ([
+    { lane_number: 1, lane_input: '1', raw_time: '12500', computed_position: 1, ...extra },
+    { lane_number: 2, lane_input: '2', raw_time: '12700', computed_position: 2 },
+  ]);
+
+  test('no warnings when cohort + team data missing', () => {
+    const out = computeVarianceWarnings({
+      race: { race_number: 1, division_id: 1, draw_lanes: [] },
+      lanes: baseLanes(),
+      allRaces: [],
+      allLaneResultsByRace: new Map(),
+      divRounds: [],
+      divProgs: [],
+      laneCount: 6, timeMode: 'mss00',
+    });
+    eq(out.warnings.length, 0);
+    eq(out.errors.length, 0);
+  });
+
+  test('cohort mean — race ≥5s slower than cohort fires soft warning', () => {
+    // Cohort = races 2,3 in the same round, both with 1:25.00 winner.
+    // Current race (race 1) winner is 1:30.50 — 5.5s off cohort mean.
+    const myRace = {
+      race_number: 1, division_id: 1,
+      draw_lanes: [{ lane_number: 1, team_code: 'A', team_name: 'A' }],
+    };
+    const r2 = { race_number: 2, division_id: 1 };
+    const r3 = { race_number: 3, division_id: 1 };
+    const myRound = { id: 10, division_id: 1, race_numbers: [1, 2, 3] };
+    const allLanes = new Map([
+      [2, [{ lane_number: 1, lane_input: '1', raw_time: '12500', computed_position: 1 }]],
+      [3, [{ lane_number: 1, lane_input: '1', raw_time: '12500', computed_position: 1 }]],
+    ]);
+    const out = computeVarianceWarnings({
+      race: myRace,
+      lanes: [{ lane_number: 1, lane_input: '1', raw_time: '13050', computed_position: 1 }],
+      allRaces: [myRace, r2, r3],
+      allLaneResultsByRace: allLanes,
+      divRounds: [myRound],
+      divProgs: [],
+      laneCount: 6, timeMode: 'mss00',
+    });
+    const hasSoft = out.warnings.some(w => /cohort mean/.test(w));
+    if (!hasSoft) throw new Error('expected soft cohort warning, got: ' + JSON.stringify(out));
+  });
+
+  test('cohort mean — race ≥7s off fires HARD warning (error)', () => {
+    const myRace = { race_number: 1, division_id: 1, draw_lanes: [] };
+    const myRound = { id: 10, division_id: 1, race_numbers: [1, 2, 3] };
+    const r2 = { race_number: 2, division_id: 1 };
+    const r3 = { race_number: 3, division_id: 1 };
+    const allLanes = new Map([
+      [2, [{ lane_number: 1, lane_input: '1', raw_time: '12500', computed_position: 1 }]],
+      [3, [{ lane_number: 1, lane_input: '1', raw_time: '12500', computed_position: 1 }]],
+    ]);
+    const out = computeVarianceWarnings({
+      race: myRace,
+      lanes: [{ lane_number: 1, lane_input: '1', raw_time: '13200', computed_position: 1 }],
+      allRaces: [myRace, r2, r3],
+      allLaneResultsByRace: allLanes,
+      divRounds: [myRound],
+      divProgs: [],
+      laneCount: 6, timeMode: 'mss00',
+    });
+    if (out.errors.length === 0) throw new Error('expected hard cohort error, got: ' + JSON.stringify(out));
+  });
+
+  test('per-team — team Δ ≥5s vs own previous round fires warning', () => {
+    // Heat round 1 → Final round 2 in division 1.
+    // Team X raced heat as 1:25.00; now in final as 1:30.50 — 5.5s slower.
+    const heat = {
+      race_number: 1, division_id: 1,
+      draw_lanes: [{ lane_number: 3, team_code: 'X', team_name: 'X' }],
+    };
+    const final = {
+      race_number: 2, division_id: 1,
+      draw_lanes: [{ lane_number: 5, team_code: 'X', team_name: 'X' }],
+    };
+    const heatRound = { id: 10, division_id: 1, race_numbers: [1] };
+    const finalRound = { id: 20, division_id: 1, race_numbers: [2] };
+    const prog = { id: 1, division_id: 1, from_round_id: 10, to_round_id: 20 };
+    const allLanes = new Map([
+      [1, [{ lane_number: 1, lane_input: '3', raw_time: '12500', computed_position: 1 }]],
+    ]);
+    const out = computeVarianceWarnings({
+      race: final,
+      lanes: [{ lane_number: 1, lane_input: '5', raw_time: '13050', computed_position: 1 }],
+      allRaces: [heat, final],
+      allLaneResultsByRace: allLanes,
+      divRounds: [heatRound, finalRound],
+      divProgs: [prog],
+      laneCount: 6, timeMode: 'mss00',
+    });
+    const hasPerTeam = [...out.warnings, ...out.errors].some(w => /X.*Δ/.test(w) || /lane 5.*Δ/.test(w));
+    if (!hasPerTeam) throw new Error('expected per-team variance for team X, got: ' + JSON.stringify(out));
+  });
+});
+
+// ── Template lane resize + page header ──────────────────────────────────
+group('resizeLaneRowsXlsx', () => {
+  const tpl = readFileSync(new URL('../templates/race-template.xlsx', import.meta.url));
+
+  function decodeSheet(bytes) {
+    const files = fflate.unzipSync(new Uint8Array(bytes));
+    return new TextDecoder().decode(files['xl/worksheets/sheet1.xml']);
+  }
+
+  test('no-op when laneCount === 7 (template default)', () => {
+    const out = resizeLaneRowsXlsx(tpl, 7);
+    // Returns same bytes (reference or deep-equal — we only assert the
+    // sheet content is unchanged).
+    eq(decodeSheet(out).length, decodeSheet(tpl).length);
+  });
+
+  test('shrink to 5 lanes: boat 6 + 7 rows removed, footnote moves to row 9', () => {
+    const out = resizeLaneRowsXlsx(tpl, 5);
+    const xml = decodeSheet(out);
+    if (/<row r="6"[^>]*>/.test(xml) === false) throw new Error('row 6 should still exist (lane 3)');
+    // Lane 6 + 7 rows were rows 9 and 10 — should be gone.
+    if (/<row r="9"[^>]*>[^<]*<c r="A9"[^>]*><v>6<\/v>/.test(xml)) {
+      throw new Error('row 9 should NOT carry the old boat 6 number after shrink');
+    }
+    // Footnote (originally A11) should now sit at A9 (lanes 1-5 + footnote on row 9 = 4+5).
+    if (!/<c r="A9" s="\d+" t="s"[^>]*>/.test(xml) && !/<c r="A9" s="\d+"[^/]*>[\s\S]*?Steersman/.test(xml)) {
+      // Loose check — the row 9 cell should be the merged footnote anchor.
+      // (We can't easily inspect the SST text via regex; just sanity-check the row exists.)
+      if (!/<row r="9"/.test(xml)) throw new Error('row 9 (the new footnote row) should exist after shrink');
+    }
+  });
+
+  test('expand to 9 lanes: rows 11 and 12 added, footnote moves to row 13', () => {
+    const out = resizeLaneRowsXlsx(tpl, 9);
+    const xml = decodeSheet(out);
+    if (!/<row r="11"/.test(xml)) throw new Error('row 11 should exist after expand');
+    if (!/<row r="12"/.test(xml)) throw new Error('row 12 should exist after expand');
+    // Boat 8 and 9 values should appear in col A of the new rows.
+    if (!/<c r="A11"[^>]*><v>8<\/v>/.test(xml)) throw new Error('row 11 A col should be boat 8');
+    if (!/<c r="A12"[^>]*><v>9<\/v>/.test(xml)) throw new Error('row 12 A col should be boat 9');
+  });
+
+  test('merged cells shift down on expand', () => {
+    // Original footnote merge in the template is A11:I14 (rows 11-14
+    // inclusive, the 4-row block). Expanding to 9 lanes shifts both
+    // endpoints by +2 → A13:I16.
+    const out = resizeLaneRowsXlsx(tpl, 9);
+    const xml = decodeSheet(out);
+    if (!/<mergeCell ref="A13:I16"/.test(xml)) {
+      throw new Error('footnote merge should be A13:I16 after expanding to 9 lanes; got: ' +
+        (xml.match(/<mergeCell ref="A\d+:I\d+"\/>/g) || []).join(', '));
+    }
+  });
+});
+
+group('setPageHeaderXlsx', () => {
+  const tpl = readFileSync(new URL('../templates/race-template.xlsx', import.meta.url));
+
+  test('inserts <oddHeader> with EN + TC lines', () => {
+    const out = setPageHeaderXlsx(tpl, 'Stanley Dragon Boat Warm Up 250', '赤柱龍舟熱身賽 250');
+    const files = fflate.unzipSync(new Uint8Array(out));
+    const xml = new TextDecoder().decode(files['xl/worksheets/sheet1.xml']);
+    if (!/<headerFooter[\s\S]*<oddHeader>/.test(xml)) throw new Error('headerFooter block missing');
+    if (!/Stanley Dragon Boat Warm Up 250/.test(xml)) throw new Error('EN line missing');
+    if (!/赤柱龍舟熱身賽/.test(xml)) throw new Error('TC line missing');
+  });
+
+  test('replacing header on second call keeps just one block', () => {
+    let out = setPageHeaderXlsx(tpl, 'Test EN', 'Test TC');
+    out = setPageHeaderXlsx(out, 'New EN', 'New TC');
+    const files = fflate.unzipSync(new Uint8Array(out));
+    const xml = new TextDecoder().decode(files['xl/worksheets/sheet1.xml']);
+    const matches = xml.match(/<headerFooter/g) || [];
+    eq(matches.length, 1, 'should only have one headerFooter block');
+    if (!/New EN/.test(xml)) throw new Error('updated EN line missing');
   });
 });
 

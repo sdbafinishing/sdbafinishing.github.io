@@ -89,6 +89,13 @@ export async function mountFlowchartPage(container) {
       </button>
     </div>
 
+    <!-- Team progression panel — populated when one or more teams are
+         selected via the team filter. Shows the team's race-by-race
+         path: which races it appeared in, finishing position, time.
+         Placed ABOVE the SVG so a multi-division flowchart doesn't push
+         it below the fold the moment a team is picked. -->
+    <div id="fcTeamProgression" style="margin-bottom:14px;"></div>
+
     <!-- Flowchart SVG -->
     <div class="card" style="padding:16px; overflow:auto;">
       <div id="flowchartContainer" style="min-height:300px;"></div>
@@ -177,6 +184,21 @@ async function renderFlowchart(divisions, races, raceMap) {
     const progs = await getDivisionProgressions(div.id);
 
     if (rounds.length === 0) continue;
+
+    // Team filter — hide whole divisions that have zero overlap with the
+    // selected teams. Same behaviour as the division dropdown: when the
+    // operator filters by "Disc Force", the only divisions that show are
+    // the ones Disc Force actually races in, instead of every division
+    // rendering with most boxes greyed out.
+    if (selectedTeamCodes.size > 0) {
+      const divRaceNums = new Set();
+      rounds.forEach(r => (r.race_numbers || []).forEach(n => divRaceNums.add(n)));
+      let hasTeam = false;
+      for (const rn of divRaceNums) {
+        if (highlightedRaces.has(rn)) { hasTeam = true; break; }
+      }
+      if (!hasTeam) continue;
+    }
 
     // ── Bracket-style column assignment ──
     // Column index for each round is the LENGTH OF THE LONGEST CHAIN OF
@@ -360,6 +382,114 @@ async function renderFlowchart(divisions, races, raceMap) {
       </svg>
     </div>
   `;
+
+  // Render team progression panel below the SVG when team(s) selected.
+  await renderTeamProgression(selectedTeamCodes, races, raceMap);
+}
+
+/**
+ * Show each selected team's race-by-race progression: which races they
+ * raced in (or are scheduled for), finish position, time, status. The
+ * SVG above is the structural view; this panel is the row-by-row view
+ * a team would care about.
+ */
+async function renderTeamProgression(selectedTeamCodes, races, raceMap) {
+  const panel = document.getElementById('fcTeamProgression');
+  if (!panel) return;
+  if (!selectedTeamCodes || selectedTeamCodes.size === 0) {
+    panel.innerHTML = '';
+    return;
+  }
+
+  const { getLaneResults } = await import('../db.js');
+  const { timeToDisplay } = await import('../utils.js');
+
+  // For each selected team, walk races that include that team_code (per
+  // race.draw_lanes — Joyi-safe). Collect race-by-race rows.
+  const teamSections = [];
+  for (const teamCode of selectedTeamCodes) {
+    const teamRaces = [];
+    for (const r of races.sort((a, b) => a.race_number - b.race_number)) {
+      const drawLanes = Array.isArray(r.draw_lanes) ? r.draw_lanes : null;
+      if (!drawLanes) continue;
+      const draw = drawLanes.find(dl => dl.team_code === teamCode);
+      if (!draw) continue;
+      // Found this team in this race's draw. Pull result if any.
+      let position = null, raw_time = '', remarks = '', lane_input = null;
+      try {
+        const lanes = await getLaneResults(r.race_number);
+        const lr = lanes.find(l => parseInt(l.lane_input, 10) === draw.lane_number);
+        if (lr) {
+          position = lr.computed_position;
+          raw_time = lr.raw_time || '';
+          remarks = lr.remarks || '';
+          lane_input = lr.lane_input;
+        }
+      } catch { /* skip — leave empty */ }
+      teamRaces.push({
+        race_number: r.race_number,
+        race_title: r.race_title || `Race ${r.race_number}`,
+        status: r.status || 'pending',
+        boat_lane: draw.lane_number,
+        team_name: draw.team_name,
+        team_code: teamCode,
+        position,
+        raw_time,
+        remarks,
+        lane_input,
+      });
+    }
+    if (teamRaces.length === 0) continue;
+    const teamName = teamRaces[0].team_name || teamCode;
+    teamSections.push({ teamCode, teamName, teamRaces });
+  }
+
+  if (teamSections.length === 0) {
+    panel.innerHTML = `<div class="card" style="padding:14px; color:var(--text-tertiary); font-size:13px;">No races found for the selected team(s).</div>`;
+    return;
+  }
+
+  panel.innerHTML = teamSections.map(s => `
+    <div class="card" style="padding:14px; margin-bottom:12px;">
+      <div style="font-size:14px; font-weight:600; margin-bottom:8px;">
+        ${escapeHtmlInline(s.teamName)}
+        <span style="font-size:12px; color:var(--text-tertiary); font-weight:400; margin-left:6px;">(${s.teamCode})</span>
+      </div>
+      <table class="race-table" style="width:100%; font-size:12px;">
+        <thead>
+          <tr>
+            <th style="width:60px;">Race</th>
+            <th style="text-align:left;">Title</th>
+            <th style="width:60px;">Lane</th>
+            <th style="width:80px;">Time</th>
+            <th style="width:60px;">Place</th>
+            <th style="text-align:left;">Status / Remarks</th>
+            <th style="width:60px;"></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${s.teamRaces.map(tr => {
+            const parityClass = tr.race_number % 2 === 1 ? 'race-row-odd' : 'race-row-even';
+            const timeText = tr.raw_time ? timeToDisplay(tr.raw_time, 'mss00') : '';
+            const remarksText = [tr.status === 'cancelled' ? 'cancelled' : '', tr.remarks].filter(Boolean).join(' · ');
+            return `<tr class="${parityClass}">
+              <td><strong>${tr.race_number}</strong></td>
+              <td style="text-align:left;">${escapeHtmlInline(tr.race_title)}</td>
+              <td>${tr.boat_lane}</td>
+              <td>${timeText}</td>
+              <td>${tr.position ?? ''}</td>
+              <td style="text-align:left; color:var(--text-secondary);">${escapeHtmlInline(remarksText)}</td>
+              <td><a href="#/race/${tr.race_number}" style="color:var(--accent); font-size:11px;">Open</a></td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+  `).join('');
+}
+
+function escapeHtmlInline(s) {
+  return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 }
 
 // ──────────────── Audit panel rendering ────────────────

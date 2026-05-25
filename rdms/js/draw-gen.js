@@ -30,7 +30,7 @@ import {
   getConfig, getRace, getLaneResults, bulkSaveLaneResults, saveRace,
 } from './db.js';
 import { writeToBoth, downloadFallback } from './file-access.js';
-import { patchXlsxCells } from './xlsx-patcher.js';
+import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx } from './xlsx-patcher.js';
 import raceTemplateUrl from '../templates/race-template.xlsx?url';
 
 let _drawTemplateBytes = null;
@@ -232,37 +232,107 @@ export async function generateNextRoundDraws(raceNumbers) {
 
 // ──────────────── helpers ────────────────
 
+/**
+ * Public: build the draw .xls blob for a given race using the bundled
+ * template + current lane_results. Does NOT write to any folder —
+ * just returns the Blob so the caller can trigger a download. Used by
+ * the race-page Download Draw button (online + local).
+ *
+ * @param {number} raceNumber
+ * @returns {Promise<Blob|null>} the .xls blob, or null if the race
+ *   doesn't exist or has no lane data.
+ */
+export async function buildDrawXlsxBlob(raceNumber) {
+  const race = await getRace(raceNumber);
+  if (!race) return null;
+  const lanes = await getLaneResults(raceNumber);
+  return await renderDrawBlob(race, lanes);
+}
+
+async function renderDrawBlob(race, laneRows) {
+  const config = await getConfig();
+  const raceNumber = race.race_number;
+  const laneCount = config?.lane_count || 6;
+  const FOOTNOTE_ROW = 4 + laneCount;
+  const byLane = new Map((laneRows || []).map(l => [l.lane_number, l]));
+
+  // Prefer race.draw_lanes for team data (joyi-safe), fall back to
+  // laneRows.team_name for legacy races. Mirrors the same logic as
+  // export.js's drawsByLane build.
+  const drawTeams = new Map();
+  if (Array.isArray(race.draw_lanes)) {
+    for (const dl of race.draw_lanes) {
+      if (dl?.lane_number) drawTeams.set(dl.lane_number, dl);
+    }
+  } else {
+    for (const lr of (laneRows || [])) {
+      if (lr?.lane_number) drawTeams.set(lr.lane_number, { team_name: lr.team_name, team_code: lr.team_code });
+    }
+  }
+
+  const mods = [
+    { addr: 'A1', value: race.race_title_raw || race.race_title || `Race ${raceNumber}` },
+    { addr: 'D1', value: race.race_time || '' },
+    { addr: `A${FOOTNOTE_ROW}`, value: (race.progression_text || '').trim() },
+  ];
+  for (let lane = 1; lane <= laneCount; lane++) {
+    const rowNum = 3 + lane;
+    const dl = drawTeams.get(lane) || {};
+    mods.push({ addr: `B${rowNum}`, value: dl.team_name || '' });
+    mods.push({ addr: `C${rowNum}`, value: dl.team_code || '' });
+    mods.push({ addr: `D${rowNum}`, value: '' });
+    mods.push({ addr: `E${rowNum}`, value: '' });
+    mods.push({ addr: `I${rowNum}`, value: '' });
+  }
+
+  let templateBytes = await loadDrawTemplate();
+  templateBytes = resizeLaneRowsXlsx(templateBytes, laneCount);
+  templateBytes = setPageHeaderXlsx(
+    templateBytes,
+    config?.event_long_name_en || '',
+    config?.event_official_name_tc || config?.event_long_name_tc || '',
+  );
+  const patched = patchXlsxCells(templateBytes, mods);
+  return new Blob([patched]);
+}
+
 async function writeDrawFile(race, laneRows) {
   const config = await getConfig();
   const ref = config?.event_short_ref || 'RDMS';
   const raceNumber = race.race_number;
   const filename = `${raceNumber}.xls`;
 
-  // Same bundled xlsx template the result export uses. For a next-round
-  // draw we patch: race title (A1), race time (D1), team names (B4-B10),
-  // team codes (C4-C10), footnote (A11). Time/Place/Remarks cells stay
-  // blank — this is a draw, not a result sheet.
-  const TEMPLATE_LANE_COUNT = 7;
+  // Same bundled xlsx template the result export uses. Resize the lane
+  // block to laneCount before patching, then footnote address shifts
+  // dynamically (A{4+laneCount}).
+  const laneCount = config?.lane_count || 6;
+  const FOOTNOTE_ROW = 4 + laneCount;
   const byLane = new Map(laneRows.map(l => [l.lane_number, l]));
 
   const mods = [
     { addr: 'A1', value: race.race_title_raw || race.race_title || `Race ${raceNumber}` },
     { addr: 'D1', value: race.race_time || '' },
-    { addr: 'A11', value: (race.progression_text || '').trim() },
+    { addr: `A${FOOTNOTE_ROW}`, value: (race.progression_text || '').trim() },
   ];
-  for (let lane = 1; lane <= TEMPLATE_LANE_COUNT; lane++) {
+  // Active lane rows (boat 1..laneCount). Resize already grew / shrunk
+  // the lane block to exactly laneCount rows.
+  for (let lane = 1; lane <= laneCount; lane++) {
     const rowNum = 3 + lane;
     const lr = byLane.get(lane);
     mods.push({ addr: `B${rowNum}`, value: lr?.team_name || '' });
     mods.push({ addr: `C${rowNum}`, value: lr?.team_code || '' });
-    // Clear result columns so the bundled template's race-1 data
-    // can't leak through.
     mods.push({ addr: `D${rowNum}`, value: '' });
     mods.push({ addr: `E${rowNum}`, value: '' });
     mods.push({ addr: `I${rowNum}`, value: '' });
   }
 
-  const templateBytes = await loadDrawTemplate();
+  let templateBytes = await loadDrawTemplate();
+  templateBytes = resizeLaneRowsXlsx(templateBytes, laneCount);
+  templateBytes = setPageHeaderXlsx(
+    templateBytes,
+    config?.event_long_name_en || '',
+    config?.event_official_name_tc || config?.event_long_name_tc || '',
+  );
   const patched = patchXlsxCells(templateBytes, mods);
   const blob = new Blob([patched]);
 

@@ -45,7 +45,7 @@ export function renderUserGuideTab(container) {
             <tr><td>${ic('timer')}</td><td><strong>Race</strong></td><td>Race processing sheet: input grid (arrow keys, Excel-like), start/restart, Joyi import, batch adjustment, validation, export, send, print. Open in multiple tabs.</td></tr>
             <tr><td>${ic('schedule')}</td><td><strong>TimeSheet</strong></td><td>Timing log: start, restart, export, send times + inter-race intervals. Summary stats.</td></tr>
             <tr><td>${ic('emoji_events')}</td><td><strong>Scoring</strong></td><td>Multi-round scoring tables. Per-division tabs. Points + tiebreaker weights + overall rank.</td></tr>
-            <tr><td>${ic('account_tree')}</td><td><strong>Flowchart</strong></td><td>Visual DAG of division progressions. Filter by division or team. Single line = tournament, double line = scored. Colour-coded by race status.</td></tr>
+            <tr><td>${ic('account_tree')}</td><td><strong>Flowchart</strong></td><td>Visual DAG of division progressions. Filter by division or team. Single line = tournament, double line = scored. Colour-coded by race status. When a team filter is active, a <strong>Team progression</strong> panel above the SVG lists each selected team's race-by-race path (race #, lane, time, place, status) and divisions that contain none of the selected teams are hidden — same UX as the division dropdown.</td></tr>
             <tr><td>${ic('swap_horiz')}</td><td><strong>Im/Export</strong></td><td>Import draws (drag-drop, scan <code>01 Input_Draw/</code>, or auto-watch the folder), import Joyi results, generate start lists, and generate next-round draws by resolving R{n}P{n} placeholders.</td></tr>
             <tr><td>${ic('settings')}</td><td><strong>Setup</strong></td><td>Admin: event config, divisions, schedule, Next Race manual override, users, user guide. Editor: Next Race + user guide only. Viewer: user guide only.</td></tr>
             <tr><td>${ic('archive')}</td><td><strong>Archive</strong></td><td>Read-only browser of past events (admin + editor). Pulls from Supabase. Each row links to the event's Drive folder.</td></tr>
@@ -55,7 +55,7 @@ export function renderUserGuideTab(container) {
           <p style="margin-top:12px;"><strong>Top navigation bar:</strong></p>
           <table class="gt">
             <tr><th style="width:50px;"></th><th style="width:130px;">Element</th><th>Description</th></tr>
-            <tr><td>${ic('folder_open')}</td><td><strong>Connect Folder</strong></td><td>Grants browser permission to read/write your event folder. Click once per session. Turns green when connected. Required for file operations.</td></tr>
+            <tr><td>${ic('folder_open')}</td><td><strong>Connect Folder</strong></td><td>Grants browser permission to read/write your event folder. Click once per session. Turns green when connected. Required for file operations. <strong>Click again while connected</strong> to switch to a different folder (e.g. after restoring a different event's backup) — confirms first, then stops watchers and re-opens the OS picker.</td></tr>
             <tr><td><span style="background:var(--accent); color:#fff; padding:1px 6px; border-radius:10px; font-size:10px; font-weight:600;">2026TN</span></td><td><strong>Event Badge</strong></td><td>Shows event short ref in event colour. On web: clickable to switch between events.</td></tr>
             <tr><td style="font-size:15px; font-weight:600; font-variant-numeric:tabular-nums;">14:32</td><td><strong>Clock</strong></td><td>Live clock. Always visible.</td></tr>
             <tr><td>${ic('login')}</td><td><strong>Login/Logout</strong></td><td>Web version only. Local is always admin.</td></tr>
@@ -92,6 +92,7 @@ export function renderUserGuideTab(container) {
             <li><strong>Station Operators</strong> — Dashboard has RC/ST/FN/VO buttons to open station views in new tabs.</li>
             <li><strong>After the last race</strong> — see §13 Event Lock. Dashboard's <em>Lock event</em> button (admin only) freezes all writes once race day is wrapped up.</li>
           </ol>
+          <div class="gtip"><strong>Race-day setup modal.</strong> On page load (local mode), RDMS pops a checklist modal with three steps: <strong>1. Connect event folder</strong>, <strong>2. Start watching <code>01 Input_Draw/</code></strong>, <strong>3. Start watching Joyi folder</strong>. Each step ticks green as it completes; the "Skip for now" button flips to "Close" once all three are done. If the folder is already connected from a previous session-recovered state, only the missing watcher steps appear. Dismiss-once-per-session — closing it doesn't re-prompt on navigation.</div>
         </div>
 
         <!-- 4. Processing a Race -->
@@ -160,7 +161,7 @@ export function renderUserGuideTab(container) {
           <p><strong>Metadata side panel (left of image)</strong></p>
           <p>A 320 px white panel pinned to the left carries the race identity:</p>
           <ul>
-            <li><strong>Event banner</strong> — full slab in the event's brand colour with the event name in white. Uses the optional <code>event_official_name_en</code> / <code>event_official_name_tc</code> (Setup → Event), falling back to the short Event Name → event short ref.</li>
+            <li><strong>Event banner</strong> — full slab in the event's brand colour with the event name on top. Text auto-picks black or white based on the brand colour's luminance so pale colours (light teal, beige) stay readable. Uses the optional <code>event_official_name_en</code> / <code>event_official_name_tc</code> (Setup → Event), falling back to the short Event Name → event short ref.</li>
             <li><strong>Date</strong> — formatted <code>YYYY-MM-DD</code> from the event config.</li>
             <li><strong>Division</strong> — uses the optional <code>div_main_name_en</code> / <code>div_main_name_tc</code> (Setup → Divisions), falling back to the short division name.</li>
             <li><strong>Race</strong> — race number large, with a small division-colour swatch to its left when configured. Race title beneath the number.</li>
@@ -346,6 +347,13 @@ export function renderUserGuideTab(container) {
             <li><strong>Joyi thousandth-precision tie-break</strong> — when Joyi exports times with 3 decimal digits, <code>raw_time_ms</code> captures the full precision. Ranking uses ms; display still truncates to hundredths. Two boats with displayed time <code>1:25.14</code> but ms 85146 vs 85143 get distinct places. With hundredths-only sources, genuine ties stand.</li>
             <li><strong>Batch adjustment now persists</strong> — toggling "Apply batch adjustment" saves <code>batch_override_enabled</code> + <code>batch_delta_ms</code> on the race record. The exported .xls shifts every time by the delta; reloading the page restores the toggle state.</li>
             <li><strong>Tie + tight-finish warnings</strong> — duplicate times surface a "Lanes X, Y: same time" warning. Gaps ≤ 50ms (5 hundredths) between consecutive finishers fire a "tight finish" warning. Soft block only — export modal then asks for explicit confirmation.</li>
+            <li><strong>Variance warnings</strong> — two cross-race sanity checks fire in the validation banner:
+              <ul>
+                <li><strong>Check A — cohort</strong>: this race's 1st-boat time vs the mean 1st-boat time across every <em>other race in the same <code>division_round</code></em> (cup-derived vs bowl-derived finals are naturally segregated by their separate rounds). Useful for catching e.g. a clock that started late.</li>
+                <li><strong>Check B — per-team continuity</strong>: each team's current race time vs the same team's time in the immediately-preceding round (via <code>division_progressions.from_round_id</code>).</li>
+              </ul>
+              Thresholds: <strong>≥5s soft (yellow warning)</strong>, <strong>≥7s hard (red error, still soft block)</strong>. Both refresh as other races finish (cached on race-page mount + re-derived on every <code>race-updated</code> broadcast).
+            </li>
             <li><strong>Missing-result highlight</strong> — drawn boats with no time AND no status (DNS/DSQ/etc) get an amber row in the output preview with "⚠ no time/status" + a matching red banner. Each team must have time OR a status to clear.</li>
             <li><strong>Prev / Next navigation</strong> — first race shows a disabled <code>&lt;</code> placeholder; last race shows a disabled <code>&gt;</code> placeholder. Button layout stays consistent across races.</li>
           </ul>
@@ -411,6 +419,12 @@ export function renderUserGuideTab(container) {
           </table>
 
           <p><strong>Filename</strong> is always <code>{race_number}.xls</code> (downstream contract). The bytes are xlsx-format (zip + XML); Excel/Numbers/VBA tools sniff content, so the filename lie is invisible.</p>
+
+          <p><strong>Dynamic lane rows</strong> — the bundled template ships with 7 lane rows but the patcher resizes it on the fly to match <code>event_config.lanes_count</code>. Fewer lanes (e.g. 5) → boat rows 6 + 7 are removed and every row below (footnote at <code>A11</code>, signature row, etc.) shifts up. The page header band, column widths, fonts, and borders are preserved bit-for-bit. Same logic powers next-round draw exports.</p>
+
+          <p><strong>Page header stamp</strong> — the patcher injects an <code>&lt;oddHeader&gt;</code> with the event official long names (EN + TC) so every printed page carries the event identity, not just the in-cell title. Replaces any previous header block so re-stamping is idempotent.</p>
+
+          <p><strong>Web "Download draw" button</strong> (online mode) — the legacy <em>Open Draw</em> button (local-only, opens the source file in Excel) is replaced on the web version by a <strong>Download draw</strong> button that builds an xlsx blob from the bundled template (same resize + page-header logic as result export) and streams it as <code>{race_number}.xls</code>. Lets remote users pull a clean draw for any race without the source folder being mounted.</p>
 
           <div class="gtip"><strong>Re-import to refresh.</strong> If a race's exported A1 or A11 looks wrong, re-import its source draw. The import pass writes <code>race_title_raw</code> and <code>progression_text</code> back to the race record; the next export uses the refreshed values. Races imported before this feature existed may have those fields empty — re-import to populate.</div>
         </div>
@@ -484,7 +498,7 @@ export function renderUserGuideTab(container) {
             <tr><th>Issue</th><th>Solution</th></tr>
             <tr><td>${ic('folder_open')} not turning green</td><td>Click again. Chrome/Edge only. Needs user gesture.</td></tr>
             <tr><td>Files not saving</td><td>Folder not connected. Click ${ic('folder_open')}.</td></tr>
-            <tr><td>Data lost?</td><td>IndexedDB persists across restarts. Check <code>20 Database Backup/</code>. Restore via DB Admin.</td></tr>
+            <tr><td>Data lost?</td><td>IndexedDB persists across restarts. Check <code>20 Database Backup/</code>. Restore via DB Admin — Full DB Backup &rarr; Restore. When restoring a backup from a <strong>different event</strong> (e.g. 2026WU2 over 2026WU), the nav badge swaps to the new event automatically and the previously-connected folder handle is dropped — click the nav folder icon and pick the new event's directory before continuing.</td></tr>
             <tr><td>Rank mismatch error</td><td>Joyi rank != computed rank. Fix times. Must resolve before export.</td></tr>
             <tr><td>No Send button</td><td>WhatsApp group not configured in Setup &rarr; Event.</td></tr>
             <tr><td>No Import Joyi button</td><td>Shared Joyi folder not configured in Setup &rarr; Event.</td></tr>

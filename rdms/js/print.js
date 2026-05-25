@@ -128,49 +128,90 @@ export async function openFileFromFolder(subfolder, raceNumber) {
 function buildResultHtml(race, lanes, config, wrapInDoc = true) {
   const timeMode = config?.time_format_mode || 'mss00';
   const eventName = config?.event_long_name_en || '';
-  const eventRef = config?.event_short_ref || '';
+  const eventNameTc = config?.event_official_name_tc || '';
 
-  const sorted = [...lanes]
-    .filter(l => l.raw_time || l.remarks)
-    .sort((a, b) => {
-      if (a.computed_position == null && b.computed_position == null) return 0;
-      if (a.computed_position == null) return 1;
-      if (b.computed_position == null) return -1;
-      return a.computed_position - b.computed_position;
-    });
+  // Reconstruct the exported sheet's visual layout: header band, lane
+  // rows ordered by BOAT (not finish position) with Time / Place /
+  // Score / Total Score / Total Place / Remarks columns, then the
+  // progression footnote at the bottom. Matches the bundled xlsx
+  // template's column convention so the printed page looks like the
+  // exported .xls.
+  const drawLanesByLane = {};
+  if (Array.isArray(race.draw_lanes)) {
+    race.draw_lanes.forEach(dl => { if (dl?.lane_number) drawLanesByLane[dl.lane_number] = dl; });
+  }
+  const inputByLane = {};
+  lanes.forEach(l => {
+    const lane = parseInt(l.lane_input, 10);
+    if (Number.isInteger(lane) && lane >= 1) inputByLane[lane] = l;
+  });
+
+  const laneCount = config?.lane_count || 6;
+  const MARKER_SET = new Set(['DSQ', 'DQ', 'DNS', 'DNF']);
+  const rows = [];
+  for (let lane = 1; lane <= laneCount; lane++) {
+    const draw = drawLanesByLane[lane] || {};
+    const teamName = draw.team_name || '';
+    const teamCode = draw.team_code || '';
+    const r = inputByLane[lane];
+    if (!r) {
+      rows.push({ lane, teamName, teamCode, timeText: '', place: '', remarks: '' });
+      continue;
+    }
+    const rawRemark = (r.remarks || '').trim();
+    const isMarker = MARKER_SET.has(rawRemark.toUpperCase());
+    const timeText = isMarker ? rawRemark.toUpperCase() : timeToDisplay(r.raw_time, timeMode);
+    const place = isMarker ? '' : (r.computed_position ?? '');
+    const remarkPieces = [];
+    if (r.penalty_time && String(r.penalty_time).trim() !== '0') remarkPieces.push(`TP=${r.penalty_time}s`);
+    if (!isMarker && rawRemark) remarkPieces.push(rawRemark);
+    rows.push({ lane, teamName, teamCode, timeText, place, remarks: remarkPieces.join(' ') });
+  }
 
   const versionNote = race.export_version > 1
-    ? `<p style="color:#c00; font-size:11px; font-style:italic;">Results v${race.export_version} (Revised)</p>`
+    ? `<div style="color:#c00; font-size:11px; font-style:italic; margin-top:4px;">Results v${race.export_version} (Revised)</div>`
     : '';
+
+  const footnote = (race.progression_text || '').trim();
 
   const body = `
     <div class="print-page">
-      <h2 style="margin:0; font-size:16px;">${eventName}</h2>
-      <h3 style="margin:4px 0 2px; font-size:14px;">Race ${race.race_number} — ${race.race_title || ''}</h3>
-      <p style="font-size:11px; color:#666; margin:0;">
-        Start: ${isoToTime(race.start_time)} | Export: ${isoToTime(race.export_time)} | ${eventRef}
-      </p>
-      ${versionNote}
+      <div class="print-header">
+        <div class="print-title">Race No. ${race.race_number} — ${race.race_title_raw || race.race_title || ''}</div>
+        <div class="print-meta">
+          ${eventName}${eventNameTc ? ' / ' + eventNameTc : ''}
+          ${race.race_time ? ' · Sched ' + race.race_time : ''}
+          ${race.start_time ? ' · Start ' + isoToTime(race.start_time) : ''}
+        </div>
+        ${versionNote}
+      </div>
       <table class="print-table">
         <thead>
-          <tr><th>Pos</th><th>Lane</th><th>Team Name</th><th>Code</th><th>Time</th><th>Remarks</th></tr>
+          <tr>
+            <th style="width:6%;">BOAT<br>船號</th>
+            <th style="width:34%;">Team Name<br>隊伍名稱</th>
+            <th style="width:8%;">Code<br>編號</th>
+            <th style="width:12%;">Time<br>時間</th>
+            <th style="width:6%;">Place<br>名次</th>
+            <th style="width:34%;">Remarks<br>備註</th>
+          </tr>
         </thead>
         <tbody>
-          ${sorted.map(lr => {
-            const remarksArr = [];
-            if (lr.penalty_time) remarksArr.push(`TP=${lr.penalty_time}s`);
-            if (lr.remarks) remarksArr.push(lr.remarks);
-            return `<tr>
-              <td style="font-weight:700;">${['DSQ','DQ'].includes(lr.remarks) ? lr.remarks : (lr.computed_position ?? '')}</td>
-              <td>${lr.lane_input || lr.lane_number || ''}</td>
-              <td style="text-align:left;">${lr.team_name || ''}</td>
-              <td>${lr.team_code || ''}</td>
-              <td>${timeToDisplay(lr.raw_time, timeMode)}</td>
-              <td>${remarksArr.join(', ')}</td>
-            </tr>`;
-          }).join('')}
+          ${rows.map(r => `<tr>
+            <td style="font-weight:700;">${r.lane}</td>
+            <td style="text-align:left; font-size:12px;">${escapeHtml(r.teamName)}</td>
+            <td>${escapeHtml(r.teamCode)}</td>
+            <td>${escapeHtml(r.timeText)}</td>
+            <td style="font-weight:700;">${r.place}</td>
+            <td style="text-align:left; font-size:11px;">${escapeHtml(r.remarks)}</td>
+          </tr>`).join('')}
         </tbody>
       </table>
+      ${footnote ? `<div class="print-footnote">${escapeHtml(footnote).replace(/\n/g, '<br>')}</div>` : ''}
+      <div class="print-sig">
+        <div>Chief Judge Signature 裁判簽署 : ____________________</div>
+        <div>Signature Time 簽署時間 : ____________________</div>
+      </div>
     </div>
   `;
 
@@ -180,48 +221,69 @@ function buildResultHtml(race, lanes, config, wrapInDoc = true) {
 
 function buildDrawHtml(race, lanes, config, wrapInDoc = true) {
   const eventName = config?.event_long_name_en || '';
+  const eventNameTc = config?.event_official_name_tc || '';
+  const laneCount = config?.lane_count || 6;
 
-  // Source of truth for "team in boat lane X" is race.draw_lanes (the
-  // draw-time snapshot that survives Joyi imports). Fall back to
-  // lane_results.team_name for legacy races that don't have the field.
-  const rows = [];
-  if (Array.isArray(race?.draw_lanes) && race.draw_lanes.length > 0) {
-    const sorted = [...race.draw_lanes].sort((a, b) => (a.lane_number || 0) - (b.lane_number || 0));
-    for (const dl of sorted) {
-      rows.push({
-        lane: dl.lane_number,
-        name: dl.team_name || '—',
-        code: dl.team_code || '',
-      });
-    }
-  } else {
-    const sorted = [...lanes].sort((a, b) => a.lane_number - b.lane_number);
-    for (const lr of sorted) {
-      rows.push({
-        lane: lr.lane_number,
-        name: lr.team_name || '—',
-        code: lr.team_code || '',
-      });
-    }
+  // Reconstruct the bundled xlsx template's draw layout: header band,
+  // lane rows in boat order with empty Time / Place / Remarks columns
+  // (operator fills them in during the race), progression footnote at
+  // the bottom, signature row. Source of truth for team data is
+  // race.draw_lanes (joyi-safe).
+  const drawLanesByLane = {};
+  if (Array.isArray(race.draw_lanes)) {
+    race.draw_lanes.forEach(dl => { if (dl?.lane_number) drawLanesByLane[dl.lane_number] = dl; });
   }
+  // Legacy fallback when draw_lanes isn't set yet.
+  if (Object.keys(drawLanesByLane).length === 0) {
+    (lanes || []).forEach(lr => {
+      if (lr?.lane_number) drawLanesByLane[lr.lane_number] = { lane_number: lr.lane_number, team_name: lr.team_name, team_code: lr.team_code };
+    });
+  }
+
+  const rows = [];
+  for (let lane = 1; lane <= laneCount; lane++) {
+    const dl = drawLanesByLane[lane] || {};
+    rows.push({ lane, name: dl.team_name || '', code: dl.team_code || '' });
+  }
+
+  const footnote = (race.progression_text || '').trim();
 
   const body = `
     <div class="print-page">
-      <h2 style="margin:0; font-size:16px;">${eventName}</h2>
-      <h3 style="margin:4px 0 8px; font-size:14px;">Race ${race.race_number} — ${race.race_title || ''}</h3>
-      <p style="font-size:11px; color:#666; margin:0 0 8px;">Scheduled: ${race.race_time || '—'}</p>
+      <div class="print-header">
+        <div class="print-title">Race No. ${race.race_number} — ${race.race_title_raw || race.race_title || ''}</div>
+        <div class="print-meta">
+          ${eventName}${eventNameTc ? ' / ' + eventNameTc : ''}
+          ${race.race_time ? ' · Sched ' + race.race_time : ''}
+        </div>
+      </div>
       <table class="print-table">
         <thead>
-          <tr><th>Lane</th><th>Team Name</th><th>Code</th></tr>
+          <tr>
+            <th style="width:6%;">BOAT<br>船號</th>
+            <th style="width:40%;">Team Name<br>隊伍名稱</th>
+            <th style="width:8%;">Code<br>編號</th>
+            <th style="width:12%;">Time<br>時間</th>
+            <th style="width:6%;">Place<br>名次</th>
+            <th style="width:28%;">Remarks<br>備註</th>
+          </tr>
         </thead>
         <tbody>
           ${rows.map(r => `<tr>
             <td style="font-weight:700;">${r.lane}</td>
-            <td style="text-align:left;">${r.name}</td>
-            <td>${r.code}</td>
+            <td style="text-align:left; font-size:12px;">${escapeHtml(r.name)}</td>
+            <td>${escapeHtml(r.code)}</td>
+            <td>&nbsp;</td>
+            <td>&nbsp;</td>
+            <td>&nbsp;</td>
           </tr>`).join('')}
         </tbody>
       </table>
+      ${footnote ? `<div class="print-footnote">${escapeHtml(footnote).replace(/\n/g, '<br>')}</div>` : ''}
+      <div class="print-sig">
+        <div>Chief Judge Signature 裁判簽署 : ____________________</div>
+        <div>Signature Time 簽署時間 : ____________________</div>
+      </div>
     </div>
   `;
 
@@ -229,18 +291,62 @@ function buildDrawHtml(race, lanes, config, wrapInDoc = true) {
   return `<!DOCTYPE html><html><head><title>Race ${race.race_number} Draw</title>${printStyles()}</head><body>${body}</body></html>`;
 }
 
+function escapeHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+}
+
 function printStyles() {
+  // One race per A4 landscape page — sized so a 7-lane sheet plus the
+  // progression footnote + signature row fits without truncation.
+  // Table cells stretch via flex so the layout fills the page top to
+  // bottom rather than clustering at the top.
   return `<style>
-    @page { size: landscape; margin: 10mm; }
+    @page { size: A4 landscape; margin: 12mm; }
     * { margin:0; padding:0; box-sizing:border-box; }
-    body { font-family: Arial, sans-serif; font-size:12px; padding:16px; }
-    .print-page { page-break-after:always; height:100vh; display:flex; flex-direction:column; }
-    .print-page:last-child { page-break-after:auto; }
-    .print-table { width:100%; border-collapse:collapse; margin-top:8px; flex:1; }
-    .print-table th, .print-table td { border:1px solid #999; padding:5px 10px; text-align:center; }
-    .print-table th { background:#eee; font-size:11px; font-weight:700; }
-    .print-table td { font-size:13px; }
-    @media print { body { padding:0; } }
+    html, body { font-family: Arial, "PingFang TC", "Heiti TC", sans-serif; font-size:13px; color:#000; }
+    body { padding:0; }
+    .print-page {
+      page-break-after: always;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+    .print-page:last-child { page-break-after: auto; }
+    .print-header { border-bottom: 2px solid #000; padding-bottom: 8px; margin-bottom: 6px; }
+    .print-title { font-size: 18px; font-weight: 700; }
+    .print-meta { font-size: 12px; color: #444; margin-top: 4px; }
+    .print-table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+      margin-top: 6px;
+      flex: 1;
+    }
+    .print-table th, .print-table td {
+      border: 1px solid #000;
+      padding: 8px 10px;
+      text-align: center;
+      vertical-align: middle;
+    }
+    .print-table th { background:#eaeaea; font-size:11px; font-weight:700; line-height:1.2; }
+    .print-table td { font-size:14px; }
+    .print-table tbody tr { height: 36px; }
+    .print-footnote {
+      margin-top: 10px;
+      padding: 8px 10px;
+      border: 1px solid #888;
+      font-size: 11px;
+      white-space: pre-wrap;
+      flex: 0 0 auto;
+    }
+    .print-sig {
+      margin-top: 14px;
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+    }
+    @media print { body { padding:0; } .print-page { min-height: 0; } }
   </style>`;
 }
 

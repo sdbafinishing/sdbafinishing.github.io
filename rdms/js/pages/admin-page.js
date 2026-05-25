@@ -5,6 +5,7 @@
 import { db } from '../db.js';
 import { showToast } from '../utils.js';
 import { autoBackup } from '../backup.js';
+import { broadcastChange } from '../app.js';
 
 const TABLE_NAMES = [
   'config', 'races', 'lane_results', 'timesheet',
@@ -271,6 +272,19 @@ async function restoreAll(file) {
 
     showToast(`Restored ${totalRows} records from backup (${backup._meta.exported_at})`, 'success');
     await loadTable(currentTable);
+
+    // The restored backup may carry a different event_config row (e.g.
+    // switching from 2026WU to 2026WU2), so the navbar badge + every
+    // page that hydrates from config is now stale. Fan out the same
+    // broadcast that Setup save uses so the badge re-renders + other
+    // tabs reload. Folder watchers are reset separately because the
+    // newly-restored event likely points at a different physical folder.
+    broadcastChange('config-updated');
+    try {
+      const { resetFolderAccess } = await import('../file-access.js');
+      resetFolderAccess();
+      if (typeof window._rdmsUpdateFolderIcons === 'function') window._rdmsUpdateFolderIcons();
+    } catch { /* file-access may not be loaded yet */ }
   } catch (e) {
     showToast('Restore failed: ' + e.message, 'error');
   }

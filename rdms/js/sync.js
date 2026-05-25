@@ -39,7 +39,19 @@ async function getSupabase() {
 
   if (!window.supabase) return null;
 
-  supabaseClient = window.supabase.createClient(config.supabase_url, config.supabase_anon_key);
+  // On localhost the sync layer is the WRITER — the operator's machine
+  // pushes race state up to Supabase. Use the service_role key when
+  // available so RLS doesn't block writes (the anon client would only
+  // pass policies that explicitly allow anon, which most events won't
+  // configure). Service role NEVER ships to the web viewer build —
+  // both this module and Setup's input field are local-only.
+  const host = window.location?.hostname || '';
+  const isLocalHost = host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0';
+  const writeKey = isLocalHost && config.supabase_service_key
+    ? config.supabase_service_key
+    : config.supabase_anon_key;
+
+  supabaseClient = window.supabase.createClient(config.supabase_url, writeKey);
   return supabaseClient;
 }
 

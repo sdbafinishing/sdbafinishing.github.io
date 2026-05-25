@@ -1466,16 +1466,19 @@ function renderMetaPanelHtml(m) {
   const lines = [];
 
   // 1) Event banner — the colour band is now a full banner with the event
-  // name in white text on top. Replaces the separate "EVENT" label/value
-  // rows below; one less section in the panel, more visual weight at the
-  // top where it belongs.
+  // name on top. Text colour adapts to the brand colour's luminance so
+  // light brand colours don't render white-on-white.
   const eventLabel = formatBilingual(m.eventEn, m.eventTc) || m.eventShort || '—';
+  const bannerBg = m.eventColour || '#0f172a';
+  const onDark = isDarkColour(bannerBg);
+  const fg = onDark ? '#ffffff' : '#0f172a';
+  const fgSoft = onDark ? 'rgba(255,255,255,0.7)' : 'rgba(15,23,42,0.65)';
   lines.push(`
-    <div style="background:${escapeHtml(m.eventColour || '#0f172a')}; color:#ffffff;
+    <div style="background:${escapeHtml(bannerBg)}; color:${fg};
                 padding:14px 16px; font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
                 box-shadow:0 1px 3px rgba(15,23,42,0.3);">
       <div style="font-size:11px; font-weight:600; letter-spacing:0.6px; text-transform:uppercase;
-                  color:rgba(255,255,255,0.7); margin-bottom:4px;">Event</div>
+                  color:${fgSoft}; margin-bottom:4px;">Event</div>
       <div style="font-size:17px; font-weight:700; line-height:1.25; white-space:pre-line;">${escapeHtml(eventLabel)}</div>
     </div>
   `);
@@ -1657,9 +1660,11 @@ function paintMetaPanelOnCanvas(ctx, x, y, w, h, m) {
 
   const padX = 16, padY = 14;
 
-  // Event banner — coloured background slab with the event name in white.
+  // Event banner — coloured background slab with the event name on top.
   // Replaces the previous thin colour band + separate EVENT row, giving
   // the brand colour real estate and the event name visual prominence.
+  // Text colour adapts to the brand colour's luminance so light brand
+  // colours (pale blue, beige, etc.) don't render white-on-white.
   const eventLabel = formatBilingual(m.eventEn, m.eventTc) || m.eventShort || '—';
   const eventLines = wrapTextWithFont(
     ctx, eventLabel,
@@ -1667,19 +1672,23 @@ function paintMetaPanelOnCanvas(ctx, x, y, w, h, m) {
     '700 17px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'
   );
   const bannerH = padY + 16 + 4 + eventLines.length * Math.round(17 * 1.25) + padY;
-  ctx.fillStyle = m.eventColour || '#0f172a';
+  const bannerBg = m.eventColour || '#0f172a';
+  ctx.fillStyle = bannerBg;
   ctx.fillRect(x, y, w, bannerH);
   // Subtle soft shadow under the banner.
   ctx.fillStyle = 'rgba(15,23,42,0.18)';
   ctx.fillRect(x, y + bannerH, w, 1);
 
-  // Banner label (uppercase "EVENT" in translucent white).
-  ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  const onDark = isDarkColour(bannerBg);
+  const bannerTextColour = onDark ? '#ffffff' : '#0f172a';
+  const bannerLabelColour = onDark ? 'rgba(255,255,255,0.7)' : 'rgba(15,23,42,0.65)';
+
+  // Banner label (uppercase "EVENT") in a softened version of the text colour.
+  ctx.fillStyle = bannerLabelColour;
   ctx.font = '600 11px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
   ctx.textBaseline = 'top';
   ctx.fillText('EVENT', x + padX, y + padY);
-  // Banner event name in white.
-  ctx.fillStyle = '#ffffff';
+  ctx.fillStyle = bannerTextColour;
   ctx.font = '700 17px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
   let bannerCursor = y + padY + 16 + 4;
   for (const line of eventLines) {
@@ -1785,6 +1794,22 @@ function paintMetaPanelOnCanvas(ctx, x, y, w, h, m) {
 /** Same as wrapText but sets the font first, restoring it afterwards.
  *  Used by the banner sizing pass since we need to measure with the actual
  *  font we'll render with. */
+// True when a hex colour is dark enough that white text reads well on it.
+// Uses the perceived-luminance (YIQ-ish) weighting; threshold 145 lands
+// just past mid-grey so saturated mid-tones (royal blue, forest green)
+// still get white text.
+function isDarkColour(hex) {
+  if (typeof hex !== 'string') return true;
+  const h = hex.replace('#','').trim();
+  const expand = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
+  if (expand.length < 6) return true;
+  const r = parseInt(expand.substring(0,2), 16);
+  const g = parseInt(expand.substring(2,4), 16);
+  const b = parseInt(expand.substring(4,6), 16);
+  if ([r,g,b].some(Number.isNaN)) return true;
+  return (r * 299 + g * 587 + b * 114) / 1000 < 145;
+}
+
 function wrapTextWithFont(ctx, text, maxWidth, font) {
   const prev = ctx.font;
   ctx.font = font;

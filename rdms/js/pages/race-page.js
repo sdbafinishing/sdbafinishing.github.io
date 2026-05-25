@@ -4,7 +4,7 @@
  */
 import { getRace, saveRace, getLaneResults, saveLaneResult, bulkSaveLaneResults, getConfig, saveTimesheet, getTimesheet, getAllRaces, getAllDivisions } from '../db.js';
 import { ExcelGrid } from '../grid.js';
-import { computeRankings, calcBatchDelta, validateRace, getEffectiveStartTime, positionToPoints } from '../race.js';
+import { computeRankings, calcBatchDelta, validateRace, getEffectiveStartTime, positionToPoints, computeVarianceWarnings } from '../race.js';
 import { timeToMs, msToTime, timeToDisplay, isValidTime, nowISO, nowDisplay, isoToTime, showToast } from '../utils.js';
 import { broadcastChange } from '../app.js';
 import { showExportModal } from '../export.js';
@@ -42,6 +42,30 @@ let batchOverrideEnabled = false;
 // Overall Place columns in the output table + the reference scoreboard
 // rendered below it. null when the race isn't scored.
 let scoringCtx = null;
+
+// Variance context — cross-race data needed by computeVarianceWarnings.
+// Built on mount + refreshed whenever a race-updated broadcast fires.
+// Kept in module state so renderValidation can stay synchronous (it
+// runs on every cell change). null until the first build completes.
+let varianceCtx = null;
+
+async function buildVarianceCtx() {
+  try {
+    const { getAllRaces, getAllDivisionRounds, getAllDivisionProgressions, getLaneResults } = await import('../db.js');
+    const allRaces = await getAllRaces();
+    const divRounds = typeof getAllDivisionRounds === 'function' ? await getAllDivisionRounds() : [];
+    const divProgs = typeof getAllDivisionProgressions === 'function' ? await getAllDivisionProgressions() : [];
+    const allLaneResultsByRace = new Map();
+    for (const r of allRaces) {
+      try { allLaneResultsByRace.set(r.race_number, await getLaneResults(r.race_number)); }
+      catch { /* skip individual fetch failures */ }
+    }
+    varianceCtx = { allRaces, allLaneResultsByRace, divRounds, divProgs };
+  } catch (err) {
+    console.warn('buildVarianceCtx failed:', err);
+    varianceCtx = null;
+  }
+}
 
 // Build (or refresh) the scoring context for the current race.
 // Returns null when not applicable (race is N / no scored races in
@@ -166,6 +190,10 @@ export async function mountRacePage(container, params) {
   // Build scoring context up-front; renderOutput uses it to add the
   // Score / Total / Overall Place columns when the race is scored.
   scoringCtx = raceData ? await buildScoringContext(raceData, configData) : null;
+  // Build variance context (cross-race data for cohort + per-team
+  // continuity checks). Fire-and-forget — renderValidation degrades
+  // gracefully when varianceCtx is still null on the first paint.
+  buildVarianceCtx().catch(() => {});
 
   if (!raceData) {
     container.innerHTML = `<div class="card"><p>Race ${raceNumber} not found. Import draws first.</p></div>`;
@@ -305,6 +333,7 @@ export async function mountRacePage(container, params) {
         : `<button class="btn btn-outline btn-sm" disabled style="opacity:0.4;" title="No next race"><i class="material-icons" style="font-size:16px;">chevron_right</i></button>`}
       <span style="border-left:1px solid var(--border); height:20px; margin:0 4px;"></span>
       <button class="btn btn-ghost btn-sm" onclick="window._printDraw()" title="Print draw"><i class="material-icons" style="font-size:16px;">description</i> Print Draw</button>
+      <button class="btn btn-ghost btn-sm" onclick="window._downloadDraw()" title="Download draw as .xls"><i class="material-icons" style="font-size:16px;">download</i> Download Draw</button>
       <button class="btn btn-ghost btn-sm" onclick="window._photoFinish()" title="Open Joyi photo-finish image (.lcd + .jyd)">
         <i class="material-icons" style="font-size:16px;">photo_camera</i> Photo Finish
       </button>
@@ -521,6 +550,9 @@ async function _onRaceUpdateRefresh(ev) {
       // Rebuild scoring context too — joyi import on this race changes
       // computed_position, which feeds the Score/Total columns.
       scoringCtx = await buildScoringContext(raceData, configData);
+      // Refresh variance ctx so cohort means / team continuity use
+      // the latest results from other races.
+      buildVarianceCtx().catch(() => {});
       recalculate();
     } catch (err) {
       console.warn('Race-page refresh failed:', err);
@@ -592,6 +624,7 @@ export function unmountRacePage() {
   delete window._sendOnly;
   delete window._printResult;
   delete window._printDraw;
+  delete window._downloadDraw;
   delete window._openDraw;
   delete window._openResult;
 }
@@ -1113,6 +1146,24 @@ function renderValidation(data) {
   if (!panel) return;
 
   const result = validateRace(raceData, data, configData || { lane_count: 6, time_format_mode: 'mss00' });
+
+  // Append variance warnings when we have the cross-race context loaded.
+  // Sync addition — varianceCtx is pre-built async on mount + on
+  // broadcast, so this stays cheap per-keystroke.
+  if (varianceCtx && raceData) {
+    const v = computeVarianceWarnings({
+      race: raceData,
+      lanes: data,
+      allRaces: varianceCtx.allRaces,
+      allLaneResultsByRace: varianceCtx.allLaneResultsByRace,
+      divRounds: varianceCtx.divRounds,
+      divProgs: varianceCtx.divProgs,
+      laneCount: configData?.lane_count || 6,
+      timeMode: configData?.time_format_mode || 'mss00',
+    });
+    result.errors.push(...v.errors);
+    result.warnings.push(...v.warnings);
+  }
 
   if (result.errors.length === 0 && result.warnings.length === 0) {
     const hasData = data.some(r => r.raw_time || r.remarks);
@@ -1835,6 +1886,31 @@ function attachHandlers() {
   // Print / Open handlers
   window._printResult = () => printResult(raceNumber);
   window._printDraw = () => printDraw(raceNumber);
+
+  // Download Draw: build the draw .xls from the bundled template
+  // (same pipeline export uses), trigger a browser download. Online
+  // viewers can't write to the local filesystem — this is the way
+  // they get the printable file. Filename is always {N}.xls.
+  window._downloadDraw = async () => {
+    try {
+      const { buildDrawXlsxBlob } = await import('../draw-gen.js');
+      const blob = await buildDrawXlsxBlob(raceNumber);
+      if (!blob) {
+        showToast('Could not build draw file.', 'error');
+        return;
+      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${raceNumber}.xls`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      showToast(`Download failed: ${err.message}`, 'error', 5000);
+    }
+  };
   window._openDraw = () => openFileFromFolder('01 Input_Draw', raceNumber);
   window._openResult = async () => {
     const r = await getRace(raceNumber);
