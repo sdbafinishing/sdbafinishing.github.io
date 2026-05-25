@@ -419,6 +419,20 @@ async function renderConfigTab(container) {
         </div>
       </div>
 
+      <!-- Manual sync trigger + diagnostics. The periodic interval already
+           flushes every 30 s when supabase is configured; this is the
+           recovery path when the queue was lost (browser data cleared,
+           sync was misconfigured at boot, errors swallowed) and you need
+           to force-push every race + event config in one click. -->
+      <div class="form-group" style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+        <button class="btn btn-outline" id="forceSyncBtn" onclick="window._forceSync()">
+          ⤴ Sync now
+        </button>
+        <span id="forceSyncStatus" style="font-size:12px; color:var(--text-tertiary);">
+          Force-push every race + event_config to Supabase, bypassing the queue. Use if the web viewer is missing data.
+        </span>
+      </div>
+
       <!-- Google Drive API -->
       <div class="section-header" style="margin-top:20px;">Google Drive API <span style="font-weight:400; font-size:10px; color:var(--text-tertiary);">optional</span></div>
       <p style="font-size:12px; color:var(--text-tertiary); margin-bottom:8px;">
@@ -618,6 +632,26 @@ async function renderConfigTab(container) {
     }
   };
   refreshConnectState();
+
+  // Auto-populate the three shared folder paths when the operator types
+  // (or pastes) an Event Short Ref. Only fills BLANK fields — never
+  // overwrites a value the operator already customised. Default
+  // convention matches the rest of the app: 80 Shared/{ref}_{purpose}.
+  const refInput = document.getElementById('cfgEventRef');
+  if (refInput) {
+    refInput.addEventListener('input', () => {
+      const ref = refInput.value.trim();
+      if (!ref) return;
+      const fill = (id, value) => {
+        const el = document.getElementById(id);
+        if (el && !el.value.trim()) el.value = value;
+      };
+      fill('cfgSharedResults', `80 Shared/${ref}_Output_Results`);
+      fill('cfgSharedDraws', `80 Shared/${ref}_Next_Round_Draws`);
+      fill('cfgSharedJoyi', `80 Shared/${ref}_Joyi`);
+    });
+  }
+
   if (cfgConnectBtn) {
     cfgConnectBtn.addEventListener('click', async () => {
       const handle = await requestSourceFolder();
@@ -771,15 +805,45 @@ async function renderConfigTab(container) {
     await saveConfig(data);
     broadcastChange('config-updated');
 
-    // Sync config to Supabase immediately (if configured)
+    // Sync config to Supabase immediately (if configured).
+    // ALSO restart the sync service so its periodic interval picks up
+    // the new Supabase URL / key. Without this, an operator who first
+    // pasted the supabase config AFTER boot would have a queue filling
+    // up with no interval ever flushing it.
     if (data.supabase_url && data.supabase_anon_key) {
       try {
-        const { queueRaceSync } = await import('../sync.js');
+        const { queueRaceSync, startSyncService } = await import('../sync.js');
         await queueRaceSync(-1); // -1 triggers event_config sync only
+        await startSyncService(); // idempotent — kills old interval, re-installs
       } catch {}
     }
 
     showToast('Configuration saved', 'success');
+  };
+
+  // ── "Sync now" button — one-click flush of every race + event config
+  // to Supabase, regardless of sync_queue state. Recovery path for when
+  // the queue got lost (browser data cleared, multiple devices, etc).
+  window._forceSync = async () => {
+    const btn = document.getElementById('forceSyncBtn');
+    const statusEl = document.getElementById('forceSyncStatus');
+    if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
+    try {
+      const { forceFullSync } = await import('../sync.js');
+      const result = await forceFullSync();
+      if (result.error) {
+        showToast(`Sync failed: ${result.error}`, 'error', 8000);
+        if (statusEl) statusEl.textContent = `Failed: ${result.error}`;
+      } else {
+        showToast(`Sync OK — pushed ${result.writes} rows to Supabase`, 'success', 4000);
+        if (statusEl) statusEl.textContent = `Last sync: ${result.writes} rows just now`;
+      }
+    } catch (err) {
+      showToast(`Sync failed: ${err.message}`, 'error', 8000);
+      if (statusEl) statusEl.textContent = `Failed: ${err.message}`;
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = '⤴ Sync now'; }
+    }
   };
 
   window._generateBlank = async () => {

@@ -39,7 +39,7 @@ export async function renderScheduleTab(container) {
               </thead>
               <tbody>
                 ${sorted.map(r => `
-                  <tr data-race="${r.race_number}">
+                  <tr data-race="${r.race_number}" class="race-row-${r.race_number % 2 === 1 ? 'odd' : 'even'}">
                     <td><strong>${r.race_number}</strong></td>
                     <td><input class="form-input sched-title" data-race="${r.race_number}"
                                value="${(r.race_title || '').replace(/"/g, '&quot;')}"

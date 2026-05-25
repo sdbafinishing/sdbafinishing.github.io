@@ -14,6 +14,20 @@ import { isRaceDayComplete, showLockModal } from '../event-lock.js';
 import { summariseDivisions } from '../round-completion.js';
 import { hasPermission } from '../rbac.js';
 
+// Race's effective start time: prefer the Joyi-derived value (sub-second
+// accuracy from the .lcd file) over the operator-clicked time. Matches
+// the priority order in race.js#getEffectiveStartTime. Returns the ISO
+// string or null. Use this everywhere the dashboard compares / displays
+// a start, so races that only have joyi_start_time (no operator click)
+// still show up as started + sort correctly.
+function effectiveStartIso(race) {
+  return race?.joyi_start_time || race?.start_time || null;
+}
+function effectiveStartMs(race) {
+  const iso = effectiveStartIso(race);
+  return iso ? new Date(iso).getTime() : 0;
+}
+
 let refreshInterval = null;
 let isAuthenticatedUser = false;
 let lastRaceHash = ''; // Change detection — skip re-render if data unchanged
@@ -436,10 +450,11 @@ async function renderCurrentNext(races) {
   if (!el) return;
 
   // Current = most recently started (multiple started races possible; want the latest).
-  // Tie-break by race_number desc.
+  // Tie-break by race_number desc. Use effective start (joyi-derived or
+  // operator-clicked) so races that started via Joyi alone still sort.
   const started = races.filter(r => r.status === 'started').sort((a, b) => {
-    const ta = a.start_time ? new Date(a.start_time).getTime() : 0;
-    const tb = b.start_time ? new Date(b.start_time).getTime() : 0;
+    const ta = effectiveStartMs(a);
+    const tb = effectiveStartMs(b);
     if (tb !== ta) return tb - ta;
     return b.race_number - a.race_number;
   });
@@ -467,7 +482,7 @@ async function renderCurrentNext(races) {
 
   let html = '';
   if (started.length > 0) {
-    html += renderRow(started[0], 'CURRENT', 'badge-started', `Started ${isoToTime(started[0].start_time)}`, 'btn-primary');
+    html += renderRow(started[0], 'CURRENT', 'badge-started', `Started ${isoToTime(effectiveStartIso(started[0]))}`, 'btn-primary');
   }
   if (pending.length > 0) {
     html += renderRow(pending[0], 'NEXT UP', 'badge-pending', `Sched: ${pending[0].race_time || '—'}`, 'btn-outline');
@@ -496,7 +511,7 @@ async function renderAlerts(races) {
 
   const now = Date.now();
   const startedNotExported = races
-    .filter(r => r.status === 'started' && r.start_time && (now - new Date(r.start_time).getTime()) > 10 * 60 * 1000)
+    .filter(r => r.status === 'started' && effectiveStartMs(r) > 0 && (now - effectiveStartMs(r)) > 10 * 60 * 1000)
     .map(r => r.race_number);
   if (startedNotExported.length > 0) {
     alerts.push({ type: 'danger', msg: `${fmt(startedNotExported)}: started > 10 min ago, not exported` });
@@ -544,83 +559,123 @@ async function renderAlerts(races) {
   `).join('');
 }
 
+// Parse a "HH:MM" race_time string and anchor it to today's date.
+// Returns a Date or null on malformed input.
+function parseSchedToday(raceTime) {
+  if (!raceTime) return null;
+  const parts = raceTime.split(':');
+  if (parts.length < 2) return null;
+  const h = parseInt(parts[0], 10), m = parseInt(parts[1], 10);
+  if (isNaN(h) || isNaN(m)) return null;
+  const d = new Date();
+  d.setHours(h, m, 0, 0);
+  return d;
+}
+
 function renderDelayTracking(races) {
   const panel = document.getElementById('delayPanel');
   if (!panel) return;
 
-  // Find the most recently started race with a scheduled time
+  // Two independent measures of delay, both in minutes:
+  //   x = "started delay" — how late the LAST started race actually started
+  //       vs its schedule (joyi-derived start preferred). Tells you what
+  //       happened.
+  //   y = "upcoming delay" — for the NEXT pending race, how much its
+  //       scheduled time has already slipped past wall clock. Live
+  //       (refreshes with each renderDashboard tick).
+  // The overall projection uses the larger of x and y — whichever is more
+  // alarming. Banner shows both so the operator sees the trend.
+
+  // x: started delay (effective start of latest started race vs schedule)
   const startedWithTime = races
-    .filter(r => r.start_time && r.race_time && r.status !== 'cancelled')
+    .filter(r => effectiveStartIso(r) && r.race_time && r.status !== 'cancelled')
     .sort((a, b) => b.race_number - a.race_number);
-
-  if (startedWithTime.length === 0) { panel.innerHTML = ''; return; }
-
   const latest = startedWithTime[0];
-
-  // Parse scheduled time (HH:MM format from draw file)
-  const schedParts = (latest.race_time || '').split(':');
-  if (schedParts.length < 2) { panel.innerHTML = ''; return; }
-
-  const schedHour = parseInt(schedParts[0], 10);
-  const schedMin = parseInt(schedParts[1], 10);
-  if (isNaN(schedHour) || isNaN(schedMin)) { panel.innerHTML = ''; return; }
-
-  // Calculate delay
-  const actualStart = new Date(latest.start_time);
-  const schedDate = new Date(actualStart);
-  schedDate.setHours(schedHour, schedMin, 0, 0);
-
-  const delayMs = actualStart.getTime() - schedDate.getTime();
-  const delayMin = Math.round(delayMs / 60000);
-
-  // Project next race ETA
-  const pending = races
-    .filter(r => r.status === 'pending' && r.race_time)
-    .sort((a, b) => a.race_number - b.race_number);
-
-  let etaHtml = '';
-  if (pending.length > 0 && delayMin !== 0) {
-    const next = pending[0];
-    const nextParts = (next.race_time || '').split(':');
-    if (nextParts.length >= 2) {
-      const nextHour = parseInt(nextParts[0], 10);
-      const nextMin = parseInt(nextParts[1], 10);
-      if (!isNaN(nextHour) && !isNaN(nextMin)) {
-        const projectedDate = new Date(actualStart);
-        projectedDate.setHours(nextHour, nextMin, 0, 0);
-        projectedDate.setTime(projectedDate.getTime() + delayMs);
-        const etaH = String(projectedDate.getHours()).padStart(2, '0');
-        const etaM = String(projectedDate.getMinutes()).padStart(2, '0');
-        etaHtml = `<span style="margin-left:16px; font-size:13px; color:var(--text-secondary);">
-          Race ${next.race_number} ETA: <strong>${etaH}:${etaM}</strong> (sched ${next.race_time})
-        </span>`;
-      }
+  let startedDelayMin = null;
+  let startedSchedDate = null;
+  let actualStart = null;
+  if (latest) {
+    const schedDate = parseSchedToday(latest.race_time);
+    if (schedDate) {
+      actualStart = new Date(effectiveStartIso(latest));
+      startedSchedDate = schedDate;
+      startedDelayMin = Math.round((actualStart.getTime() - schedDate.getTime()) / 60000);
     }
   }
 
-  if (delayMin === 0) {
-    panel.innerHTML = `
-      <div style="padding:8px 14px; border-radius:var(--radius-sm); background:var(--success-bg); color:var(--success-text); font-size:13px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-        <i class="material-icons" style="font-size:16px;">schedule</i>
-        <strong>On schedule</strong> — Race ${latest.race_number} started on time
-        ${etaHtml}
-      </div>`;
-  } else if (delayMin > 0) {
-    const severity = delayMin > 10 ? 'danger' : delayMin > 5 ? 'warning' : 'info';
-    panel.innerHTML = `
-      <div style="padding:8px 14px; border-radius:var(--radius-sm); background:var(--${severity}-bg); color:var(--${severity}-text); font-size:13px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-        <i class="material-icons" style="font-size:16px;">schedule</i>
-        <strong>+${delayMin} min behind</strong> — Race ${latest.race_number} started at ${isoToTime(latest.start_time)} (sched ${latest.race_time})
-        ${etaHtml}
-      </div>`;
-  } else {
-    panel.innerHTML = `
-      <div style="padding:8px 14px; border-radius:var(--radius-sm); background:var(--success-bg); color:var(--success-text); font-size:13px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-        <i class="material-icons" style="font-size:16px;">schedule</i>
-        <strong>${Math.abs(delayMin)} min ahead</strong> — Race ${latest.race_number} started early
-        ${etaHtml}
-      </div>`;
+  // y: upcoming overdue (next pending race's scheduled time vs now)
+  const pending = races
+    .filter(r => r.status === 'pending' && r.race_time && r.status !== 'cancelled')
+    .sort((a, b) => a.race_number - b.race_number);
+  const next = pending[0];
+  let upcomingDelayMin = null;
+  let nextSched = null;
+  if (next) {
+    const sched = parseSchedToday(next.race_time);
+    if (sched) {
+      nextSched = sched;
+      const now = Date.now();
+      const diffMin = Math.round((now - sched.getTime()) / 60000);
+      // Only counts as "delay" when wall clock has already passed the
+      // scheduled time. Future-scheduled races aren't "delayed".
+      if (diffMin > 0) upcomingDelayMin = diffMin;
+    }
   }
+
+  if (latest == null && next == null) { panel.innerHTML = ''; return; }
+
+  // Overall delay = max(x, y). Used for severity colour + headline.
+  const overall = Math.max(
+    startedDelayMin != null && startedDelayMin > 0 ? startedDelayMin : 0,
+    upcomingDelayMin != null ? upcomingDelayMin : 0,
+  );
+
+  // Build ETA for the next race using overall projection delay (carries
+  // forward today's delay onto the scheduled time).
+  let etaHtml = '';
+  if (next && nextSched && overall > 0) {
+    const projected = new Date(nextSched.getTime() + overall * 60000);
+    const etaH = String(projected.getHours()).padStart(2, '0');
+    const etaM = String(projected.getMinutes()).padStart(2, '0');
+    etaHtml = `<span style="margin-left:16px; font-size:13px; color:var(--text-secondary);">
+      Race ${next.race_number} ETA: <strong>${etaH}:${etaM}</strong> (sched ${next.race_time})
+    </span>`;
+  }
+
+  // Lines of detail — show whichever measure is available.
+  const lines = [];
+  if (startedDelayMin != null) {
+    if (startedDelayMin > 0) {
+      lines.push(`Race ${latest.race_number} started ${startedDelayMin} min late (sched ${latest.race_time}, actual ${isoToTime(effectiveStartIso(latest))})`);
+    } else if (startedDelayMin < 0) {
+      lines.push(`Race ${latest.race_number} started ${Math.abs(startedDelayMin)} min early`);
+    } else {
+      lines.push(`Race ${latest.race_number} started on time`);
+    }
+  }
+  if (upcomingDelayMin != null) {
+    lines.push(`Race ${next.race_number} overdue by ${upcomingDelayMin} min (sched ${next.race_time})`);
+  }
+
+  let severity, headline;
+  if (overall === 0) {
+    severity = 'success'; headline = 'On schedule';
+  } else if (overall > 10) {
+    severity = 'danger'; headline = `+${overall} min behind`;
+  } else if (overall > 5) {
+    severity = 'warning'; headline = `+${overall} min behind`;
+  } else {
+    severity = 'info'; headline = `+${overall} min behind`;
+  }
+
+  panel.innerHTML = `
+    <div style="padding:8px 14px; border-radius:var(--radius-sm); background:var(--${severity}-bg); color:var(--${severity}-text); font-size:13px; display:flex; align-items:flex-start; gap:8px; flex-wrap:wrap;">
+      <i class="material-icons" style="font-size:16px; margin-top:1px;">schedule</i>
+      <div style="flex:1; min-width:0;">
+        <div><strong>${headline}</strong> ${etaHtml}</div>
+        ${lines.map(l => `<div style="font-size:12px; opacity:0.9;">${l}</div>`).join('')}
+      </div>
+    </div>`;
 }
 
 async function renderNextRacePanel() {
@@ -688,15 +743,16 @@ async function renderRaces(sortMode = 'race', racesArg, divisionsArg) {
     const div = r.division_id ? divMap[r.division_id] : null;
     const divColor = div ? div.colour_hex || '#9ca3af' : '#9ca3af';
     const divName = div ? (div.division_name || '') : '';
+    const parityClass = r.race_number % 2 === 1 ? 'race-row-odd' : 'race-row-even';
     return `
-      <tr>
+      <tr class="${parityClass}">
         <td><strong>${r.race_number}</strong></td>
         <td>${r.race_title || '—'}</td>
         <td><span class="division-color" style="background:${divColor};"></span>${divName}</td>
         <td style="font-size:12px; color:var(--text-tertiary);">${r.race_time || ''}</td>
         <td style="text-align:center;">${statusIcon(r.teams_loaded, 'draw')}</td>
-        <td style="text-align:center;">${statusIcon(r.restart_time || r.start_time)}</td>
-        <td style="text-align:center;">${r.status === 'cancelled' ? '<span class="badge badge-cancelled">CANCEL</span>' : statusIcon(r.joyi_imported || (r.start_time && r.status !== 'started' && r.status !== 'pending') ? 'yes' : null, 'draw')}</td>
+        <td style="text-align:center;">${statusIcon(r.restart_time || effectiveStartIso(r))}</td>
+        <td style="text-align:center;">${r.status === 'cancelled' ? '<span class="badge badge-cancelled">CANCEL</span>' : statusIcon(r.joyi_imported || (effectiveStartIso(r) && r.status !== 'started' && r.status !== 'pending') ? 'yes' : null, 'draw')}</td>
         <td style="text-align:center;">${statusIcon(r.export_time)}${r.export_version > 1 ? ` <span style="font-size:10px; color:var(--warning);">v${r.export_version}</span>` : ''}</td>
         <td style="text-align:center;">${statusIcon(r.send_time)}</td>
         <td style="text-align:center; font-size:11px; color:var(--text-tertiary);">${r.scoring_flag !== 'N' && r.scoring_flag ? r.scoring_flag : ''}</td>

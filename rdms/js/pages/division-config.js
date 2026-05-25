@@ -851,9 +851,62 @@ async function showDivisionModal(editId) {
       : '';
     showToast(`Division "${name}" ${isNew ? 'added' : 'updated'}${assignMsg}`, 'success');
 
+    // Re-run the flowchart audit immediately — operators kept landing
+    // on the Flowchart page mid-event to discover conflicts that this
+    // save introduced (or didn't fix). Surface them right here so the
+    // edit-save loop is tight.
+    const auditAfter = await runFlowchartAudit();
+    const conflicts = (auditAfter?.conflicts || []).length;
+    const missing = (auditAfter?.missing || []).length;
+    if (conflicts > 0 || missing > 0) {
+      showAuditReviewModal(auditAfter);
+    }
+
     const tabContent = document.getElementById('setupTabContent');
     if (tabContent) renderDivisionsTab(tabContent);
   });
+}
+
+// Pop a quick review modal after division save when the audit found
+// conflicts or missing pieces. Non-blocking — just a heads-up so the
+// operator decides whether to keep the save or jump to fix it now.
+function showAuditReviewModal(audit) {
+  const existing = document.getElementById('divAuditReviewModal');
+  if (existing) existing.remove();
+  const modal = document.createElement('div');
+  modal.id = 'divAuditReviewModal';
+  modal.style.cssText = 'position:fixed; inset:0; background:var(--bg-overlay); z-index:9999; display:flex; align-items:center; justify-content:center; padding:20px;';
+  const conflictItems = (audit.conflicts || []).slice(0, 6).map(c => `<li>${c.message || c.type || 'conflict'}</li>`).join('');
+  const missingItems = (audit.missing || []).slice(0, 6).map(m => `<li>${m.message || m.type || 'missing'}</li>`).join('');
+  const more = ((audit.conflicts?.length || 0) + (audit.missing?.length || 0)) > 12
+    ? `<p style="font-size:12px; color:var(--text-tertiary); margin:6px 0 0;">… + more on Flowchart page</p>` : '';
+  modal.innerHTML = `
+    <div style="background:var(--bg-card); border-radius:var(--radius-lg); padding:22px 26px; max-width:540px; width:100%; box-shadow:var(--shadow-lg);">
+      <h5 style="font-size:16px; font-weight:600; margin:0 0 10px;">
+        <i class="material-icons" style="vertical-align:middle; color:var(--warning);">warning</i>
+        Division saved — but audit found issues
+      </h5>
+      ${conflictItems ? `<div style="font-size:13px; margin-bottom:10px;">
+        <strong style="color:var(--danger);">Conflicts</strong>
+        <ul style="margin:4px 0 0; padding-left:20px;">${conflictItems}</ul>
+      </div>` : ''}
+      ${missingItems ? `<div style="font-size:13px; margin-bottom:10px;">
+        <strong style="color:var(--warning);">Missing</strong>
+        <ul style="margin:4px 0 0; padding-left:20px;">${missingItems}</ul>
+      </div>` : ''}
+      ${more}
+      <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:14px;">
+        <button class="btn btn-ghost" id="auditReviewDismiss">Dismiss</button>
+        <a href="#/flowchart" class="btn btn-primary" id="auditReviewOpen">
+          <i class="material-icons" style="font-size:16px;">account_tree</i> Open Flowchart
+        </a>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  modal.querySelector('#auditReviewDismiss').addEventListener('click', () => modal.remove());
+  modal.querySelector('#auditReviewOpen').addEventListener('click', () => modal.remove());
+  modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
 }
 
 function renderRoundRow(round, idx) {

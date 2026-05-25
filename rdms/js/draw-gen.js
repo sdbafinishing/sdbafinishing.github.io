@@ -178,6 +178,14 @@ export async function generateNextRoundDraw(targetRaceNumber, opts = {}) {
     // Flip teams_loaded — the dashboard's "draw imported" indicator and
     // the next-race-signal flow both gate on this flag.
     race.teams_loaded = true;
+    // Rebuild draw_lanes from the resolved rows so the export's left
+    // column uses the just-resolved teams (not the original placeholder
+    // strings) without needing a separate draw re-import.
+    race.draw_lanes = updated.map(lr => ({
+      lane_number: lr.lane_number,
+      team_name: lr.team_name || '',
+      team_code: lr.team_code || '',
+    }));
     await saveRace(race);
   }
 

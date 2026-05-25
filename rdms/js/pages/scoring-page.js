@@ -4,9 +4,10 @@
  * Points: 1st = lane_count+1, Nth = lane_count-(N-1), DNS/DNF/DSQ/DQ = 0.
  * Tiebreak: RFinal × 1.001 > R2 × 1.00001 > R1 × 1.0000001.
  */
-import { getAllRaces, getAllDivisions, getLaneResults, getConfig } from '../db.js';
-import { positionToPoints } from '../race.js';
-import { timeToDisplay } from '../utils.js';
+import { getAllRaces, getAllDivisions, getLaneResults, getConfig, getRace, bulkSaveLaneResults } from '../db.js';
+import { positionToPoints, computeRankings } from '../race.js';
+import { timeToDisplay, showToast } from '../utils.js';
+import { broadcastChange } from '../app.js';
 
 export async function mountScoringPage(container) {
   const config = await getConfig();
@@ -60,7 +61,13 @@ export async function mountScoringPage(container) {
   tabsHtml += '</div>';
 
   container.innerHTML = `
-    <h4 style="font-size:18px; font-weight:600; margin-bottom:16px;">Scoring</h4>
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;">
+      <h4 style="font-size:18px; font-weight:600; margin:0;">Scoring</h4>
+      <button class="btn btn-outline btn-sm" id="recomputeScoringBtn" onclick="window._recomputeAllScoring()"
+              title="Re-runs rank computation against raw_time for every scored race and persists the result back to lane_results. Use when a race's scoring column is blank despite results being entered.">
+        <i class="material-icons" style="font-size:16px;">refresh</i> Recompute all scored races
+      </button>
+    </div>
     ${tabsHtml}
     <div id="scoringTabContent"></div>
   `;
@@ -73,12 +80,41 @@ export async function mountScoringPage(container) {
     await renderScoringDiv(divId, divGroups[divId], laneCount, timeMode, divisions);
   };
 
+  // Recompute handler — for races where computed_position is null in DB
+  // (e.g. exported before the auto-recompute landed) the scoring table
+  // shows blank columns despite times being entered. This button fetches
+  // each scored race's lane_results, re-runs computeRankings, and
+  // persists. Idempotent — running it on a clean DB is a no-op.
+  window._recomputeAllScoring = async () => {
+    const btn = document.getElementById('recomputeScoringBtn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Recomputing…'; }
+    try {
+      let touchedRaces = 0;
+      for (const r of scoredRaces) {
+        const lanes = await getLaneResults(r.race_number);
+        if (!lanes.length) continue;
+        computeRankings(lanes, timeMode, 0);
+        await bulkSaveLaneResults(lanes);
+        touchedRaces++;
+        broadcastChange('race-updated', { race_number: r.race_number });
+      }
+      showToast(`Recomputed positions for ${touchedRaces} scored race${touchedRaces === 1 ? '' : 's'}. Reloading…`, 'success', 3000);
+      // Reload the page so the scoring tables reflect fresh data.
+      setTimeout(() => mountScoringPage(container), 600);
+    } catch (err) {
+      showToast(`Recompute failed: ${err.message}`, 'error', 6000);
+    } finally {
+      if (btn) { btn.disabled = false; }
+    }
+  };
+
   // Render first division
   await renderScoringDiv(divIds[0], divGroups[divIds[0]], laneCount, timeMode, divisions);
 }
 
 export function unmountScoringPage() {
   delete window._scoringTab;
+  delete window._recomputeAllScoring;
 }
 
 async function renderScoringDiv(divId, scoredRaces, laneCount, timeMode, divisions) {
@@ -102,25 +138,48 @@ async function renderScoringDiv(divId, scoredRaces, laneCount, timeMode, divisio
   const roundResults = {};
   scoredRaces.forEach((r, i) => { roundResults[r.scoring_flag] = allLanes[i]; });
 
-  // Build team score map — keyed by team_name (since same teams race across rounds)
-  const teamScores = {};
+  // Build team score map — keyed by team_code (stable across rounds even
+  // when team_name on lane_results differs between draw-imported rows
+  // (long form) and joyi-imported rows (often a short abbreviated form).
+  // For display, prefer the team_name from race.draw_lanes (boat-lane
+  // mapped, joyi-safe). Falls back to the row's own team_name when no
+  // draw_lanes snapshot exists yet.
+  //
+  // We need each race's draw_lanes to resolve the display name by lane.
+  const drawLanesByRace = {};
+  for (const r of scoredRaces) {
+    const race = await getRace(r.race_number);
+    drawLanesByRace[r.race_number] = Array.isArray(race?.draw_lanes) ? race.draw_lanes : [];
+  }
 
+  const teamScores = {};
   for (const r of scoredRaces) {
     const lanes = roundResults[r.scoring_flag] || [];
     for (const lr of lanes) {
       if (!lr.team_name || lr.team_name === '---' || lr.team_name === '') continue;
 
-      if (!teamScores[lr.team_name]) {
-        teamScores[lr.team_name] = { team_name: lr.team_name, team_code: lr.team_code || '' };
+      // Resolve the canonical team_name from the source race's
+      // draw_lanes by matching boat lane (= lr.lane_input, falling back
+      // to lr.lane_number for legacy data where the operator never
+      // set lane_input).
+      const boatLane = parseInt(lr.lane_input, 10) || lr.lane_number;
+      const drawLanes = drawLanesByRace[r.race_number] || [];
+      const drawLane = drawLanes.find(dl => dl.lane_number === boatLane);
+      const displayName = (drawLane?.team_name) || lr.team_name;
+      const teamCode = (drawLane?.team_code) || lr.team_code || lr.team_name;
+      const key = teamCode || displayName;
+
+      if (!teamScores[key]) {
+        teamScores[key] = { team_name: displayName, team_code: teamCode || '' };
       }
 
       const points = positionToPoints(lr.computed_position, laneCount);
       const multiplier = multipliers[r.scoring_flag] || 1;
-      teamScores[lr.team_name][r.scoring_flag + '_points'] = points;
-      teamScores[lr.team_name][r.scoring_flag + '_weighted'] = points * multiplier;
-      teamScores[lr.team_name][r.scoring_flag + '_time'] = lr.raw_time || '';
-      teamScores[lr.team_name][r.scoring_flag + '_position'] = lr.computed_position;
-      teamScores[lr.team_name][r.scoring_flag + '_remarks'] = lr.remarks || '';
+      teamScores[key][r.scoring_flag + '_points'] = points;
+      teamScores[key][r.scoring_flag + '_weighted'] = points * multiplier;
+      teamScores[key][r.scoring_flag + '_time'] = lr.raw_time || '';
+      teamScores[key][r.scoring_flag + '_position'] = lr.computed_position;
+      teamScores[key][r.scoring_flag + '_remarks'] = lr.remarks || '';
     }
   }
 
@@ -164,7 +223,10 @@ async function renderScoringDiv(divId, scoredRaces, laneCount, timeMode, divisio
                   <th>Rank</th>
                   <th style="text-align:left;">Team Name</th>
                   <th>Code</th>
-                  ${scoredRaces.map(r => `<th class="scoring-header">${r.scoring_flag}<br><small>Race ${r.race_number}</small></th>`).join('')}
+                  ${scoredRaces.map(r => `<th class="scoring-header">
+                    ${r.scoring_flag}<br>
+                    <a href="#/race/${r.race_number}" style="font-size:11px; color:var(--accent); text-decoration:underline;" title="Open race ${r.race_number}">Race ${r.race_number}</a>
+                  </th>`).join('')}
                   <th class="scoring-header">Total</th>
                   <th class="scoring-header">Overall</th>
                 </tr>

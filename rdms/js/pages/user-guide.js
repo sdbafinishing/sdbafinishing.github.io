@@ -21,7 +21,11 @@ export function renderUserGuideTab(container) {
             <li><a href="javascript:void(0)" onclick="document.getElementById('g-signals').scrollIntoView({behavior:'smooth'})" style="color:var(--accent);">Signals & Automation</a></li>
             <li><a href="javascript:void(0)" onclick="document.getElementById('g-multi').scrollIntoView({behavior:'smooth'})" style="color:var(--accent);">Multi-Tab & Multi-Window</a></li>
             <li><a href="javascript:void(0)" onclick="document.getElementById('g-config').scrollIntoView({behavior:'smooth'})" style="color:var(--accent);">Config Reference</a></li>
+            <li><a href="javascript:void(0)" onclick="document.getElementById('g-dns').scrollIntoView({behavior:'smooth'})" style="color:var(--accent);">DNS / DSQ / DNF Handling</a></li>
             <li><a href="javascript:void(0)" onclick="document.getElementById('g-scoring').scrollIntoView({behavior:'smooth'})" style="color:var(--accent);">Scoring</a></li>
+            <li><a href="javascript:void(0)" onclick="document.getElementById('g-racepage-extras').scrollIntoView({behavior:'smooth'})" style="color:var(--accent);">Race-page extras (start toggle, ms precision, batch adj.)</a></li>
+            <li><a href="javascript:void(0)" onclick="document.getElementById('g-div-audit').scrollIntoView({behavior:'smooth'})" style="color:var(--accent);">Division audit on save</a></li>
+            <li><a href="javascript:void(0)" onclick="document.getElementById('g-sync').scrollIntoView({behavior:'smooth'})" style="color:var(--accent);">Supabase sync</a></li>
             <li><a href="javascript:void(0)" onclick="document.getElementById('g-nextround').scrollIntoView({behavior:'smooth'})" style="color:var(--accent);">Next Round Draws</a></li>
             <li><a href="javascript:void(0)" onclick="document.getElementById('g-export').scrollIntoView({behavior:'smooth'})" style="color:var(--accent);">Result Export (bundled template)</a></li>
             <li><a href="javascript:void(0)" onclick="document.getElementById('g-archive').scrollIntoView({behavior:'smooth'})" style="color:var(--accent);">Past Events Archive</a></li>
@@ -276,6 +280,40 @@ export function renderUserGuideTab(container) {
           <div class="gtip"><strong>All CSV in RDMS is UTF-8 with BOM.</strong> If you're handed a CSV from another tool that comes through as garbled Chinese, re-save it as UTF-8 first or it won't parse correctly on import.</div>
         </div>
 
+        <!-- 8b. DNS / DSQ / DNF handling -->
+        <div id="g-dns" class="gs">
+          <h4>8b. Status markers — DNS / DSQ / DNF / DQ</h4>
+          <p>Status markers replace a time when a boat didn't finish normally. The system handles four:</p>
+          <table class="gt">
+            <tr><th>Marker</th><th>Meaning</th><th>Place</th></tr>
+            <tr><td><code>DNS</code></td><td>Did Not Start</td><td>none</td></tr>
+            <tr><td><code>DNF</code></td><td>Did Not Finish</td><td>none</td></tr>
+            <tr><td><code>DSQ</code> / <code>DQ</code></td><td>Disqualified</td><td>none</td></tr>
+          </table>
+
+          <p><strong>How to enter:</strong> type into the <strong>Remarks</strong> column of the Results Input grid. Case-insensitive; suggestions appear in a dropdown.</p>
+
+          <p><strong>Joyi auto-marking</strong> — when Joyi reports a boat with blank time AND blank rank, that's its convention for DNS. RDMS auto-fills <code>remarks="DNS"</code> on import; the operator never needs to type it manually for those boats. Pure-zero entries (<code>00000</code> time, no rank) are filtered out entirely so they don't appear as a row.</p>
+
+          <p><strong>Effect on ranking</strong> — status rows are excluded from <code>computeRankings</code>: <code>effective_time_ms</code> and <code>computed_position</code> both become <code>null</code>. They neither take a place nor displace other finishers.</p>
+
+          <p><strong>Effect on validation</strong> — Rule #2 says every drawn boat must have either a <em>time</em> OR a <em>status</em>. If a boat has neither, the validation banner flags it ("Lane X has a team but no time and no status") AND the bottom output table highlights that row in amber with a ⚠ indicator. Add a status or a time to clear the flag.</p>
+
+          <p><strong>Effect on export</strong> — Status markers go into the <strong>Time column (D)</strong>, NOT the Remarks column. Format:</p>
+          <table class="gt">
+            <tr><th>Scenario</th><th>Time col (D)</th><th>Place col (E)</th><th>Remarks col (I)</th></tr>
+            <tr><td>Normal finish</td><td><code>1.25.00</code></td><td><code>3</code></td><td>(blank, or "Steered wide" etc.)</td></tr>
+            <tr><td>Normal + penalty</td><td><code>1.25.00</code></td><td><code>3</code></td><td><code>TP=2s</code></td></tr>
+            <tr><td>DSQ</td><td><code>DSQ</code></td><td>(blank)</td><td>(blank, or reason)</td></tr>
+            <tr><td>DNS</td><td><code>DNS</code></td><td>(blank)</td><td>(blank)</td></tr>
+            <tr><td>DNF</td><td><code>DNF</code></td><td>(blank)</td><td>(blank)</td></tr>
+          </table>
+
+          <p><strong>Effect on scoring</strong> — status rows score 0 points for that round. The team still has an entry on the Scoring tab; the cell for that round shows blank/dash.</p>
+
+          <div class="gtip"><strong>To re-rank after marking DSQ on a race that was already exported:</strong> re-export the race. The export now runs <code>computeRankings</code> + persists positions, so the scoreboard updates automatically.</div>
+        </div>
+
         <!-- 9. Scoring -->
         <div id="g-scoring" class="gs">
           <h4>9. Scoring</h4>
@@ -294,6 +332,39 @@ export function renderUserGuideTab(container) {
             <li>Points: 1st = lane_count + 1, 2nd = lane_count - 1, ... DNS/DNF/DSQ/DQ = 0.</li>
             <li>Tiebreaker: RFinal &times;1.001 &gt; R2 &times;1.00001 &gt; R1 &times;1.0000001.</li>
             <li>Flowchart: single line = tournament progression, double line (══) = scored series.</li>
+            <li><strong>Race-page output preview</strong> on a scored race adds three columns — <em>Score</em> (this round's points), <em>Total Score</em> (sum of weighted points across rounds), <em>Total Place</em> (overall division rank). <strong>Total Score + Total Place are greyed out until RFinal</strong> to avoid misleading mid-series numbers. Below the lane table, a reference scoreboard repeats the Scoring tab data scoped to this race's division.</li>
+            <li><strong>"Recompute all scored races"</strong> button on the Scoring tab — fetches each scored race's lane_results, re-runs <code>computeRankings</code>, and persists. Idempotent. Run this when a scored column shows blank despite times being entered.</li>
+            <li><strong>Race-page links</strong> — each round header on the Scoring table has a "Race N" link (suppressed when N is the current race).</li>
+          </ul>
+        </div>
+
+        <!-- 9b. Race-page features added this season -->
+        <div id="g-racepage-extras" class="gs">
+          <h4>9b. Race page — recent additions</h4>
+          <ul>
+            <li><strong>Use RDMS / use Joyi start time toggle</strong> — when both <code>start_time</code> (operator click) and <code>joyi_start_time</code> (.lcd-derived) exist, a small button next to the start cell flips the preference. Default = Joyi wins. Per-race; persists on race record as <code>prefer_manual_start</code>.</li>
+            <li><strong>Joyi thousandth-precision tie-break</strong> — when Joyi exports times with 3 decimal digits, <code>raw_time_ms</code> captures the full precision. Ranking uses ms; display still truncates to hundredths. Two boats with displayed time <code>1:25.14</code> but ms 85146 vs 85143 get distinct places. With hundredths-only sources, genuine ties stand.</li>
+            <li><strong>Batch adjustment now persists</strong> — toggling "Apply batch adjustment" saves <code>batch_override_enabled</code> + <code>batch_delta_ms</code> on the race record. The exported .xls shifts every time by the delta; reloading the page restores the toggle state.</li>
+            <li><strong>Tie + tight-finish warnings</strong> — duplicate times surface a "Lanes X, Y: same time" warning. Gaps ≤ 50ms (5 hundredths) between consecutive finishers fire a "tight finish" warning. Soft block only — export modal then asks for explicit confirmation.</li>
+            <li><strong>Missing-result highlight</strong> — drawn boats with no time AND no status (DNS/DSQ/etc) get an amber row in the output preview with "⚠ no time/status" + a matching red banner. Each team must have time OR a status to clear.</li>
+            <li><strong>Prev / Next navigation</strong> — first race shows a disabled <code>&lt;</code> placeholder; last race shows a disabled <code>&gt;</code> placeholder. Button layout stays consistent across races.</li>
+          </ul>
+        </div>
+
+        <!-- 9c. Division config audit on save -->
+        <div id="g-div-audit" class="gs">
+          <h4>9c. Division audit on save</h4>
+          <p>Setup → Divisions → Edit. Saving a division now re-runs the flowchart audit immediately. If any <strong>conflicts</strong> (duplicate-rank-source, cross-division race, etc.) or <strong>missing</strong> data are detected, a review modal appears with the issue list and a button straight to the Flowchart page. Dismissible — the save itself always completes; the modal is just a heads-up so issues aren't discovered later when checking Flowchart.</p>
+        </div>
+
+        <!-- 9d. Supabase sync hardening -->
+        <div id="g-sync" class="gs">
+          <h4>9d. Supabase sync</h4>
+          <p>Race state changes (start / finish / restart / cancel / reset / Joyi import / results entry / export) all enqueue Supabase upserts. The sync interval flushes every 30 s; <code>queueRaceSync</code> dedupes by table+key so repeated edits collapse to one write per flush cycle.</p>
+          <ul>
+            <li><strong>"⤴ Sync now" button</strong> — Setup → Supabase section. Force-pushes every race + event_config to Supabase, ignoring the local queue. Recovery path when the queue was lost (browser data cleared) or sync was misconfigured at boot. Shows the per-batch write count and any error message inline.</li>
+            <li><strong>Sync service restarts on Save</strong> — saving Setup config now restarts the periodic sync service. Operators who paste the Supabase URL post-boot don't have to reload the page anymore.</li>
+            <li><strong>Errors are surfaced</strong> — sync failures used to log silently to the console. Failed writes now bubble through <code>forceFullSync</code> result + the in-app toast so RLS / auth issues show up.</li>
           </ul>
         </div>
 

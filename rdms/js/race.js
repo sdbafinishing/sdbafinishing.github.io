@@ -26,11 +26,18 @@ export function getEffectiveStartTime(race) {
   const joyi = race.joyi_start_time || null;
   const manual = race.start_time || null;
   const restart = race.restart_time || null;
-  // If the operator restarted, the timer baseline is restart_time; the
-  // canonical "start" still respects the joyi-over-manual preference for
-  // the record.
-  const start = joyi || manual;
-  const source = joyi ? 'joyi' : (manual ? 'manual' : null);
+  // Per-race override: when race.prefer_manual_start is true, the
+  // operator-clicked time wins even if joyi has a value. Default is
+  // joyi-over-manual (joyi is sub-second accurate when transport
+  // preserves mtime; the manual click is whatever the operator's
+  // reaction allowed).
+  let start, source;
+  if (race.prefer_manual_start && manual) {
+    start = manual; source = 'manual';
+  } else {
+    start = joyi || manual;
+    source = joyi ? 'joyi' : (manual ? 'manual' : null);
+  }
   return { start, source, restartedFrom: restart };
 }
 
@@ -51,6 +58,24 @@ export function computeRankings(laneResults, timeMode = 'mss00', batchDeltaMs = 
       return;
     }
 
+    // Treat all-zero time ("00000" / "000000") as no-time. Joyi exports
+    // a zero string for DNS / empty rows; without this they'd rank as
+    // 1st place (0 ms is faster than any real time). Also covers any
+    // grid row the operator left at its default placeholder.
+    //
+    // Use lr.raw_time_ms when present (full precision from Joyi
+    // thousandths) — that's what breaks ties when two boats share the
+    // same displayed hundredth. Fall back to timeToMs(raw_time) for
+    // operator-typed rows (hundredth-only) and legacy data.
+    const rawMs = lr.raw_time_ms != null && Number.isFinite(lr.raw_time_ms)
+      ? lr.raw_time_ms
+      : timeToMs(lr.raw_time, timeMode);
+    if (rawMs === 0 || rawMs == null) {
+      lr.effective_time_ms = null;
+      lr.computed_position = null;
+      return;
+    }
+
     // DSQ/DQ/DNF/DNS get no position
     if (DISQUALIFYING_REMARKS.includes(lr.remarks)) {
       lr.effective_time_ms = null;
@@ -58,7 +83,15 @@ export function computeRankings(laneResults, timeMode = 'mss00', batchDeltaMs = 
       return;
     }
 
-    const rawMs = timeToMs(lr.raw_time, timeMode);
+    // Dummy / placeholder team rows ("---") don't represent a real boat
+    // and shouldn't be ranked even if some leftover time sits in raw_time.
+    const teamName = (lr.team_name || '').trim();
+    if (teamName === '---' || teamName === '—') {
+      lr.effective_time_ms = null;
+      lr.computed_position = null;
+      return;
+    }
+
     const penaltyMs = lr.penalty_time ? (parseFloat(lr.penalty_time) * 1000) : 0;
     lr.effective_time_ms = rawMs + penaltyMs + batchDeltaMs;
   });
@@ -157,14 +190,40 @@ export function validateRace(race, laneResults, config) {
     seenLanes.add(lane);
   });
 
-  // 2. Each active lane with a team must have time OR remark
-  activeLanes.forEach(lr => {
-    if (lr.team_name && lr.team_name !== '---' && lr.team_name !== '') {
-      if (!lr.raw_time && !lr.remarks) {
-        pushGrouped(errorGroups, 'Lane', lr.lane_number, 'has a team but no time and no remark');
+  // 2. Each DRAWN boat must have either a time OR a status (remark).
+  //
+  // Pre-Joyi this was equivalent to "each row with a team_name needs
+  // data" because lane_number = boat lane in the data model. After
+  // Joyi import the grid is in finish-order, so lane_number = grid row
+  // position, not boat lane, and the old check no longer catches
+  // missing boats. Use race.draw_lanes (the boat-lane → team snapshot)
+  // as the authoritative list of "who's supposed to race", then look
+  // for a grid row whose lane_input refers to that boat.
+  const drawnBoats = Array.isArray(race?.draw_lanes) && race.draw_lanes.length > 0
+    ? race.draw_lanes.filter(dl => {
+        const tn = (dl?.team_name || '').trim();
+        return tn && tn !== '---';
+      })
+    : null;
+  if (drawnBoats) {
+    for (const dl of drawnBoats) {
+      const boatLane = dl.lane_number;
+      const matchingRow = activeLanes.find(lr => parseInt(lr.lane_input, 10) === boatLane);
+      const hasData = matchingRow && (matchingRow.raw_time || matchingRow.remarks);
+      if (!hasData) {
+        pushGrouped(errorGroups, 'Lane', boatLane, 'has a team but no time and no status (DSQ/DNS/DNF)');
       }
     }
-  });
+  } else {
+    // Legacy path: no draw_lanes snapshot. Fall back to the old check.
+    activeLanes.forEach(lr => {
+      if (lr.team_name && lr.team_name !== '---' && lr.team_name !== '') {
+        if (!lr.raw_time && !lr.remarks) {
+          pushGrouped(errorGroups, 'Lane', lr.lane_number, 'has a team but no time and no status (DSQ/DNS/DNF)');
+        }
+      }
+    });
+  }
 
   // 3. Validate time format
   activeLanes.forEach(lr => {
@@ -194,6 +253,42 @@ export function validateRace(race, laneResults, config) {
   for (let i = 0; i < withTimes.length - 1; i++) {
     if (withTimes[i].rawMs > withTimes[i + 1].rawMs) {
       pushGrouped(warningGroups, 'Input row', i + 1, `time is slower than row ${i + 2} — check input order`);
+    }
+  }
+
+  // 5b. Duplicate-time detection — two boats with the SAME raw_time
+  // (and not DSQ'd) will collapse to the same place by rank semantics.
+  // Soft block: surface as warning so the operator can verify (a
+  // genuine photo-finish tie is rare but legal). Export modal will
+  // require confirmation.
+  const timeBuckets = new Map();
+  withTimes.forEach(({ lr, rawMs }) => {
+    // Skip DSQ-class rows (those don't get a position regardless).
+    if (DISQUALIFYING_REMARKS.includes(lr.remarks)) return;
+    if (!timeBuckets.has(rawMs)) timeBuckets.set(rawMs, []);
+    timeBuckets.get(rawMs).push(lr.lane_input || lr.lane_number);
+  });
+  for (const [, lanes] of timeBuckets) {
+    if (lanes.length > 1) {
+      const lanesStr = lanes.join(', ');
+      pushGrouped(warningGroups, 'Lane', lanesStr,
+        `same time — will share a place. Verify with photo finish.`);
+    }
+  }
+
+  // 5c. Tight finish banner data — collect pairs of consecutive
+  // finishers whose gap is ≤ 50 ms (5 hundredths). Surface as a soft
+  // warning (visual banner is rendered by the race page).
+  for (let i = 0; i < withTimes.length - 1; i++) {
+    const a = withTimes[i];
+    const b = withTimes[i + 1];
+    if (DISQUALIFYING_REMARKS.includes(a.lr.remarks) || DISQUALIFYING_REMARKS.includes(b.lr.remarks)) continue;
+    const gap = Math.abs(b.rawMs - a.rawMs);
+    if (gap > 0 && gap <= 50) {
+      const laneA = a.lr.lane_input || a.lr.lane_number;
+      const laneB = b.lr.lane_input || b.lr.lane_number;
+      pushGrouped(warningGroups, 'Lane', `${laneA} & ${laneB}`,
+        `tight finish — ${(gap / 10).toFixed(2)} hundredths apart. Check photo finish.`);
     }
   }
 
@@ -271,4 +366,73 @@ export function positionToPoints(position, laneCount) {
   if (!position || position < 1) return 0;
   if (position === 1) return laneCount + 1;
   return laneCount - (position - 1);
+}
+
+/**
+ * Compute the cross-round scoring context for the given race's division.
+ *
+ * Caller provides:
+ *   - race: the focal race
+ *   - allRaces, allLaneResultsByRace (Map<raceNumber, lane_results[]>): all loaded races/lanes
+ *   - laneCount
+ *
+ * Returns null if the race isn't scored. Otherwise an object with:
+ *   scoringFlag, scoredRaces (sorted R1→RFinal), multiplier (for this round),
+ *   teamTotals: Map<team_code, { team_name, team_code,
+ *     perRound: { R1?: {pts, wtd, position, raw_time, remarks}, ... },
+ *     total_weighted, overall_rank }>
+ *
+ * Pure function — no DB calls — so it's safe to call from both the
+ * race-page and the export pipeline.
+ */
+export function computeDivisionScoring(race, allRaces, allLaneResultsByRace, laneCount) {
+  if (!race?.scoring_flag || race.scoring_flag === 'N' || !race.division_id) return null;
+  const order = { 'R1': 1, 'R2': 2, 'RFinal': 3 };
+  const scoredRaces = allRaces
+    .filter(r => r.division_id === race.division_id && r.scoring_flag && r.scoring_flag !== 'N')
+    .sort((a, b) => (order[a.scoring_flag] || 99) - (order[b.scoring_flag] || 99));
+  if (scoredRaces.length === 0) return null;
+  const multipliers = { 'R1': 1.0000001, 'R2': 1.00001, 'RFinal': 1.001 };
+
+  const teamTotals = new Map();
+  for (const r of scoredRaces) {
+    const lanes = allLaneResultsByRace.get(r.race_number) || [];
+    const drawLanes = Array.isArray(r.draw_lanes) ? r.draw_lanes : [];
+    for (const lr of lanes) {
+      if (!lr.team_name || lr.team_name === '---' || lr.team_name === '') continue;
+      const boatLane = parseInt(lr.lane_input, 10) || lr.lane_number;
+      const drawTeam = drawLanes.find(dl => dl.lane_number === boatLane);
+      const displayName = drawTeam?.team_name || lr.team_name;
+      const teamCode = drawTeam?.team_code || lr.team_code || lr.team_name;
+      const key = teamCode || displayName;
+      if (!teamTotals.has(key)) {
+        teamTotals.set(key, { team_name: displayName, team_code: teamCode || '', perRound: {}, total_weighted: 0 });
+      }
+      const pts = positionToPoints(lr.computed_position, laneCount);
+      const mult = multipliers[r.scoring_flag] || 1;
+      const wtd = pts * mult;
+      const entry = teamTotals.get(key);
+      entry.perRound[r.scoring_flag] = {
+        pts, wtd, position: lr.computed_position, raw_time: lr.raw_time || '', remarks: lr.remarks || '',
+      };
+      entry.total_weighted += wtd;
+    }
+  }
+
+  const sortedTeams = [...teamTotals.values()].sort((a, b) => b.total_weighted - a.total_weighted);
+  sortedTeams.forEach((t, i) => {
+    if (i > 0 && t.total_weighted === sortedTeams[i - 1].total_weighted) {
+      t.overall_rank = sortedTeams[i - 1].overall_rank;
+    } else {
+      t.overall_rank = i + 1;
+    }
+  });
+
+  return {
+    scoringFlag: race.scoring_flag,
+    multiplier: multipliers[race.scoring_flag] || 1,
+    laneCount,
+    scoredRaces,
+    teamTotals,
+  };
 }

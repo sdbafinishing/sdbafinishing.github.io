@@ -4,7 +4,7 @@
  */
 import { getRace, saveRace, getLaneResults, saveLaneResult, bulkSaveLaneResults, getConfig, saveTimesheet, getTimesheet, getAllRaces, getAllDivisions } from '../db.js';
 import { ExcelGrid } from '../grid.js';
-import { computeRankings, calcBatchDelta, validateRace, getEffectiveStartTime } from '../race.js';
+import { computeRankings, calcBatchDelta, validateRace, getEffectiveStartTime, positionToPoints } from '../race.js';
 import { timeToMs, msToTime, timeToDisplay, isValidTime, nowISO, nowDisplay, isoToTime, showToast } from '../utils.js';
 import { broadcastChange } from '../app.js';
 import { showExportModal } from '../export.js';
@@ -37,6 +37,118 @@ let drawsByLane = {};
 // or manual entry) only shows the delta until the operator flips this on.
 let batchOverrideEnabled = false;
 
+// Scoring context for the currently-mounted race — populated only when
+// the race has a non-N scoring_flag. Drives the extra Score / Total /
+// Overall Place columns in the output table + the reference scoreboard
+// rendered below it. null when the race isn't scored.
+let scoringCtx = null;
+
+// Build (or refresh) the scoring context for the current race.
+// Returns null when not applicable (race is N / no scored races in
+// division yet). Otherwise:
+//   {
+//     scoringFlag,        // 'R1' | 'R2' | 'RFinal'
+//     multiplier,         // weighting used in the tiebreak (sum)
+//     laneCount,
+//     scoredRaces,        // [race objects in division with R*-flag] sorted R1/R2/RFinal
+//     teamTotals,         // Map<team_code, { team_name, team_code, perRound:{R1:{pts,wtd,pos,raw_time,remarks}, ...}, total_weighted, overall_rank }>
+//   }
+async function buildScoringContext(race, configData) {
+  if (!race?.scoring_flag || race.scoring_flag === 'N') return null;
+  if (!race.division_id) return null;
+  const laneCount = configData?.lane_count || 6;
+  const allRaces = await getAllRaces();
+  const scoredRaces = allRaces
+    .filter(r => r.division_id === race.division_id && r.scoring_flag && r.scoring_flag !== 'N')
+    .sort((a, b) => {
+      const order = { 'R1': 1, 'R2': 2, 'RFinal': 3 };
+      return (order[a.scoring_flag] || 99) - (order[b.scoring_flag] || 99);
+    });
+  if (scoredRaces.length === 0) return null;
+  const multipliers = { 'R1': 1.0000001, 'R2': 1.00001, 'RFinal': 1.001 };
+
+  // Aggregate teams across all scored rounds — keyed by team_code (the
+  // join key that survives Joyi's team_name overwrite). Display name
+  // comes from race.draw_lanes per the audit fix.
+  const drawLanesByRace = {};
+  for (const r of scoredRaces) {
+    const rec = allRaces.find(x => x.race_number === r.race_number);
+    drawLanesByRace[r.race_number] = Array.isArray(rec?.draw_lanes) ? rec.draw_lanes : [];
+  }
+
+  const teamTotals = new Map();
+  const { getLaneResults: _getLanes } = await import('../db.js');
+  for (const r of scoredRaces) {
+    const lanes = await _getLanes(r.race_number);
+    for (const lr of lanes) {
+      if (!lr.team_name || lr.team_name === '---' || lr.team_name === '') continue;
+      const boatLane = parseInt(lr.lane_input, 10) || lr.lane_number;
+      const drawTeam = drawLanesByRace[r.race_number].find(dl => dl.lane_number === boatLane);
+      const displayName = drawTeam?.team_name || lr.team_name;
+      const teamCode = drawTeam?.team_code || lr.team_code || lr.team_name;
+      const key = teamCode || displayName;
+      if (!teamTotals.has(key)) {
+        teamTotals.set(key, { team_name: displayName, team_code: teamCode || '', perRound: {}, total_weighted: 0 });
+      }
+      const pts = positionToPoints(lr.computed_position, laneCount);
+      const mult = multipliers[r.scoring_flag] || 1;
+      const wtd = pts * mult;
+      const entry = teamTotals.get(key);
+      entry.perRound[r.scoring_flag] = {
+        pts, wtd, position: lr.computed_position, raw_time: lr.raw_time || '', remarks: lr.remarks || '',
+      };
+      entry.total_weighted += wtd;
+    }
+  }
+
+  // Overall rank
+  const sortedTeams = [...teamTotals.values()].sort((a, b) => b.total_weighted - a.total_weighted);
+  sortedTeams.forEach((t, i) => {
+    if (i > 0 && t.total_weighted === sortedTeams[i - 1].total_weighted) {
+      t.overall_rank = sortedTeams[i - 1].overall_rank;
+    } else {
+      t.overall_rank = i + 1;
+    }
+  });
+
+  return {
+    scoringFlag: race.scoring_flag,
+    multiplier: multipliers[race.scoring_flag] || 1,
+    laneCount,
+    scoredRaces,
+    teamTotals,
+  };
+}
+
+// Rebuild drawsByLane from the current race + lane_results. Must be called
+// after any import that changes either race.draw_lanes (draw import,
+// next-round resolve) or lane_results (joyi import) so the output preview
+// reflects fresh data without remounting the page.
+//
+// Source of truth, in order:
+//   1. race.draw_lanes (set at draw-import time; survives joyi imports)
+//   2. lane_results.team_name (fallback for legacy races without the
+//      draw_lanes field).
+function rebuildDrawsByLane(race, laneResults) {
+  drawsByLane = {};
+  const drawLanesMap = {};
+  if (Array.isArray(race?.draw_lanes)) {
+    race.draw_lanes.forEach(dl => {
+      if (dl?.lane_number) drawLanesMap[dl.lane_number] = dl;
+    });
+  }
+  (laneResults || []).forEach(lr => {
+    if (lr.lane_number) {
+      const drawTeam = drawLanesMap[lr.lane_number];
+      drawsByLane[lr.lane_number] = {
+        team_code: drawTeam ? (drawTeam.team_code || '') : (lr.team_code || ''),
+        team_name: drawTeam ? (drawTeam.team_name || '') : (lr.team_name || ''),
+        joyi_rank: lr.joyi_rank ?? null,
+      };
+    }
+  });
+}
+
 export async function mountRacePage(container, params) {
   // Defensive: clean up any previous mount that wasn't properly unmounted
   unmountRacePage();
@@ -51,6 +163,9 @@ export async function mountRacePage(container, params) {
 
   configData = await getConfig();
   raceData = await getRace(raceNumber);
+  // Build scoring context up-front; renderOutput uses it to add the
+  // Score / Total / Overall Place columns when the race is scored.
+  scoringCtx = raceData ? await buildScoringContext(raceData, configData) : null;
 
   if (!raceData) {
     container.innerHTML = `<div class="card"><p>Race ${raceNumber} not found. Import draws first.</p></div>`;
@@ -78,18 +193,16 @@ export async function mountRacePage(container, params) {
   const divColour = divisionInfo?.colour_hex || '#9ca3af';
   const divLabel = divisionInfo ? (divisionInfo.division_name || '') : '';
 
+  // Restore persisted batch-adjustment state so the toggle + delta
+  // survive a page reload / navigation away-and-back. Without this the
+  // export would silently lose the operator's batch override on the
+  // next session.
+  batchOverrideEnabled = !!raceData?.batch_override_enabled;
+  batchDeltaMs = Number.isFinite(raceData?.batch_delta_ms) ? raceData.batch_delta_ms : 0;
+
   // Snapshot draws keyed by the actual boat lane. Output uses this so changing
   // lane_input remaps the team correctly (previously the row index won).
-  drawsByLane = {};
-  laneResults.forEach(lr => {
-    if (lr.lane_number) {
-      drawsByLane[lr.lane_number] = {
-        team_code: lr.team_code || '',
-        team_name: lr.team_name || '',
-        joyi_rank: lr.joyi_rank ?? null,
-      };
-    }
-  });
+  rebuildDrawsByLane(raceData, laneResults);
 
   // Detect R{n}P{n} placeholders in either column (templates park them in
   // team_name on some events, team_code on others). When present, expose
@@ -184,11 +297,14 @@ export async function mountRacePage(container, params) {
          Buttons only render when the adjacent race actually exists in
          the loaded set — no more "Race N not found" dead-ends. -->
     <div class="race-page-nav" style="display:flex; gap:6px; margin-bottom:6px; flex-wrap:wrap; align-items:center;">
-      ${prevRaceNum != null ? `<a href="#/race/${prevRaceNum}" class="btn btn-outline btn-sm" style="${prevRaceNum % 2 === 1 ? 'background: rgba(250, 204, 21, 0.12);' : ''}"><i class="material-icons" style="font-size:16px;">chevron_left</i> Race ${prevRaceNum}</a>` : ''}
-      ${nextRaceNum != null ? `<a href="#/race/${nextRaceNum}" class="btn btn-outline btn-sm" style="${nextRaceNum % 2 === 1 ? 'background: rgba(250, 204, 21, 0.12);' : ''}">Race ${nextRaceNum} <i class="material-icons" style="font-size:16px;">chevron_right</i></a>` : ''}
+      ${prevRaceNum != null
+        ? `<a href="#/race/${prevRaceNum}" class="btn btn-outline btn-sm" style="${prevRaceNum % 2 === 1 ? 'background: rgba(250, 204, 21, 0.12);' : ''}"><i class="material-icons" style="font-size:16px;">chevron_left</i> Race ${prevRaceNum}</a>`
+        : `<button class="btn btn-outline btn-sm" disabled style="opacity:0.4;" title="No previous race"><i class="material-icons" style="font-size:16px;">chevron_left</i></button>`}
+      ${nextRaceNum != null
+        ? `<a href="#/race/${nextRaceNum}" class="btn btn-outline btn-sm" style="${nextRaceNum % 2 === 1 ? 'background: rgba(250, 204, 21, 0.12);' : ''}">Race ${nextRaceNum} <i class="material-icons" style="font-size:16px;">chevron_right</i></a>`
+        : `<button class="btn btn-outline btn-sm" disabled style="opacity:0.4;" title="No next race"><i class="material-icons" style="font-size:16px;">chevron_right</i></button>`}
       <span style="border-left:1px solid var(--border); height:20px; margin:0 4px;"></span>
       <button class="btn btn-ghost btn-sm" onclick="window._printDraw()" title="Print draw"><i class="material-icons" style="font-size:16px;">description</i> Print Draw</button>
-      <button class="btn btn-ghost btn-sm" onclick="window._openDraw()" title="Open draw file"><i class="material-icons" style="font-size:16px;">folder_open</i> Open Draw</button>
       <button class="btn btn-ghost btn-sm" onclick="window._photoFinish()" title="Open Joyi photo-finish image (.lcd + .jyd)">
         <i class="material-icons" style="font-size:16px;">photo_camera</i> Photo Finish
       </button>
@@ -380,14 +496,37 @@ function refreshJoyiPendingChip() {
 }
 
 // Listen for cross-tab race-updated broadcasts (joyi-watch finished an
-// LCD fetch in another tab → refresh our display).
+// LCD fetch in another tab, or auto-imported joyi results in the same
+// tab → refresh our display in place, no full remount needed).
 async function _onRaceUpdateRefresh(ev) {
   const detail = ev.detail || {};
   if (detail.race_number !== raceNumber) return;
-  // Reload race data and re-render the affected pieces.
+  // Reload race + lane_results and re-render the affected pieces.
   const fresh = await getRace(raceNumber);
   if (!fresh) return;
   raceData = fresh;
+
+  // Pull the freshest lane_results from DB and push them through the grid
+  // + drawsByLane map + bottom output preview. Without this, the joyi-
+  // watch's background import lands in the DB but the operator only
+  // sees the new times after navigating away and back.
+  if (grid) {
+    try {
+      const freshLanes = await getLaneResults(raceNumber);
+      const newGridData = buildGridData(freshLanes, configData?.lane_count || 6);
+      for (let i = 0; i < newGridData.length; i++) {
+        grid.setRowData(i, newGridData[i]);
+      }
+      rebuildDrawsByLane(raceData, freshLanes);
+      // Rebuild scoring context too — joyi import on this race changes
+      // computed_position, which feeds the Score/Total columns.
+      scoringCtx = await buildScoringContext(raceData, configData);
+      recalculate();
+    } catch (err) {
+      console.warn('Race-page refresh failed:', err);
+    }
+  }
+
   const startEl = document.getElementById('raceStartTime');
   if (startEl) startEl.innerHTML = renderStartTimeText(raceData);
   renderStartStopButton();
@@ -434,6 +573,7 @@ export function unmountRacePage() {
   batchDeltaMs = 0;
   batchOverrideEnabled = false;
   drawsByLane = {};
+  scoringCtx = null;
 
   // Clean up window handlers
   delete window._startRace;
@@ -446,6 +586,7 @@ export function unmountRacePage() {
   delete window._resolvePlaceholders;
   delete window._importJoyi;
   delete window._finishBackup;
+  delete window._toggleStartSource;
   delete window._exportAndSend;
   delete window._exportOnly;
   delete window._sendOnly;
@@ -548,6 +689,7 @@ function buildGridData(laneResults, laneCount) {
     data.push({
       lane_input: lr.lane_input || '',
       raw_time: lr.raw_time || '',
+      raw_time_ms: lr.raw_time_ms ?? null,
       penalty_time: lr.penalty_time || '',
       display_time: '',
       computed_position: null,
@@ -570,6 +712,11 @@ function onCellChange(rowIndex, colKey, newValue, rowData) {
   // Update display time
   if (colKey === 'raw_time') {
     rowData.display_time = timeToDisplay(newValue, timeMode);
+    // Operator overrode the time — clear any joyi-imported full-precision
+    // ms so the new hundredth-precision input drives ranking. Without
+    // this, the stale ms value would silently keep ranking by an old
+    // thousandth even after manual correction.
+    rowData.raw_time_ms = null;
   }
 
   // First non-empty entry in raw_time or remarks → fire result-entry signals
@@ -749,6 +896,26 @@ function applyRowValidationStyles(data) {
 
 // Use isValidTime from utils.js (imported at top) — no duplicate needed
 
+// Debounced Supabase sync trigger — race-page state changes happen fast
+// (every keystroke debounces to persistCurrentRow), but Supabase upserts
+// should batch. 3-second debounce on the queue-then-flush call;
+// queueRaceSync's own dedup keeps the actual writes minimal.
+let syncDebounceTimer = null;
+function kickSync(rn = raceNumber) {
+  if (!rn) return;
+  clearTimeout(syncDebounceTimer);
+  syncDebounceTimer = setTimeout(async () => {
+    try {
+      const { queueRaceSync } = await import('../sync.js');
+      await queueRaceSync(rn);
+    } catch (err) {
+      // Sync is best-effort from the race page — the periodic 30s
+      // interval will retry. Don't surface to operator.
+      console.warn('kickSync failed:', err);
+    }
+  }, 3000);
+}
+
 async function persistCurrentRow(rowIndex) {
   const data = grid.getData();
   const row = data[rowIndex];
@@ -757,6 +924,7 @@ async function persistCurrentRow(rowIndex) {
     lane_number: row.lane_number,
     lane_input: row.lane_input,
     raw_time: row.raw_time,
+    raw_time_ms: row.raw_time_ms ?? null,
     penalty_time: row.penalty_time,
     remarks: row.remarks,
     computed_position: row.computed_position,
@@ -765,6 +933,9 @@ async function persistCurrentRow(rowIndex) {
     team_name: row.team_name,
     joyi_rank: row.joyi_rank,
   });
+  // Surface results changes to Supabase. Debounced so a typing burst
+  // collapses to one sync attempt.
+  kickSync();
 }
 
 function renderOutput(data) {
@@ -795,11 +966,20 @@ function renderOutput(data) {
     const teamCode = draw.team_code || '';
 
     if (!r) {
-      rowsHtml.push(`<tr>
+      // A drawn boat (has team_name) with no input row pointing at this
+      // lane = missing result. Highlight the row in amber so the
+      // operator spots it instantly and inputs a placeholder (DNS / DNF
+      // / time). The validation banner repeats the warning textually.
+      const missing = teamName && teamName !== '---';
+      const rowStyle = missing ? ' style="background:rgba(245, 158, 11, 0.22);"' : '';
+      const missingTag = missing ? ' <span style="font-size:10px; color:var(--warning);">⚠ no time/status</span>' : '';
+      const scoreCells = scoringCtx ? `<td></td><td></td><td></td>` : '';
+      rowsHtml.push(`<tr${rowStyle}>
         <td>${lane}</td>
         <td></td>
         <td></td>
-        <td></td>
+        ${scoreCells}
+        <td>${missingTag}</td>
         <td class="team-name">${teamName}</td>
         <td>${teamCode}</td>
       </tr>`);
@@ -811,24 +991,121 @@ function renderOutput(data) {
     if (r.penalty_time) remarksDisplay.push(`TP=${r.penalty_time}s`);
     if (r.remarks) remarksDisplay.push(r.remarks);
 
+    // Time display:
+    //   - When the operator has enabled "Apply batch adjustment", show the
+    //     adjusted time (raw_time + batch delta + penalty) — that's the
+    //     effective time used for ranking. The raw time stays in the input
+    //     grid above. Output table is the "what gets exported" preview.
+    //   - Otherwise just format raw_time.
+    let timeStr;
+    if (batchOverrideEnabled && r.effective_time_ms != null) {
+      timeStr = timeToDisplay(msToTime(r.effective_time_ms, timeMode), timeMode);
+    } else {
+      timeStr = timeToDisplay(r.raw_time, timeMode);
+    }
+
+    // Scoring columns (only when the race is on a scored chain).
+    //   Score = this round's points (always shown).
+    //   Total Score + Total Place = cumulative across rounds. Only
+    //   make sense AFTER RFinal is complete; before that they're
+    //   partial mid-series numbers that mislead. Render greyed-out
+    //   placeholders ("—") until the current race IS the RFinal.
+    let scoreCells = '';
+    if (scoringCtx) {
+      const teamEntry = scoringCtx.teamTotals.get(teamCode);
+      const thisPts = teamEntry?.perRound?.[scoringCtx.scoringFlag]?.pts ?? '';
+      const isFinalRound = scoringCtx.scoringFlag === 'RFinal';
+      const totalScore = isFinalRound && teamEntry ? Math.round(teamEntry.total_weighted) : '';
+      const totalPlace = isFinalRound ? (teamEntry?.overall_rank ?? '') : '';
+      const greyStyle = !isFinalRound ? 'color:var(--text-tertiary);' : '';
+      const placeholder = !isFinalRound ? '—' : '';
+      scoreCells = `
+        <td style="font-weight:600;">${thisPts}</td>
+        <td style="${greyStyle}">${totalScore || placeholder}</td>
+        <td style="${greyStyle}">${totalPlace || placeholder}</td>`;
+    }
+
     rowsHtml.push(`<tr>
       <td>${lane}</td>
-      <td>${timeToDisplay(r.raw_time, timeMode)}</td>
+      <td>${timeStr}</td>
       <td class="cell-position ${posClass}">${r.remarks && ['DSQ', 'DQ'].includes(r.remarks) ? r.remarks : (r.computed_position ?? '')}</td>
+      ${scoreCells}
       <td>${remarksDisplay.join(', ')}</td>
       <td class="team-name">${teamName}</td>
       <td>${teamCode}</td>
     </tr>`);
   }
 
+  const headerExtra = scoringCtx
+    ? `<th title="Points for this round">Score</th><th title="Sum of weighted points across rounds">Total Score</th><th title="Overall rank in division">Total Place</th>`
+    : '';
+
+  const refTableHtml = scoringCtx ? buildScoringReferenceTable() : '';
+
   container.innerHTML = `
     <table class="output-table">
       <thead><tr>
-        <th>Lane</th><th>Time</th><th>Place</th><th>Remarks</th><th>Team Name</th><th>Code</th>
+        <th>Lane</th><th>Time</th><th>Place</th>${headerExtra}<th>Remarks</th><th>Team Name</th><th>Code</th>
       </tr></thead>
       <tbody>${rowsHtml.join('')}</tbody>
     </table>
+    ${refTableHtml}
   `;
+}
+
+// Reference table — replica of the Scoring tab's totals for the race's
+// division. Shown below the race output when scoring applies, so the
+// operator can see how this race contributes to the season scoreboard
+// without leaving the race page.
+function buildScoringReferenceTable() {
+  if (!scoringCtx) return '';
+  const teams = [...scoringCtx.teamTotals.values()]
+    .sort((a, b) => b.total_weighted - a.total_weighted);
+  const rounds = scoringCtx.scoredRaces;
+  if (teams.length === 0) return '';
+
+  const flagToRaceLink = (flag) => {
+    const r = rounds.find(x => x.scoring_flag === flag);
+    if (!r) return '';
+    // Don't hyperlink the row that points to THIS race — clicking would
+    // navigate to the page you're already on. Plain text instead.
+    if (r.race_number === raceNumber) {
+      return `<span style="color:var(--text-secondary);">Race ${r.race_number}</span>`;
+    }
+    return `<a href="#/race/${r.race_number}" style="color:var(--accent);">Race ${r.race_number}</a>`;
+  };
+
+  return `
+    <div style="margin-top:14px;">
+      <div style="font-size:13px; font-weight:600; margin-bottom:6px; color:var(--text-secondary);">
+        <i class="material-icons" style="font-size:14px; vertical-align:middle;">leaderboard</i>
+        Division scoreboard reference
+      </div>
+      <table class="output-table">
+        <thead><tr>
+          <th>Rank</th>
+          <th style="text-align:left;">Team</th>
+          <th>Code</th>
+          ${rounds.map(r => `<th>${r.scoring_flag}<br><small>${flagToRaceLink(r.scoring_flag)}</small></th>`).join('')}
+          <th>Total</th>
+        </tr></thead>
+        <tbody>
+          ${teams.map(t => {
+            const rankCls = t.overall_rank === 1 ? 'first' : t.overall_rank === 2 ? 'second' : t.overall_rank === 3 ? 'third' : '';
+            return `<tr>
+              <td class="cell-position ${rankCls}">${t.overall_rank}</td>
+              <td class="team-name" style="text-align:left;">${t.team_name}</td>
+              <td>${t.team_code}</td>
+              ${rounds.map(r => {
+                const pr = t.perRound?.[r.scoring_flag];
+                return `<td title="${pr?.position != null ? `Position ${pr.position}` : ''}">${pr?.pts ?? '—'}</td>`;
+              }).join('')}
+              <td><strong>${Math.round(t.total_weighted)}</strong></td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>`;
 }
 
 function renderValidation(data) {
@@ -988,11 +1265,22 @@ function renderStartTimeText(race) {
     : '';
   const badge = source === 'joyi'
     ? `<span title="From Joyi .lcd metadata${driftNote}" style="display:inline-block; font-size:9px; font-weight:600; letter-spacing:0.5px; text-transform:uppercase; color:#7dd3fc; background:rgba(125,211,252,0.18); padding:1px 5px; border-radius:3px; margin-left:5px; vertical-align:middle;">Joyi</span>`
-    : '';
-  if (restartedFrom && start) {
-    return `<s style="color:var(--text-tertiary); font-weight:400;">${baseDisplay}</s> → ${isoToTime(restartedFrom)}${badge}`;
+    : (source === 'manual' && race.prefer_manual_start && race.joyi_start_time
+        ? `<span title="Operator forced manual start (Joyi value=${isoToTime(race.joyi_start_time)})" style="display:inline-block; font-size:9px; font-weight:600; letter-spacing:0.5px; text-transform:uppercase; color:#fbbf24; background:rgba(251,191,36,0.18); padding:1px 5px; border-radius:3px; margin-left:5px; vertical-align:middle;">MANUAL</span>`
+        : '');
+  // Small "use other start" toggle when BOTH sources exist — lets the
+  // operator switch which one drives display + ranking baseline.
+  let toggle = '';
+  if (both) {
+    const flipTo = race.prefer_manual_start ? 'joyi' : 'manual';
+    const toggleLabel = race.prefer_manual_start ? 'use Joyi' : 'use RDMS';
+    toggle = `<button class="btn btn-ghost btn-sm" style="padding:0 6px; margin-left:6px; font-size:10px; opacity:0.7;"
+                  onclick="window._toggleStartSource('${flipTo}')" title="Switch the canonical start time">${toggleLabel}</button>`;
   }
-  return `${baseDisplay}${badge}`;
+  if (restartedFrom && start) {
+    return `<s style="color:var(--text-tertiary); font-weight:400;">${baseDisplay}</s> → ${isoToTime(restartedFrom)}${badge}${toggle}`;
+  }
+  return `${baseDisplay}${badge}${toggle}`;
 }
 
 /**
@@ -1391,6 +1679,21 @@ function attachHandlers() {
     recalculate(); // re-runs validation (start-time warning comes back)
   };
 
+  // Toggle which start time is canonical. Argument is the new preference:
+  // 'manual' (RDMS click) or 'joyi' (LCD-derived). Both must already
+  // exist on the race for this to be meaningful.
+  window._toggleStartSource = async (preference) => {
+    if (!raceData) return;
+    raceData.prefer_manual_start = (preference === 'manual');
+    await saveRace(raceData);
+    showToast(
+      `Start time source: ${preference === 'manual' ? 'RDMS click' : 'Joyi (default)'}`,
+      'info', 2500,
+    );
+    document.getElementById('raceStartTime').innerHTML = renderStartTimeText(raceData);
+    broadcastChange('race-updated', { race_number: raceNumber });
+  };
+
   window._finishBackup = async () => {
     // CAPTURE FIRST — at the click moment. We never let the confirm dialog
     // move the recorded timestamp; ms precision must reflect when the
@@ -1560,10 +1863,30 @@ function attachHandlers() {
       const resultsFile = found.jyd || found.xls;
       if (resultsFile) {
         await runJoyiImport(resultsFile);
-        // Whether or not the .lcd is sitting alongside, kick off the
-        // ranged-fetch — it'll find the file via joyi-folder.js's own
-        // resolution logic.
-        enqueueLcdFetch(raceNumber);
+        // The triplet already includes the .lcd File when it's sitting
+        // alongside in the Joyi folder. Use it directly — derives in a
+        // few KB read, no second folder walk needed. Falling through to
+        // enqueueLcdFetch was failing silently in some setups (the
+        // ranged Drive path or the second nested-walk wasn't matching
+        // the lcd filename consistently), so the operator would see no
+        // Joyi start time after auto-import.
+        if (found.lcd) {
+          try {
+            const { deriveJoyiStartTime, setJoyiStartTimeOnRace } = await import('../import.js');
+            const iso = await deriveJoyiStartTime(found.lcd);
+            if (iso) {
+              await setJoyiStartTimeOnRace(raceNumber, iso);
+              broadcastChange('race-updated', { race_number: raceNumber, joyi_start: true });
+            } else {
+              console.warn(`Joyi .lcd found for race ${raceNumber} but start-time derivation returned null`);
+            }
+          } catch (err) {
+            console.warn(`Joyi .lcd derive failed for race ${raceNumber}:`, err);
+          }
+        } else {
+          // .lcd not in the same folder — fall back to the lazy lookup.
+          enqueueLcdFetch(raceNumber);
+        }
         showToast(`Imported ${resultsFile.name} from ${found.source === 'drive' ? 'Drive' : 'Joyi folder'}`, 'success', 3000);
         return;
       }
@@ -1628,6 +1951,13 @@ function attachHandlers() {
       grid.setRowData(i, newGridData[i]);
     }
     raceData = await getRace(raceNumber);
+    // Joyi import overwrites lane_results.team_name with finisher names;
+    // rebuild drawsByLane from race.draw_lanes (preserved at draw import)
+    // so the output preview shows the correct boat-lane → team mapping.
+    rebuildDrawsByLane(raceData, freshLanes);
+    // Refresh scoring context — joyi import sets computed_position which
+    // feeds the Score/Total/Overall columns.
+    scoringCtx = await buildScoringContext(raceData, configData);
     recalculate();
     notifyResultEntryStarted(raceNumber).catch(() => {});
     broadcastChange('race-updated', { race_number: raceNumber });
@@ -1645,6 +1975,12 @@ function attachHandlers() {
         batchDeltaMs = calcBatchDelta(p1Input.value, firstTime, timeMode);
         const deltaDisplay = timeToDisplay(msToTime(Math.abs(batchDeltaMs), timeMode), timeMode);
         document.getElementById('batchDelta').textContent = (batchDeltaMs >= 0 ? '+' : '-') + deltaDisplay;
+        // If the override is already on, keep the persisted delta in
+        // sync so export uses the latest figure.
+        if (batchOverrideEnabled && raceData) {
+          raceData.batch_delta_ms = batchDeltaMs;
+          saveRace(raceData).catch(err => console.warn('Save batch delta failed:', err));
+        }
         clearTimeout(batchDebounceTimer);
         batchDebounceTimer = setTimeout(recalculate, 200);
       }
@@ -1653,11 +1989,18 @@ function attachHandlers() {
   }
 
   // Apply batch adjustment toggle — only re-rank when explicitly opted in.
+  // Persist the operator's intent + the current delta on the race record
+  // so the EXPORT can apply the same shift. Without the persisted flag,
+  // the toggle only affected the in-memory output preview and exports
+  // silently came out with unshifted times.
   const toggleEl = document.getElementById('batchOverrideToggle');
   if (toggleEl) {
     toggleEl.checked = batchOverrideEnabled;
-    toggleEl.addEventListener('change', () => {
+    toggleEl.addEventListener('change', async () => {
       batchOverrideEnabled = toggleEl.checked;
+      raceData.batch_override_enabled = batchOverrideEnabled;
+      raceData.batch_delta_ms = batchOverrideEnabled ? batchDeltaMs : 0;
+      try { await saveRace(raceData); } catch (err) { console.warn('Save batch state failed:', err); }
       recalculate();
     });
   }
@@ -1670,8 +2013,42 @@ function attachHandlers() {
       import('../photo-finish.js'),
       import('../joyi-folder.js'),
     ]);
+
+    // .lcd files can be hundreds of MB and a Drive download on slow
+    // internet takes a while. Show a loading modal with a Cancel button
+    // so the operator can bail out and switch to drag-drop instead of
+    // staring at a frozen page. Cancel doesn't kill the in-flight
+    // download (Drive API doesn't expose abort here), but it short-
+    // circuits the result handling and opens the manual picker.
+    const loadingModal = document.createElement('div');
+    loadingModal.id = 'photoFinishLoadingModal';
+    loadingModal.style.cssText = 'position:fixed; inset:0; background:var(--bg-overlay); z-index:9999; display:flex; align-items:center; justify-content:center;';
+    loadingModal.innerHTML = `
+      <div style="background:var(--bg-card); border-radius:var(--radius-lg); padding:24px 28px; max-width:440px; width:90%; box-shadow:var(--shadow-lg); text-align:center;">
+        <div style="font-size:14px; color:var(--text-primary); margin-bottom:8px;">
+          <i class="material-icons" style="font-size:20px; vertical-align:middle; color:var(--accent); animation:spin 1.4s linear infinite;">refresh</i>
+          Loading photo finish for Race ${raceNumber}…
+        </div>
+        <div style="font-size:12px; color:var(--text-tertiary); margin-bottom:14px;">
+          .lcd files are large (often 100-300 MB). On a slow connection this can take a minute.
+        </div>
+        <button class="btn btn-ghost btn-sm" id="photoFinishLoadCancel">Cancel &amp; pick files manually</button>
+      </div>
+      <style>@keyframes spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }</style>
+    `;
+    document.body.appendChild(loadingModal);
+    let cancelled = false;
+    loadingModal.querySelector('#photoFinishLoadCancel').addEventListener('click', () => {
+      cancelled = true;
+      loadingModal.remove();
+      // Open the manual picker so the operator isn't stuck.
+      showPhotoFinishPicker(raceData).catch(() => {});
+    });
+
     try {
       const found = await findJoyiTripletForRace(raceNumber);
+      if (cancelled) return; // operator already moved on
+      loadingModal.remove();
       // Auto-open only when BOTH .lcd and .jyd are present — JYD is required
       // for the time axis to anchor on race-start. Missing either falls
       // through to the drag-and-drop picker so the operator can supply
@@ -1691,7 +2068,15 @@ function attachHandlers() {
       return;
     } catch (err) {
       console.warn('Photo finish auto-find failed:', err);
+      if (!cancelled) loadingModal.remove();
+    } finally {
+      // Defensive cleanup — guarantees the modal doesn't linger on any
+      // exit path. Removing twice is a no-op.
+      if (document.getElementById('photoFinishLoadingModal')) {
+        loadingModal.remove();
+      }
     }
+    if (cancelled) return;
     // Fallback: empty drag-and-drop picker.
     await showPhotoFinishPicker(raceData);
   };

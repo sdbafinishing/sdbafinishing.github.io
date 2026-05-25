@@ -29,20 +29,35 @@ export async function mountFlowchartPage(container) {
   }
 
   // Build unique team list keyed by team_code with team_name as the display.
-  // Also remember which races each team_code appears in, so the team filter
-  // can highlight those races without re-scanning lane_results every render.
+  // Source of truth: race.draw_lanes (the boat-lane → team snapshot taken
+  // at draw-import time). lane_results.team_code is overwritten by Joyi
+  // import to finish-order finisher codes, which would silently drop
+  // boats from the team-filter map for any race already joyi-imported.
   const teamMap = new Map(); // team_code → team_name
   fcRacesByTeamCode = new Map(); // team_code → Set<race_number>
   for (const r of races) {
-    const lanes = await getLaneResults(r.race_number);
-    lanes.forEach(l => {
-      if (!l.team_code) return;
-      const name = (l.team_name && l.team_name !== '---' && l.team_name !== '' && !/^R\d+[BP]\d+$/i.test(l.team_name))
-        ? l.team_name : (l.team_code);
-      if (!teamMap.has(l.team_code)) teamMap.set(l.team_code, name);
-      if (!fcRacesByTeamCode.has(l.team_code)) fcRacesByTeamCode.set(l.team_code, new Set());
-      fcRacesByTeamCode.get(l.team_code).add(r.race_number);
-    });
+    const drawLanes = Array.isArray(r.draw_lanes) ? r.draw_lanes : null;
+    if (drawLanes && drawLanes.length > 0) {
+      drawLanes.forEach(dl => {
+        if (!dl?.team_code) return;
+        const name = (dl.team_name && dl.team_name !== '---' && dl.team_name !== '' && !/^R\d+[BP]\d+$/i.test(dl.team_name))
+          ? dl.team_name : dl.team_code;
+        if (!teamMap.has(dl.team_code)) teamMap.set(dl.team_code, name);
+        if (!fcRacesByTeamCode.has(dl.team_code)) fcRacesByTeamCode.set(dl.team_code, new Set());
+        fcRacesByTeamCode.get(dl.team_code).add(r.race_number);
+      });
+    } else {
+      // Legacy races without draw_lanes — fall back to lane_results.
+      const lanes = await getLaneResults(r.race_number);
+      lanes.forEach(l => {
+        if (!l.team_code) return;
+        const name = (l.team_name && l.team_name !== '---' && l.team_name !== '' && !/^R\d+[BP]\d+$/i.test(l.team_name))
+          ? l.team_name : (l.team_code);
+        if (!teamMap.has(l.team_code)) teamMap.set(l.team_code, name);
+        if (!fcRacesByTeamCode.has(l.team_code)) fcRacesByTeamCode.set(l.team_code, new Set());
+        fcRacesByTeamCode.get(l.team_code).add(r.race_number);
+      });
+    }
   }
 
   // Display as "(CODE) name" — code first so operators can scan codes,

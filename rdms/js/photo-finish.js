@@ -429,16 +429,33 @@ export async function showPhotoFinishModal(race, files) {
   let _laneDraw = [];
   if (race?.race_number != null) {
     try {
-      const lanes = await _getLanes(race.race_number);
-      _laneDraw = lanes
-        .filter(lr => {
-          const tn = (lr.team_name || '').trim();
-          if (!tn || tn === '---') return false;
-          if (lr.remarks === 'DNS') return false;
-          return true;
-        })
-        .sort((a, b) => (a.lane_number || 0) - (b.lane_number || 0))
-        .map(lr => ({ lane: lr.lane_number, team: lr.team_name }));
+      // Prefer race.draw_lanes — the snapshot of {lane_number, team_name}
+      // taken at draw import time and refreshed on next-round-draw
+      // resolve. lane_results.team_name is overwritten by Joyi import
+      // (to the finisher's team name in finish order), so it can NOT
+      // be trusted as a source of truth for "team in boat lane X".
+      if (Array.isArray(race.draw_lanes) && race.draw_lanes.length > 0) {
+        _laneDraw = race.draw_lanes
+          .filter(dl => {
+            const tn = (dl?.team_name || '').trim();
+            return tn && tn !== '---';
+          })
+          .sort((a, b) => (a.lane_number || 0) - (b.lane_number || 0))
+          .map(dl => ({ lane: dl.lane_number, team: dl.team_name }));
+      } else {
+        // Fallback: legacy races without draw_lanes — read lane_results.
+        // Filter out DNS rows + dummy "---" teams as before.
+        const lanes = await _getLanes(race.race_number);
+        _laneDraw = lanes
+          .filter(lr => {
+            const tn = (lr.team_name || '').trim();
+            if (!tn || tn === '---') return false;
+            if (lr.remarks === 'DNS') return false;
+            return true;
+          })
+          .sort((a, b) => (a.lane_number || 0) - (b.lane_number || 0))
+          .map(lr => ({ lane: lr.lane_number, team: lr.team_name }));
+      }
     } catch { /* lane fetch is best-effort */ }
   }
   const meta = {

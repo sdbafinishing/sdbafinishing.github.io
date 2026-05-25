@@ -44,6 +44,23 @@ async function resolveBasename(raceNumber) {
 }
 
 /**
+ * Whitespace-insensitive match against `{basename}.{ext}`. Joyi has been
+ * observed to write filenames with a stray space in the prefix
+ * (`2026 WU.10.lcd` vs `2026WU.10.lcd`) — likely a UI typo on the
+ * capture machine — but the .lcd / .jyd / .xls in the SAME race share
+ * whatever the prefix is, so a normalised comparison still uniquely
+ * identifies the race.
+ */
+function fileMatchesRace(filename, basename, ext) {
+  const norm = (s) => String(s).replace(/\s+/g, '').toLowerCase();
+  const target = norm(`${basename}.${ext}`);
+  return norm(filename) === target;
+}
+function fileMatchesRaceAnyXlsExt(filename, basename) {
+  return fileMatchesRace(filename, basename, 'xls') || fileMatchesRace(filename, basename, 'xlsx');
+}
+
+/**
  * Try the File System Access path. Returns { lcd, jyd, xls } as File objects
  * (or nulls if any are missing). Returns null if the source folder isn't
  * connected at all.
@@ -53,18 +70,14 @@ async function findFromLocalFolder(folderPath, basename) {
   const handles = await listNestedSubfolder(folderPath);
   if (!handles || handles.length === 0) return { lcd: null, jyd: null, xls: null };
 
-  const wanted = {
-    lcd: new RegExp(`^${escapeRe(basename)}\\.lcd$`, 'i'),
-    jyd: new RegExp(`^${escapeRe(basename)}\\.jyd$`, 'i'),
-    xls: new RegExp(`^${escapeRe(basename)}\\.xlsx?$`, 'i'),
-  };
-
   const found = { lcd: null, jyd: null, xls: null };
   for (const h of handles) {
-    for (const kind of ['lcd', 'jyd', 'xls']) {
-      if (!found[kind] && wanted[kind].test(h.name)) {
-        try { found[kind] = await h.getFile(); } catch { /* skip */ }
-      }
+    if (!found.lcd && fileMatchesRace(h.name, basename, 'lcd')) {
+      try { found.lcd = await h.getFile(); } catch { /* skip */ }
+    } else if (!found.jyd && fileMatchesRace(h.name, basename, 'jyd')) {
+      try { found.jyd = await h.getFile(); } catch { /* skip */ }
+    } else if (!found.xls && fileMatchesRaceAnyXlsExt(h.name, basename)) {
+      try { found.xls = await h.getFile(); } catch { /* skip */ }
     }
   }
   return found;
@@ -79,24 +92,19 @@ async function findFromDrive(folderPath, basename) {
   const files = await listDriveFiles(folderPath);
   if (!files || files.length === 0) return { lcd: null, jyd: null, xls: null };
 
-  const wanted = {
-    lcd: new RegExp(`^${escapeRe(basename)}\\.lcd$`, 'i'),
-    jyd: new RegExp(`^${escapeRe(basename)}\\.jyd$`, 'i'),
-    xls: new RegExp(`^${escapeRe(basename)}\\.xlsx?$`, 'i'),
-  };
-
   const found = { lcd: null, jyd: null, xls: null };
   for (const f of files) {
-    for (const kind of ['lcd', 'jyd', 'xls']) {
-      if (!found[kind] && wanted[kind].test(f.name)) {
-        try {
-          const buf = await readDriveFile(f.id);
-          // Wrap as a File so downstream code (parseLcdHeader / parseJydFile)
-          // can call .arrayBuffer() / .text() uniformly with the local path.
-          found[kind] = new File([buf], f.name);
-        } catch { /* skip — caller falls back to manual picker */ }
-      }
-    }
+    let kind = null;
+    if (!found.lcd && fileMatchesRace(f.name, basename, 'lcd')) kind = 'lcd';
+    else if (!found.jyd && fileMatchesRace(f.name, basename, 'jyd')) kind = 'jyd';
+    else if (!found.xls && fileMatchesRaceAnyXlsExt(f.name, basename)) kind = 'xls';
+    if (!kind) continue;
+    try {
+      const buf = await readDriveFile(f.id);
+      // Wrap as a File so downstream code (parseLcdHeader / parseJydFile)
+      // can call .arrayBuffer() / .text() uniformly with the local path.
+      found[kind] = new File([buf], f.name);
+    } catch { /* skip — caller falls back to manual picker */ }
   }
   return found;
 }
@@ -151,12 +159,12 @@ export async function deriveJoyiStartTimeForRace(raceNumber) {
   const folderPath = await resolveJoyiFolderPath();
   const basename = await resolveBasename(raceNumber);
   if (!basename) return null;
-  const lcdPattern = new RegExp(`^${escapeRe(basename)}\\.lcd$`, 'i');
+  const matchLcd = (name) => fileMatchesRace(name, basename, 'lcd');
 
   // Drive path (preferred — no local sync delay).
   if (isDriveApiConnected()) {
     const files = await listDriveFiles(folderPath);
-    const lcdMeta = files.find(f => lcdPattern.test(f.name));
+    const lcdMeta = files.find(f => matchLcd(f.name));
     if (lcdMeta) {
       const startIso = await deriveStartFromDriveLcd(lcdMeta);
       if (startIso) return startIso;
@@ -166,7 +174,7 @@ export async function deriveJoyiStartTimeForRace(raceNumber) {
   // Local FS path. Reuse the existing folder-walk + File handle.
   if (isSourceConnected()) {
     const handles = await listNestedSubfolder(folderPath);
-    const h = handles.find(x => lcdPattern.test(x.name));
+    const h = handles.find(x => matchLcd(x.name));
     if (h) {
       try {
         const file = await h.getFile();

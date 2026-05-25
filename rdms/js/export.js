@@ -4,8 +4,8 @@
  * Generate start lists (Joyi + SprintTimer formats).
  */
 import { getConfig, getRace, saveRace, getLaneResults, bulkSaveLaneResults, getAllRaces, saveTimesheet, getTimesheet } from './db.js';
-import { computeRankings } from './race.js';
-import { timeToDisplay, nowISO, isoToTime, showToast } from './utils.js';
+import { computeRankings, computeDivisionScoring } from './race.js';
+import { timeToDisplay, msToTime, nowISO, isoToTime, showToast } from './utils.js';
 import { broadcastChange } from './app.js';
 import { backupAfterExport } from './backup.js';
 import { writeToBoth, downloadFallback } from './file-access.js';
@@ -71,7 +71,7 @@ export async function exportResults(raceNumber, options = {}) {
   const laneCount = config?.lane_count || 6;
 
   // Re-run rankings from raw_time across every lane in the DB before
-  // exporting. Two real bugs make a fresh recompute necessary:
+  // exporting. Two real bugs made a fresh recompute necessary:
   //   1. persistCurrentRow on the race page only writes the focused row
   //      back, so when a later entry demotes an earlier row's position,
   //      the earlier row's DB computed_position goes stale (showed up
@@ -80,22 +80,39 @@ export async function exportResults(raceNumber, options = {}) {
   //      positions; the grid's recalculate runs in memory but never
   //      persists back, so the DB has null computed_position for every
   //      Joyi-imported lane (places came out blank in the export).
-  // computeRankings mutates the array in place, so the same `lanes`
-  // reference flows into the rest of the export.
-  computeRankings(lanes, timeMode, 0);
-  // Write the refreshed positions back so the dashboard / scoring page
-  // / next-round-draw resolution all see consistent values.
+  // Apply the persisted batch delta so the exported times + ranks
+  // reflect the same shift the operator confirmed on the race page.
+  const exportDelta = race.batch_override_enabled ? (race.batch_delta_ms || 0) : 0;
+  computeRankings(lanes, timeMode, exportDelta);
   await bulkSaveLaneResults(lanes);
 
-  // Snapshot draws keyed by the actual boat lane. Source of truth for
-  // team name/code at export time, no matter which grid row the operator
-  // typed the results into.
+  // Snapshot of drawn teams keyed by boat lane. Source of truth for the
+  // export's left-side team list — must reflect the original draw
+  // (or next-round-draw resolution), not whatever joyi happened to
+  // overwrite into lane_results.team_name. The draw_lanes field is
+  // populated at draw-import time and updated when next-round
+  // placeholders resolve. For legacy races (imported before this field
+  // existed), we fall back to lane_results.team_name.
   const drawsByLane = {};
-  lanes.forEach(lr => {
-    if (lr.lane_number) {
-      drawsByLane[lr.lane_number] = { team_code: lr.team_code || '', team_name: lr.team_name || '' };
-    }
-  });
+  if (Array.isArray(race.draw_lanes) && race.draw_lanes.length > 0) {
+    race.draw_lanes.forEach(dl => {
+      if (dl?.lane_number) {
+        drawsByLane[dl.lane_number] = {
+          team_code: dl.team_code || '',
+          team_name: dl.team_name || '',
+        };
+      }
+    });
+  } else {
+    lanes.forEach(lr => {
+      if (lr.lane_number) {
+        drawsByLane[lr.lane_number] = {
+          team_code: lr.team_code || '',
+          team_name: lr.team_name || '',
+        };
+      }
+    });
+  }
 
   // Pre-export validation (matches VBA ValidateResults)
   const hasInput = lanes.some(l => l.raw_time || l.remarks);
@@ -131,20 +148,27 @@ export async function exportResults(raceNumber, options = {}) {
   }
 
   // Rank mismatch check uses lane_input lookup for correct team mapping.
+  // SOFT block: surface a toast, don't throw — Joyi's place column is
+  // occasionally edited by hand after capture and can disagree with the
+  // raw-time sort. Operator can review and proceed.
   const mismatches = lanes.filter(l =>
     l.joyi_rank != null && l.computed_position != null && l.joyi_rank !== l.computed_position
   );
   if (mismatches.length > 0) {
     const details = mismatches.map(l => {
       const laneNum = parseInt(l.lane_input, 10) || l.lane_number;
-      return `Lane ${laneNum}: position ${l.computed_position} != Joyi rank ${l.joyi_rank}`;
+      return `Lane ${laneNum}: pos ${l.computed_position} ≠ Joyi ${l.joyi_rank}`;
     }).join(', ');
-    throw new Error(`Rank mismatch detected: ${details}. Resolve before exporting.`);
+    showToast(`Joyi rank disagrees with RDMS rank — exporting anyway. ${details}`, 'warning', 6000);
   }
 
   // Every drawn team (lane 1..N with a team_name) must be referenced by some
   // result row's lane_input. If a team's lane isn't in the entered results,
-  // the operator forgot to log that boat.
+  // either the operator forgot to log that boat OR (more often) Joyi
+  // didn't report the lane (DNS / scratched). SOFT block: warn and keep
+  // going; the missing boat will just have blank Time / Place / Remarks
+  // in the exported sheet. Hard-blocking here was blocking export of
+  // partial-field races (e.g. only 3 boats showed up to the start).
   const referencedLanes = new Set(
     resultRows.map(l => parseInt(l.lane_input, 10)).filter(Number.isInteger)
   );
@@ -155,7 +179,7 @@ export async function exportResults(raceNumber, options = {}) {
   );
   if (missingResults.length > 0) {
     const details = missingResults.map(l => `Lane ${l.lane_number} (${l.team_name})`).join(', ');
-    throw new Error(`Missing results: ${details}. Each team must have time and/or remarks.`);
+    showToast(`Drawn boats without a result — exported as blank: ${details}`, 'warning', 6000);
   }
 
   // Version management
@@ -210,13 +234,27 @@ export async function exportResults(raceNumber, options = {}) {
   mods.push({ addr: 'A1', value: race.race_title_raw || race.race_title || `Race ${raceNumber}` });
   mods.push({ addr: 'D1', value: race.race_time || '' });
 
-  // Lane rows
-  const lanesByLane = {};
-  lanes.forEach(l => { if (l.lane_number) lanesByLane[l.lane_number] = l; });
+  // Cross-round scoring context — populates Score / Total Score / Total
+  // Place columns when the race is on a scored chain. Total Score +
+  // Total Place are only meaningful AFTER the final round; for R1/R2
+  // exports we leave them blank to avoid misleading mid-series totals.
+  let scoreCtx = null;
+  if (race.scoring_flag && race.scoring_flag !== 'N' && race.division_id) {
+    const allRaces = await getAllRaces();
+    const scoredRaces = allRaces.filter(r =>
+      r.division_id === race.division_id && r.scoring_flag && r.scoring_flag !== 'N');
+    const lanesByRace = new Map();
+    for (const r of scoredRaces) {
+      lanesByRace.set(r.race_number, await getLaneResults(r.race_number));
+    }
+    scoreCtx = computeDivisionScoring(race, allRaces, lanesByRace, laneCount);
+  }
+  const isRFinal = scoreCtx?.scoringFlag === 'RFinal';
 
+  // Lane rows
   for (let lane = 1; lane <= TEMPLATE_LANE_COUNT; lane++) {
     const rowNum = 3 + lane; // lane 1 → row 4
-    const drawLane = lanesByLane[lane];
+    const drawLane = drawsByLane[lane];
     const lr = inputByLane[lane];
 
     // Team name (col B) and team code (col C) come from the drawn
@@ -236,21 +274,69 @@ export async function exportResults(raceNumber, options = {}) {
     const rawRemark = (lr.remarks ?? '').toString().trim();
     const isMarker = MARKER_SET.has(rawRemark.toUpperCase());
 
-    const timeStr = isMarker ? '' : timeToDotFormat(lr.raw_time, timeMode);
-    mods.push({ addr: `D${rowNum}`, value: timeStr });
+    // Column layout (new):
+    //   D (Time): a time string OR the status marker text (DSQ/DQ/DNS/DNF).
+    //             Each team must have ONE of the two. Operators see the
+    //             status right in the result column — no need to look
+    //             across to remarks to find out a boat didn't finish.
+    //   E (Place): place number (string) for ranked rows; blank for
+    //              markers + unranked rows.
+    //   I (Remarks): time penalty ("TP=2s") + any free-text operator
+    //                notes. Status marker is NOT duplicated here; it
+    //                lives in the Time column only.
+    let timeCellValue;
+    if (isMarker) {
+      timeCellValue = rawRemark.toUpperCase();
+    } else if (exportDelta !== 0 && Number.isFinite(lr.effective_time_ms)) {
+      // Batch override is on AND we have a finite effective time —
+      // export the SHIFTED time so the published sheet matches the
+      // race page's adjusted preview. Drop sub-hundredth precision via
+      // msToTime → timeToDotFormat (which truncates).
+      const shifted = msToTime(lr.effective_time_ms, timeMode);
+      timeCellValue = timeToDotFormat(shifted, timeMode);
+    } else {
+      timeCellValue = timeToDotFormat(lr.raw_time, timeMode);
+    }
+    mods.push({ addr: `D${rowNum}`, value: timeCellValue });
 
     // The template's E-column cells use numFmtId="49" (text format @).
     // Writing a numeric value into a text-formatted cell renders blank
-    // in some downstream tools (the VBA reader was showing nothing).
-    // Write Place as a string so the cell's intended formatting holds.
+    // in some downstream tools. Write Place as a string.
     const placeVal = isMarker ? '' : (lr.computed_position ?? '');
     mods.push({
       addr: `E${rowNum}`,
       value: (placeVal === '' || placeVal == null) ? '' : String(placeVal),
     });
 
-    const remarkOut = isMarker ? rawRemark.toUpperCase() : rawRemark;
-    mods.push({ addr: `I${rowNum}`, value: remarkOut || '' });
+    // Scoring columns (F = Score, G = Total Score, H = Total Place).
+    // F shown for any scored race; G/H only when this race is the
+    // RFinal — mid-series cumulative numbers would mislead viewers.
+    if (scoreCtx) {
+      const teamCode = drawLane?.team_code || '';
+      const teamEntry = teamCode ? scoreCtx.teamTotals.get(teamCode) : null;
+      const thisPts = teamEntry?.perRound?.[scoreCtx.scoringFlag]?.pts;
+      mods.push({
+        addr: `F${rowNum}`,
+        value: (thisPts == null || thisPts === '') ? '' : String(thisPts),
+      });
+      if (isRFinal && teamEntry) {
+        mods.push({ addr: `G${rowNum}`, value: String(Math.round(teamEntry.total_weighted)) });
+        mods.push({ addr: `H${rowNum}`, value: String(teamEntry.overall_rank) });
+      } else {
+        mods.push({ addr: `G${rowNum}`, value: '' });
+        mods.push({ addr: `H${rowNum}`, value: '' });
+      }
+    }
+
+    // Remarks: penalty + free-text notes only. If lr.remarks is *just*
+    // a status marker, it's already in column D — omit from remarks.
+    const remarkPieces = [];
+    if (lr.penalty_time) {
+      const tp = String(lr.penalty_time).trim();
+      if (tp && tp !== '0') remarkPieces.push(`TP=${tp}s`);
+    }
+    if (!isMarker && rawRemark) remarkPieces.push(rawRemark);
+    mods.push({ addr: `I${rowNum}`, value: remarkPieces.join(' ') });
   }
 
   // Footnote (A11). Always rewrite with the race's progression text so
@@ -332,6 +418,67 @@ export async function exportResults(raceNumber, options = {}) {
 }
 
 /**
+ * Detect duplicate raw_time among rankable lanes. Returns an array of
+ * {time, lanes:[laneNum,...]} for any time that appears on 2+ lanes
+ * (excluding DSQ/DQ/DNS/DNF rows). Empty array on no duplicates.
+ */
+async function detectDuplicateTimes(raceNumber) {
+  const lanes = await getLaneResults(raceNumber);
+  const buckets = new Map();
+  const MARKER_SET = new Set(['DSQ', 'DQ', 'DNS', 'DNF']);
+  for (const lr of lanes) {
+    if (!lr.raw_time) continue;
+    if (MARKER_SET.has((lr.remarks || '').toUpperCase())) continue;
+    const t = String(lr.raw_time).trim();
+    if (!t || /^0+$/.test(t)) continue;
+    if (!buckets.has(t)) buckets.set(t, []);
+    buckets.get(t).push(lr.lane_input || lr.lane_number);
+  }
+  const dupes = [];
+  for (const [time, ls] of buckets) {
+    if (ls.length > 1) dupes.push({ time, lanes: ls });
+  }
+  return dupes;
+}
+
+/**
+ * Show a confirm modal listing the duplicate-time lanes. Returns a
+ * promise that resolves true (proceed) or false (cancel).
+ */
+function confirmDuplicateTimes(dupes) {
+  return new Promise(resolve => {
+    const existing = document.getElementById('exportDupeModal');
+    if (existing) existing.remove();
+    const modal = document.createElement('div');
+    modal.id = 'exportDupeModal';
+    modal.style.cssText = 'position:fixed; inset:0; background:var(--bg-overlay); z-index:9999; display:flex; align-items:center; justify-content:center; padding:20px;';
+    modal.innerHTML = `
+      <div style="background:var(--bg-card); border-radius:var(--radius-lg); padding:22px; max-width:480px; width:100%; box-shadow:var(--shadow-lg);">
+        <h5 style="font-size:16px; font-weight:600; margin:0 0 12px; color:var(--warning);">
+          <i class="material-icons" style="vertical-align:middle;">warning</i> Duplicate finish times
+        </h5>
+        <p style="font-size:13px; color:var(--text-secondary); margin:0 0 10px;">
+          The following lanes have identical times — they will share the same Place in the export:
+        </p>
+        <ul style="font-size:13px; margin:0 0 14px; padding-left:20px; color:var(--text-primary);">
+          ${dupes.map(d => `<li><strong>${d.time}</strong> — lanes ${d.lanes.join(', ')}</li>`).join('')}
+        </ul>
+        <p style="font-size:12px; color:var(--text-tertiary); margin:0 0 14px;">
+          Confirm this is the intended result (e.g. genuine photo-finish tie). Cancel to return and adjust.
+        </p>
+        <div style="display:flex; gap:8px; justify-content:flex-end;">
+          <button class="btn btn-ghost" id="dupeCancel">Cancel</button>
+          <button class="btn btn-primary" id="dupeConfirm">Confirm tie — proceed</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    modal.querySelector('#dupeCancel').addEventListener('click', () => { modal.remove(); resolve(false); });
+    modal.querySelector('#dupeConfirm').addEventListener('click', () => { modal.remove(); resolve(true); });
+  });
+}
+
+/**
  * Show the export modal (re-export vs revision).
  * @param {number} raceNumber
  * @param {function} onComplete - Called after export completes
@@ -339,6 +486,17 @@ export async function exportResults(raceNumber, options = {}) {
 export async function showExportModal(raceNumber, onComplete) {
   const race = await getRace(raceNumber);
   const hasExported = race && race.export_version > 0;
+
+  // Tie detection — surfaces before either branch of the export flow.
+  // If duplicates exist, get explicit operator confirmation before
+  // continuing. They CAN proceed (genuine ties are legal), but the
+  // confirm step prevents accidental ties from data-entry mistakes
+  // slipping through.
+  const dupes = await detectDuplicateTimes(raceNumber);
+  if (dupes.length > 0) {
+    const proceed = await confirmDuplicateTimes(dupes);
+    if (!proceed) return;
+  }
 
   if (!hasExported) {
     // First export — no modal needed

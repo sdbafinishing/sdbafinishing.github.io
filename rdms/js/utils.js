@@ -99,6 +99,47 @@ export function joyiTimeToRaw(joyiTime, mode = 'mss00') {
 }
 
 /**
+ * Convert a Joyi time string to milliseconds at FULL precision when the
+ * source includes thousandths (e.g. "00:01:26.143"). For hundredths-only
+ * sources ("00:01:26.14") the result equals joyiTimeToRaw → timeToMs
+ * (no extra precision recovered). Used by the ranking layer so two
+ * boats that share the same hundredth but differ in thousandths get
+ * distinct places — Joyi alone doesn't break the tie because its
+ * displayed column truncates.
+ *
+ * Returns null on malformed input.
+ */
+export function joyiTimeToMs(joyiTime) {
+  if (!joyiTime || typeof joyiTime !== 'string') return null;
+  const parts = joyiTime.split(':');
+  if (parts.length !== 3) return null;
+  const hours = parseInt(parts[0], 10);
+  const mins = parseInt(parts[1], 10);
+  const secParts = parts[2].split('.');
+  const secs = parseInt(secParts[0], 10);
+  if (!Number.isFinite(hours) || !Number.isFinite(mins) || !Number.isFinite(secs)) return null;
+  let fracMs = 0;
+  if (secParts.length > 1) {
+    const frac = secParts[1].padEnd(3, '0').slice(0, 3); // up to 3 digits = ms
+    fracMs = parseInt(frac, 10) || 0;
+  }
+  return ((hours * 60 + mins) * 60 + secs) * 1000 + fracMs;
+}
+
+/**
+ * Whether a Joyi time string carries thousandth-second precision (3
+ * decimal digits) vs hundredths (2 digits). Hundredths-only sources
+ * benefit from no extra ranking precision; thousandths break ties.
+ */
+export function joyiTimeHasMsPrecision(joyiTime) {
+  if (!joyiTime || typeof joyiTime !== 'string') return false;
+  const parts = joyiTime.split(':');
+  if (parts.length !== 3) return false;
+  const secParts = parts[2].split('.');
+  return secParts.length > 1 && secParts[1].replace(/\s+$/, '').length >= 3;
+}
+
+/**
  * Validate a time string.
  * @param {string} raw - Time string
  * @param {string} mode - 'mss00' or 'mmss00'

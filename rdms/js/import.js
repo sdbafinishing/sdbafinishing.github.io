@@ -4,7 +4,7 @@
  */
 import * as XLSX from 'xlsx';
 import { getConfig, getRace, saveRace, getLaneResults, bulkSaveLaneResults, bulkSaveRaces, addImportLog } from './db.js';
-import { sanitiseTitle, extractRaceNumber, extractJoyiRaceNumber, joyiTimeToRaw, msToTime, showToast } from './utils.js';
+import { sanitiseTitle, extractRaceNumber, extractJoyiRaceNumber, joyiTimeToRaw, joyiTimeToMs, joyiTimeHasMsPrecision, msToTime, showToast } from './utils.js';
 
 /**
  * Parse a draw .xls file and return structured data.
@@ -128,6 +128,16 @@ export async function importDrawToDb(parsed) {
   // into the result sheet's footnote cell (A11). Without this the
   // bundled template's race-1 footnote would leak into every race.
   race.progression_text = parsed.progressionText || '';
+  // Snapshot of the drawn teams keyed by boat lane. lane_results.team_name
+  // gets overwritten by Joyi import (grid stays in finish order, so each
+  // row's team_name is the FINISHER's name, not the boat-lane occupant).
+  // The export's left column needs the draw teams; this field keeps them
+  // out of joyi's way.
+  race.draw_lanes = (parsed.lanes || []).map(l => ({
+    lane_number: l.lane_number,
+    team_name: l.team_name,
+    team_code: l.team_code,
+  }));
   // A draw is "loaded" once at least one lane has a real team. A real team
   // is any non-empty team_name that ISN'T an R{n}P{n} placeholder. Note:
   // some templates park the placeholder in team_code (column C) with
@@ -143,11 +153,24 @@ export async function importDrawToDb(parsed) {
   });
   await saveRace(race);
 
-  // Build lane results (preserve existing times if any)
+  // Build lane results, preserving any existing result fields on each
+  // row (so re-importing a draw to refresh team_name / race.draw_lanes
+  // doesn't wipe raw_time, joyi data, or operator-typed remarks).
+  // bulkSaveLaneResults does a bulkPut which REPLACES the row by
+  // primary key — so we have to merge here, not just provide partial
+  // updates.
+  const existingByLane = new Map(
+    (await getLaneResults(parsed.raceNumber)).map(lr => [lr.lane_number, lr]),
+  );
   const laneResults = [];
   for (let i = 0; i < laneCount; i++) {
     const drawLane = parsed.lanes.find(l => l.lane_number === i + 1);
+    const existing = existingByLane.get(i + 1) || {};
     laneResults.push({
+      // Spread existing first so any field we DON'T overwrite below
+      // (raw_time, penalty_time, remarks, computed_position,
+      // effective_time_ms, lane_input, joyi_*) survives the bulkPut.
+      ...existing,
       race_number: parsed.raceNumber,
       lane_number: i + 1,
       team_name: drawLane?.team_name || '',
@@ -160,16 +183,6 @@ export async function importDrawToDb(parsed) {
         : (drawLane?.team_code && /^R\d+P\d+$/i.test(drawLane.team_code))
             ? drawLane.team_code
             : '',
-      // Preserve existing result fields (don't overwrite)
-      raw_time: '',
-      penalty_time: '',
-      remarks: '',
-      computed_position: null,
-      effective_time_ms: null,
-      joyi_lane: null,
-      joyi_time: null,
-      joyi_name: null,
-      joyi_rank: null,
     });
   }
 
@@ -498,6 +511,15 @@ export async function parseJoyiFile(file) {
       joyi_name: name,
       joyi_time_raw: timeStr,
       joyi_time_mss00: joyiTimeToRaw(timeStr, timeMode),
+      // Full-precision ms (preserves thousandths when Joyi exports them).
+      // Used by computeRankings to break ties that the displayed-hundredth
+      // value would otherwise leave unresolved. null when the source is
+      // malformed.
+      joyi_time_ms: joyiTimeToMs(timeStr),
+      // Marker so downstream knows the source had thousandth precision
+      // even if joyi_time_ms ends in a 0. Drives the ms_precision flag
+      // we copy onto lane_results.
+      joyi_time_has_ms: joyiTimeHasMsPrecision(timeStr),
     });
   }
 
@@ -545,11 +567,50 @@ export async function importJoyiToDb(parsed, opts = {}) {
     };
   }
 
-  // Build lane_results updates
-  // Joyi results are sorted by finish order — populate input area accordingly
+  // Defensive snapshot of the draw teams. For legacy races imported
+  // before `race.draw_lanes` existed as a field, the current lane_results
+  // STILL hold the drawn team_name/team_code at this point (joyi hasn't
+  // run yet, OR if it has, we've already saved draw_lanes on a prior
+  // import). Capture once so subsequent joyi imports always have a
+  // reference to fall back on.
+  if (!Array.isArray(race.draw_lanes) || race.draw_lanes.length === 0) {
+    // Only snapshot if the existing lane_results actually look like the
+    // draw — i.e. no joyi_rank set anywhere. If joyi_rank is already set
+    // on rows, lane_results.team_name has been clobbered by an earlier
+    // joyi import and we can't safely recover. In that case the operator
+    // needs to re-import the draw to repopulate draw_lanes.
+    const looksLikeDraw = existingLanes.every(lr => lr.joyi_rank == null);
+    if (looksLikeDraw) {
+      race.draw_lanes = existingLanes.map(lr => ({
+        lane_number: lr.lane_number,
+        team_name: lr.team_name || '',
+        team_code: lr.team_code || '',
+      }));
+    }
+  }
+
+  // Build lane_results in FINISH ORDER — row 1 = winner, row 2 = 2nd, etc.
+  // This matches the operator's manual-entry convention ("must be in
+  // finishing order") and keeps the grid's sort-order validation happy.
+  // The drawn-team-by-boat-lane mapping the export needs lives separately
+  // on race.draw_lanes (populated at draw-import time), so we don't have
+  // to preserve it on each lane_results row.
+  //
+  // Skip Joyi rows whose time resolves to zero / empty — those are the
+  // DNS / placeholder entries Joyi emits for boats that didn't finish.
+  // We want them to leave the grid row blank entirely, not populate it
+  // with a "00000" raw_time the operator then has to manually clear.
+  const isZeroOrEmptyJoyi = (jr) => {
+    const t = (jr?.joyi_time_mss00 || '').toString();
+    if (t === '' || /^0+$/.test(t)) return true;
+    return false;
+  };
+  const realFinishers = parsed.results.filter(jr => !isZeroOrEmptyJoyi(jr));
+
+  const MARKER_SET = new Set(['DSQ', 'DQ', 'DNS', 'DNF']);
   const laneResults = [];
   for (let i = 0; i < laneCount; i++) {
-    const joyiResult = parsed.results[i]; // ith finisher
+    const joyiResult = realFinishers[i]; // ith real finisher
     if (!joyiResult) {
       laneResults.push({
         race_number: parsed.raceNumber,
@@ -561,15 +622,23 @@ export async function importJoyiToDb(parsed, opts = {}) {
     laneResults.push({
       race_number: parsed.raceNumber,
       lane_number: i + 1,
-      // Auto-populate input area from Joyi
+      // Auto-populate input area from Joyi.
       lane_input: String(joyiResult.joyi_lane),
       raw_time: joyiResult.joyi_time_mss00,
-      // Joyi comparison fields
+      // Full-precision ms — set ONLY when Joyi gave us thousandths.
+      // computeRankings prefers this over timeToMs(raw_time) so two boats
+      // with the same displayed hundredth get distinct places when their
+      // thousandths differ.
+      raw_time_ms: joyiResult.joyi_time_has_ms ? joyiResult.joyi_time_ms : null,
+      remarks: '',
+      // Joyi comparison fields.
       joyi_lane: joyiResult.joyi_lane,
       joyi_time: joyiResult.joyi_time_raw,
       joyi_name: joyiResult.joyi_name,
       joyi_rank: joyiResult.joyi_rank,
-      // Preserve existing fields
+      // team_name / team_code on the grid row reflect WHO finished in
+      // this position — i.e. the joyi-reported team. The exported left
+      // column doesn't read this field; it reads race.draw_lanes.
       team_code: joyiResult.joyi_code || '',
       team_name: joyiResult.joyi_name || '',
     });

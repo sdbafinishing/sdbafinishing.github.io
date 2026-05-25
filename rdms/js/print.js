@@ -162,7 +162,7 @@ function buildResultHtml(race, lanes, config, wrapInDoc = true) {
             if (lr.remarks) remarksArr.push(lr.remarks);
             return `<tr>
               <td style="font-weight:700;">${['DSQ','DQ'].includes(lr.remarks) ? lr.remarks : (lr.computed_position ?? '')}</td>
-              <td>${lr.lane_number || lr.lane_input || ''}</td>
+              <td>${lr.lane_input || lr.lane_number || ''}</td>
               <td style="text-align:left;">${lr.team_name || ''}</td>
               <td>${lr.team_code || ''}</td>
               <td>${timeToDisplay(lr.raw_time, timeMode)}</td>
@@ -181,7 +181,29 @@ function buildResultHtml(race, lanes, config, wrapInDoc = true) {
 function buildDrawHtml(race, lanes, config, wrapInDoc = true) {
   const eventName = config?.event_long_name_en || '';
 
-  const sorted = [...lanes].sort((a, b) => a.lane_number - b.lane_number);
+  // Source of truth for "team in boat lane X" is race.draw_lanes (the
+  // draw-time snapshot that survives Joyi imports). Fall back to
+  // lane_results.team_name for legacy races that don't have the field.
+  const rows = [];
+  if (Array.isArray(race?.draw_lanes) && race.draw_lanes.length > 0) {
+    const sorted = [...race.draw_lanes].sort((a, b) => (a.lane_number || 0) - (b.lane_number || 0));
+    for (const dl of sorted) {
+      rows.push({
+        lane: dl.lane_number,
+        name: dl.team_name || '—',
+        code: dl.team_code || '',
+      });
+    }
+  } else {
+    const sorted = [...lanes].sort((a, b) => a.lane_number - b.lane_number);
+    for (const lr of sorted) {
+      rows.push({
+        lane: lr.lane_number,
+        name: lr.team_name || '—',
+        code: lr.team_code || '',
+      });
+    }
+  }
 
   const body = `
     <div class="print-page">
@@ -193,10 +215,10 @@ function buildDrawHtml(race, lanes, config, wrapInDoc = true) {
           <tr><th>Lane</th><th>Team Name</th><th>Code</th></tr>
         </thead>
         <tbody>
-          ${sorted.map(lr => `<tr>
-            <td style="font-weight:700;">${lr.lane_number}</td>
-            <td style="text-align:left;">${lr.team_name || '—'}</td>
-            <td>${lr.team_code || ''}</td>
+          ${rows.map(r => `<tr>
+            <td style="font-weight:700;">${r.lane}</td>
+            <td style="text-align:left;">${r.name}</td>
+            <td>${r.code}</td>
           </tr>`).join('')}
         </tbody>
       </table>

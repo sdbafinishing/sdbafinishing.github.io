@@ -77,7 +77,8 @@
 }
 .navbar-folders {
   display: flex;
-  gap: 2px;
+  align-items: center;
+  gap: 6px;
   padding-right: 8px;
   border-right: 1px solid rgba(255,255,255,0.15);
   margin-right: 4px;
@@ -399,14 +400,19 @@
   border-bottom: 1px solid var(--border-subtle);
   vertical-align: middle;
 }
-/* Race-number striping — matches the Excel reference (odd = yellow,
-   even = white/transparent). Uses a tinted gold so it works on both
-   light and dark themes. */
-.race-table tbody tr:nth-child(odd) td {
+/* Race-number striping — odd race numbers = yellow, even = transparent.
+   Driven by EXPLICIT classes (set per row based on race_number) instead
+   of nth-child, so the visual parity follows the race number even when
+   rows are grouped by division / re-sorted. Uses a tinted gold so it
+   works on both light and dark themes. */
+.race-table tbody tr.race-row-odd td {
   background: rgba(250, 204, 21, 0.10);
 }
+.race-table tbody tr.race-row-even td {
+  background: transparent;
+}
 /* Division group header — used by the dashboard "By Division" view. Wins
-   over the nth-child striping so the header reads as a band. */
+   over the per-row striping so the header reads as a band. */
 .race-table tbody tr.div-group-header td {
   background: var(--bg-input) !important;
 }

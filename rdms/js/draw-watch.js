@@ -47,8 +47,14 @@ let bootstrapDone = false;
 let backend = 'local';
 let intervalMsActive = DEFAULT_INTERVAL_MS;
 
+// Operator's persisted intent (localStorage). Use for auto-restart on boot.
 export function isDrawWatchEnabled() {
   return localStorage.getItem(STORAGE_KEY) === '1';
+}
+
+// Whether the setInterval is active in this page session.
+export function isDrawWatchRunning() {
+  return intervalId != null;
 }
 
 export function getDrawWatchStatus() {

@@ -18,6 +18,10 @@ const DEFAULT_MODES = [
   { value: 'race-control', label: 'Race Control station' },
   { value: 'starter',      label: 'Starter station' },
   { value: 'finish',       label: 'Finish station' },
+  // Read-only dashboard landing — for spectators / officials who only
+  // need to watch progress. Combine with role=viewer for a fully
+  // locked-down account.
+  { value: 'read-only',    label: 'Read-only Dashboard' },
 ];
 
 // Mirror of USERNAME_SUFFIX from auth.js — kept duplicated here only because

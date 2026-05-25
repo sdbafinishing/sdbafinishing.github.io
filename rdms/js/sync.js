@@ -237,14 +237,21 @@ async function attemptSync() {
   try { await syncPromise; } finally { syncPromise = null; }
 }
 
+// Track most recent sync activity so the Setup status indicator + the
+// race-day prompt can show whether Supabase is actually receiving data.
+let lastSyncAt = null;
+let lastSyncError = null;
+let lastSyncWrites = 0;
+
+export function getSyncDiagnostics() {
+  return { lastSyncAt, lastSyncError, lastSyncWrites };
+}
+
 async function doSync(sb) {
   try {
     // Get all pending items (synced_at is null)
     const allPending = (await db.sync_queue.toArray()).filter(item => !item.synced_at);
 
-    // Dead-code-cleanup: `isSyncing` was an earlier boolean lock that
-    // got replaced by syncPromise above; this assignment used to clear
-    // the legacy flag. Nothing references it now, so we just early-out.
     if (allPending.length === 0) return;
 
     // Dedup: keep latest per table+key
@@ -253,27 +260,41 @@ async function doSync(sb) {
       deduped[`${item.table_name}:${item.key}`] = item;
     }
 
+    let writes = 0;
+    let firstErr = null;
     for (const item of Object.values(deduped)) {
       try {
         if (item.table_name === 'race_snapshots') {
           const snapshot = await buildRaceSnapshot(item.key);
           if (snapshot) {
-            await sb.from('race_snapshots').upsert(snapshot, { onConflict: 'race_number,event_ref' });
+            const { error } = await sb.from('race_snapshots').upsert(snapshot, { onConflict: 'race_number,event_ref' });
+            if (error) throw error;
           }
         } else if (item.table_name === 'event_config') {
           const eventSnap = await buildEventSnapshot();
           if (eventSnap) {
-            await sb.from('event_config').upsert(eventSnap, { onConflict: 'event_ref' });
+            const { error } = await sb.from('event_config').upsert(eventSnap, { onConflict: 'event_ref' });
+            if (error) throw error;
           }
         }
 
         // Mark synced
         await db.sync_queue.update(item.id, { synced_at: new Date().toISOString() });
+        writes++;
       } catch (err) {
         console.warn('Sync failed for item:', item, err);
+        if (!firstErr) firstErr = err;
         // Don't mark as synced — will retry next time
         break;
       }
+    }
+
+    lastSyncAt = new Date().toISOString();
+    lastSyncWrites = writes;
+    if (firstErr) {
+      lastSyncError = firstErr.message || String(firstErr);
+    } else {
+      lastSyncError = null;
     }
 
     // Cleanup old synced items (keep last 100)
@@ -284,7 +305,53 @@ async function doSync(sb) {
     }
   } catch (err) {
     console.warn('Sync error:', err);
+    lastSyncError = err.message || String(err);
+    lastSyncAt = new Date().toISOString();
   }
+}
+
+/**
+ * Force-flush every race + event config to Supabase, ignoring the
+ * sync_queue state. Used by the manual "Sync now" button in Setup —
+ * race-day operators who lost coverage / queue rows can recover with
+ * one click. Returns { writes, error } so the UI can surface result.
+ */
+export async function forceFullSync() {
+  const sb = await getSupabase();
+  if (!sb) {
+    return { writes: 0, error: 'Supabase not configured (URL + anon key required in Setup).' };
+  }
+  let writes = 0;
+  let firstErr = null;
+  try {
+    const eventSnap = await buildEventSnapshot();
+    if (eventSnap) {
+      const { error } = await sb.from('event_config').upsert(eventSnap, { onConflict: 'event_ref' });
+      if (error) firstErr = error; else writes++;
+    }
+    if (!firstErr) {
+      const races = await getAllRaces();
+      for (const r of races) {
+        try {
+          const snap = await buildRaceSnapshot(r.race_number);
+          if (snap) {
+            const { error } = await sb.from('race_snapshots').upsert(snap, { onConflict: 'race_number,event_ref' });
+            if (error) { firstErr = error; break; }
+            writes++;
+          }
+        } catch (err) {
+          firstErr = err;
+          break;
+        }
+      }
+    }
+  } catch (err) {
+    firstErr = err;
+  }
+  lastSyncAt = new Date().toISOString();
+  lastSyncWrites = writes;
+  lastSyncError = firstErr ? (firstErr.message || String(firstErr)) : null;
+  return { writes, error: firstErr ? (firstErr.message || String(firstErr)) : null };
 }
 
 // ──── Lifecycle ────
@@ -294,6 +361,17 @@ async function doSync(sb) {
  * Listens for online events and syncs periodically.
  */
 export async function startSyncService() {
+  // Idempotent — kill any previous interval so re-calling after a
+  // config save (when supabase URL was newly set) doesn't accumulate
+  // timers. Without this, an operator who configured supabase post-
+  // boot would see the sync interval never installed.
+  if (syncInterval) {
+    clearInterval(syncInterval);
+    syncInterval = null;
+  }
+  // Reset cached client so a URL change picks up the new connection.
+  supabaseClient = null;
+
   // Check if sync is even configured before doing anything
   const config = await getConfig();
   if (!config?.supabase_url || !config?.supabase_anon_key) return; // Not configured — skip entirely
@@ -304,7 +382,10 @@ export async function startSyncService() {
     attemptSync();
   });
 
-  // Periodic sync every 30s (don't sync on init — wait for first state change)
+  // Periodic sync every 30s. Kick once immediately so any items
+  // queued during a previous session (before sync was configured)
+  // flush right away instead of waiting up to 30s.
+  attemptSync();
   syncInterval = setInterval(attemptSync, 30000);
 }
 

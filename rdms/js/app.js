@@ -204,6 +204,15 @@ export function broadcastChange(type, data = {}) {
   try {
     window.dispatchEvent(new CustomEvent(`rdms-${type}`, { detail: data }));
   } catch { /* no-op in environments without CustomEvent */ }
+
+  // Auto-sync to Supabase on every race-updated broadcast — catches all
+  // the start/finish/cancel/reset/joyi paths that previously only
+  // updated the local DB. The sync layer's own dedup keeps the actual
+  // upserts to one per race per flush cycle. Fire-and-forget; the
+  // periodic 30s retry handles transient failures.
+  if (type === 'race-updated' && data?.race_number) {
+    import('./sync.js').then(m => m.queueRaceSync(data.race_number)).catch(() => {});
+  }
 }
 
 // ──── Folder Connection ────
@@ -329,7 +338,11 @@ function routeToDefaultMode(mode) {
     window.location.href = STATION_URLS[mode];
     return true;
   }
-  if (mode === 'dashboard') return false; // already on dashboard route
+  // 'read-only' is an alias for the dashboard — explicit label in the
+  // user form for accounts that just need to watch progress, no edit
+  // permissions. Routes to dashboard (where the role gate handles the
+  // actual read-only enforcement).
+  if (mode === 'dashboard' || mode === 'read-only') return false;
   if (canAccessPage(mode)) {
     window.location.hash = `#/${mode}`;
     return true;
@@ -456,6 +469,223 @@ async function init() {
 
   // Initial navigation
   await navigate();
+
+  // Suggest connecting the event folder if nothing is connected yet.
+  // Fires once per page-load, dismissible — operators who don't need
+  // file IO (read-only viewers) can just click "Skip".
+  promptConnectFolderIfMissing().catch(() => {});
+}
+
+async function promptConnectFolderIfMissing() {
+  // Only show on actual app pages (not the public dashboard / sign-in
+  // splash). hasPermission gates on a real user being signed in.
+  const localOk = isSourceConnected();
+  const driveOk = isDriveApiConnected();
+  if (localOk || driveOk) {
+    // Folder already connected — still nudge the operator on watchers
+    // if neither is running. Most race-day pain is people forgetting to
+    // hit "Start watching" on Joyi.
+    await maybePromptStartWatchers();
+    return;
+  }
+  // Wait a beat so the page has rendered before stacking a modal on top.
+  await new Promise(r => setTimeout(r, 500));
+
+  const existing = document.getElementById('connectFolderPromptModal');
+  if (existing) existing.remove();
+
+  // Lazy-load watch modules so we don't pay the import cost on every
+  // page-load. They're only needed for the two extra buttons.
+  // Note: "Running" not "Enabled" — the intent flag persists across
+  // reloads via localStorage but the setInterval dies on page unload.
+  // The modal needs the actual-running state to decide what to show.
+  const [{ startDrawWatch, isDrawWatchRunning }, { startJoyiWatch, isJoyiWatchRunning }] = await Promise.all([
+    import('./draw-watch.js'),
+    import('./joyi-watch.js'),
+  ]);
+  const drawOn = isDrawWatchRunning();
+  const joyiOn = isJoyiWatchRunning();
+
+  const modal = document.createElement('div');
+  modal.id = 'connectFolderPromptModal';
+  modal.style.cssText = 'position:fixed; inset:0; background:var(--bg-overlay); z-index:9999; display:flex; align-items:center; justify-content:center; padding:20px;';
+  modal.innerHTML = `
+    <div style="background:var(--bg-card); border-radius:var(--radius-lg); padding:22px 26px; max-width:520px; width:100%; box-shadow:var(--shadow-lg);">
+      <h5 style="font-size:16px; font-weight:600; margin:0 0 10px;">
+        <i class="material-icons" style="vertical-align:middle; color:var(--accent);">folder_open</i>
+        Race-day setup
+      </h5>
+      <p style="font-size:13px; color:var(--text-secondary); margin:0 0 14px;">
+        RDMS needs the event folder connected to read draws / Joyi results
+        and to write exports. Connect once per browser session.
+      </p>
+
+      <div style="display:flex; flex-direction:column; gap:8px; margin-bottom:16px;">
+        <button class="btn btn-primary" id="connectPromptGo" style="justify-content:flex-start;">
+          <i class="material-icons" style="font-size:16px;">folder_open</i>
+          1. Connect event folder
+        </button>
+        <button class="btn btn-outline" id="connectPromptDrawWatch" style="justify-content:flex-start;" ${drawOn ? 'disabled' : ''}>
+          <i class="material-icons" style="font-size:16px;">visibility</i>
+          2. Start watching <code>01 Input_Draw/</code> ${drawOn ? '<span style="color:var(--success); font-size:11px; margin-left:6px;">● already running</span>' : ''}
+        </button>
+        <button class="btn btn-outline" id="connectPromptJoyiWatch" style="justify-content:flex-start;" ${joyiOn ? 'disabled' : ''}>
+          <i class="material-icons" style="font-size:16px;">visibility</i>
+          3. Start watching Joyi folder ${joyiOn ? '<span style="color:var(--success); font-size:11px; margin-left:6px;">● already running</span>' : ''}
+        </button>
+      </div>
+
+      <p style="font-size:12px; color:var(--text-tertiary); margin:0 0 14px;">
+        Watchers auto-import any new <code>.xls</code> / <code>.jyd</code> / <code>.lcd</code> that lands in the folder. You can also start them later via Im/Export.
+      </p>
+      <div style="display:flex; gap:8px; justify-content:flex-end;">
+        <button class="btn btn-ghost" id="connectPromptSkip">Skip for now</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  modal.querySelector('#connectPromptSkip').addEventListener('click', () => modal.remove());
+
+  // Pull intent flags up so the Connect handler can auto-restart watchers
+  // whose persisted intent says "on".
+  const { isDrawWatchEnabled } = await import('./draw-watch.js');
+  const { isJoyiWatchEnabled } = await import('./joyi-watch.js');
+
+  modal.querySelector('#connectPromptGo').addEventListener('click', async () => {
+    try {
+      await window._connectFolder('source');
+      const nowConnected = isSourceConnected() || isDriveApiConnected();
+      if (nowConnected) {
+        // Auto-restart any watcher whose persisted intent says "on" but
+        // whose timer isn't actually running this session. Race-day path:
+        // operator had Joyi watch enabled, reloaded the tab, expects it
+        // to resume the moment the folder is reconnected. Without this,
+        // the page just shows the watcher button + an out-of-date "Skip"
+        // CTA, and joyi files silently fail to auto-import.
+        if (isDrawWatchEnabled() && !isDrawWatchRunning()) {
+          try { await startDrawWatch(); } catch { /* surfaced by start() */ }
+        }
+        if (isJoyiWatchEnabled() && !isJoyiWatchRunning()) {
+          try { await startJoyiWatch(); } catch { /* surfaced by start() */ }
+        }
+        // Refresh button states in the modal so disabled state matches reality.
+        modal.querySelector('#connectPromptDrawWatch').disabled = isDrawWatchRunning();
+        modal.querySelector('#connectPromptJoyiWatch').disabled = isJoyiWatchRunning();
+        // Sync the close button label to match the post-connect state.
+        refreshConnectModalCTA();
+      }
+    } catch (err) {
+      console.warn('Connect folder from prompt failed:', err);
+    }
+  });
+
+  // Update the dismiss button text based on what's still actionable in
+  // the modal. When all three buttons are done, "Skip for now" is
+  // misleading — there's nothing left to skip. Change to "Close".
+  function refreshConnectModalCTA() {
+    const skipBtn = modal.querySelector('#connectPromptSkip');
+    if (!skipBtn) return;
+    const allDone =
+      (isSourceConnected() || isDriveApiConnected()) &&
+      isDrawWatchRunning() &&
+      isJoyiWatchRunning();
+    skipBtn.textContent = allDone ? 'Close' : 'Skip for now';
+  }
+
+  modal.querySelector('#connectPromptDrawWatch').addEventListener('click', async () => {
+    try {
+      await startDrawWatch();
+      modal.querySelector('#connectPromptDrawWatch').disabled = true;
+      refreshConnectModalCTA();
+    } catch (err) {
+      console.warn('Start draw watch failed:', err);
+    }
+  });
+
+  modal.querySelector('#connectPromptJoyiWatch').addEventListener('click', async () => {
+    try {
+      await startJoyiWatch();
+      modal.querySelector('#connectPromptJoyiWatch').disabled = true;
+      refreshConnectModalCTA();
+    } catch (err) {
+      console.warn('Start joyi watch failed:', err);
+    }
+  });
+
+  refreshConnectModalCTA();
+}
+
+// When a folder IS already connected, surface a slimmer "do you want
+// to start the watchers" nudge if they're off. Race-day operators
+// often connect the folder via Setup and forget the watcher toggles.
+async function maybePromptStartWatchers() {
+  const { isDrawWatchRunning, isDrawWatchEnabled, startDrawWatch } = await import('./draw-watch.js');
+  const { isJoyiWatchRunning, isJoyiWatchEnabled, startJoyiWatch } = await import('./joyi-watch.js');
+
+  // Auto-restart watchers on boot when the operator's persisted intent
+  // says "on" but the page-session timer isn't actually scanning yet.
+  // This is the common race-day path: reload the tab, watchers should
+  // resume automatically. Failures here are silent — start() will toast
+  // its own diagnostic if the folder isn't connected.
+  if (isDrawWatchEnabled() && !isDrawWatchRunning()) {
+    try { await startDrawWatch(); } catch { /* surfaced by start() */ }
+  }
+  if (isJoyiWatchEnabled() && !isJoyiWatchRunning()) {
+    try { await startJoyiWatch(); } catch { /* surfaced by start() */ }
+  }
+
+  // If after the auto-restart both watchers are running, no prompt needed.
+  if (isDrawWatchRunning() && isJoyiWatchRunning()) return;
+  // Single dismiss-per-session flag — don't re-nag on every navigation.
+  if (sessionStorage.getItem('rdms-watcher-prompt-dismissed') === '1') return;
+  await new Promise(r => setTimeout(r, 500));
+  if (document.getElementById('watcherPromptModal')) return;
+  const drawOn = isDrawWatchRunning();
+  const joyiOn = isJoyiWatchRunning();
+
+  const modal = document.createElement('div');
+  modal.id = 'watcherPromptModal';
+  modal.style.cssText = 'position:fixed; inset:0; background:var(--bg-overlay); z-index:9999; display:flex; align-items:center; justify-content:center; padding:20px;';
+  modal.innerHTML = `
+    <div style="background:var(--bg-card); border-radius:var(--radius-lg); padding:22px 26px; max-width:500px; width:100%; box-shadow:var(--shadow-lg);">
+      <h5 style="font-size:16px; font-weight:600; margin:0 0 10px;">
+        <i class="material-icons" style="vertical-align:middle; color:var(--accent);">visibility</i>
+        Start file watchers?
+      </h5>
+      <p style="font-size:13px; color:var(--text-secondary); margin:0 0 14px;">
+        Folder is connected. RDMS can auto-import draws + Joyi results
+        as soon as they appear in the folder. Start the watchers now?
+      </p>
+      <div style="display:flex; flex-direction:column; gap:8px; margin-bottom:14px;">
+        <button class="btn btn-outline" id="watcherPromptDraw" style="justify-content:flex-start;" ${drawOn ? 'disabled' : ''}>
+          <i class="material-icons" style="font-size:16px;">visibility</i>
+          Watch <code>01 Input_Draw/</code> ${drawOn ? '<span style="color:var(--success); font-size:11px; margin-left:6px;">● running</span>' : ''}
+        </button>
+        <button class="btn btn-outline" id="watcherPromptJoyi" style="justify-content:flex-start;" ${joyiOn ? 'disabled' : ''}>
+          <i class="material-icons" style="font-size:16px;">visibility</i>
+          Watch Joyi folder ${joyiOn ? '<span style="color:var(--success); font-size:11px; margin-left:6px;">● running</span>' : ''}
+        </button>
+      </div>
+      <div style="display:flex; gap:8px; justify-content:flex-end;">
+        <button class="btn btn-ghost" id="watcherPromptSkip">Skip for now</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  modal.querySelector('#watcherPromptSkip').addEventListener('click', () => {
+    sessionStorage.setItem('rdms-watcher-prompt-dismissed', '1');
+    modal.remove();
+  });
+  modal.querySelector('#watcherPromptDraw').addEventListener('click', async () => {
+    try { await startDrawWatch(); modal.querySelector('#watcherPromptDraw').disabled = true; }
+    catch (err) { console.warn('Start draw watch failed:', err); }
+  });
+  modal.querySelector('#watcherPromptJoyi').addEventListener('click', async () => {
+    try { await startJoyiWatch(); modal.querySelector('#watcherPromptJoyi').disabled = true; }
+    catch (err) { console.warn('Start joyi watch failed:', err); }
+  });
 }
 
 // Start the app

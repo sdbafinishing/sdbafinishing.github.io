@@ -271,8 +271,9 @@ async function renderEventRaces(container, eventRef) {
       <tbody>
         ${races.map(r => {
           const s = r.snapshot || {};
+          const parityClass = r.race_number % 2 === 1 ? 'race-row-odd' : 'race-row-even';
           return `
-            <tr>
+            <tr class="${parityClass}">
               <td><strong>${r.race_number}</strong></td>
               <td>${(s.title || '—').replace(/"/g, '&quot;')}</td>
               <td style="color:var(--text-secondary);">${s.race_time || ''}</td>

@@ -14,8 +14,8 @@
  * imported (so re-enabling the watcher doesn't re-import everything).
  */
 import { listNestedSubfolder, isSourceConnected } from './file-access.js';
-import { isDriveApiConnected, listDriveFiles, readDriveFile } from './drive-api.js';
-import { parseJoyiFile, parseJoyiAnyFile, importJoyiToDb } from './import.js';
+import { isDriveApiConnected, listDriveFiles, readDriveFile, readDriveFileRange } from './drive-api.js';
+import { parseJoyiFile, parseJoyiAnyFile, importJoyiToDb, deriveJoyiStartTime, setJoyiStartTimeOnRace } from './import.js';
 import { getConfig } from './db.js';
 import { showToast } from './utils.js';
 import { broadcastChange } from './app.js';
@@ -52,8 +52,17 @@ async function resolveFolderPath() {
   return `80 Shared/${ref}_Joyi`;
 }
 
+// "Enabled" = the operator's persisted intent. Survives reloads via
+// localStorage. Use this to auto-restart the watcher on boot.
 export function isJoyiWatchEnabled() {
   return localStorage.getItem(STORAGE_KEY) === '1';
+}
+
+// "Running" = the setInterval is actually active in THIS page session.
+// Use this for UI state (modal labels, "already running" indicators)
+// — the intent flag persists across reloads but the timer doesn't.
+export function isJoyiWatchRunning() {
+  return intervalId != null;
 }
 
 export function getJoyiWatchStatus() {
@@ -157,6 +166,36 @@ async function scanOnce() {
 
     for (const c of toImport) {
       try {
+        const isLcd = /\.lcd$/i.test(c.name);
+        if (isLcd) {
+          // .lcd files often land LATER than the .xls / .jyd because they
+          // are much larger. Process independently — derive
+          // joyi_start_time from the file and stamp it on the race even
+          // if the results were already imported earlier. Tolerant of
+          // races we haven't imported results for yet (the start time is
+          // still useful when results arrive shortly after).
+          const raceNumber = extractRaceNumberFromLcd(c.name);
+          if (!Number.isInteger(raceNumber)) {
+            // Filename didn't match {ref}.{N}.lcd — mark seen so we
+            // don't keep retrying.
+            seenMtimes.set(c.key, c.mtime);
+            continue;
+          }
+          const file = await c.getFile();
+          const iso = await deriveJoyiStartTime(file);
+          if (iso) {
+            await setJoyiStartTimeOnRace(raceNumber, iso);
+            broadcastChange('race-updated', { race_number: raceNumber, joyi_start: true });
+            showToast(`Auto-derived Joyi start (${backend}): ${c.name} → Race ${raceNumber}`, 'info', 3500);
+          }
+          // Whether iso came out null or not, record the mtime so we
+          // don't redo the same file on the next tick. A later
+          // file modification (Joyi re-export) would change the mtime
+          // and trigger another derive.
+          seenMtimes.set(c.key, c.mtime);
+          continue;
+        }
+
         const file = await c.getFile();
         // parseJoyiAnyFile picks the right parser by extension — supports
         // both .xls(x) and .jyd that may live in the Joyi folder.
@@ -180,12 +219,11 @@ async function scanOnce() {
         broadcastChange('race-updated', { race_number: parsed?.raceNumber });
         if (parsed?.raceNumber) {
           notifyResultEntryStarted(parsed.raceNumber).catch(() => {});
-          // Lazy-fetch the sibling .lcd in the background to derive
-          // joyi_start_time. Doesn't block this import — race results
-          // are already saved. The pending-state tracker will surface
-          // a small "Joyi start time loading…" chip on the race page
-          // until the fetch settles (typically < 1 s on Drive given
-          // the byte-range read is ~30 bytes).
+          // Best-effort kick of the lazy LCD fetch in case the sibling
+          // is ALREADY in the folder. If it isn't yet, this scan loop
+          // will pick it up later when its mtime appears in the
+          // candidates list (.lcd files often arrive after the .xls /
+          // .jyd because they're much bigger).
           enqueueLcdFetch(parsed.raceNumber);
         }
         showToast(`Auto-imported Joyi (${backend}): ${c.name} → Race ${parsed?.raceNumber ?? '?'}`, 'success', 4000);
@@ -207,10 +245,22 @@ async function scanOnce() {
 }
 
 // File System Access path: returns candidates with filename keys + ms mtimes.
+// Joyi result filenames look like "{ref}.{N}.xls". RDMS exports its own
+// start list to the SAME folder under names like "Joyi_StartList_*.xls"
+// — those must never be picked up by the result watcher (they'd parse
+// as junk results and clobber a real race). We also defend against
+// SprintTimer outputs ("SprintTimer_*") and any "startlist" pattern.
+const EXCLUDE_NAME_RE = /(startlist|sprinttimer)/i;
+
 async function listLocalCandidates(path) {
   const handles = await listNestedSubfolder(path);
-  // Only watch importable formats — same set we accept manually elsewhere.
-  const filtered = handles.filter(h => /\.(xlsx?|jyd)$/i.test(h.name));
+  // Watch all formats we care about: result files (.xls/.xlsx/.jyd) and
+  // start-time files (.lcd). .lcd is typically much larger so it tends
+  // to land after the results — the scan loop picks it up later and
+  // populates joyi_start_time once it appears.
+  const filtered = handles.filter(h =>
+    /\.(xlsx?|jyd|lcd)$/i.test(h.name) && !EXCLUDE_NAME_RE.test(h.name)
+  );
   const out = [];
   for (const h of filtered) {
     try {
@@ -230,7 +280,7 @@ async function listLocalCandidates(path) {
 async function listDriveCandidates(path) {
   const files = await listDriveFiles(path);
   return files
-    .filter(f => /\.(xlsx?|jyd)$/i.test(f.name))
+    .filter(f => /\.(xlsx?|jyd|lcd)$/i.test(f.name) && !EXCLUDE_NAME_RE.test(f.name))
     .map(f => ({
       key: f.id,
       name: f.name,
@@ -240,6 +290,16 @@ async function listDriveCandidates(path) {
         return new File([buf], f.name);
       },
     }));
+}
+
+// Parse "{event_ref}.{race_number}.lcd" → race_number. Whitespace-tolerant
+// in the prefix (Joyi sometimes writes "2026 WU.7.lcd" instead of
+// "2026WU.7.lcd"). Returns NaN when the filename doesn't match.
+function extractRaceNumberFromLcd(filename) {
+  if (!filename) return NaN;
+  const m = String(filename).match(/\.(\d+)\.lcd$/i);
+  if (!m) return NaN;
+  return parseInt(m[1], 10);
 }
 
 function isNewer(a, b) {
