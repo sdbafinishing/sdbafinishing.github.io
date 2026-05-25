@@ -194,6 +194,15 @@ channel.onmessage = (event) => {
   }
 };
 
+// Same-tab listener — BroadcastChannel.onmessage only fires in OTHER
+// tabs of the same origin, so the tab that called broadcastChange()
+// itself needs its own hook. Without this, DB Admin → Restore (and
+// any other same-tab config write) leaves the nav badge stale until
+// page reload. The CustomEvent is dispatched in broadcastChange below.
+window.addEventListener('rdms-config-updated', () => {
+  updateNavEventName();
+});
+
 export function broadcastChange(type, data = {}) {
   channel.postMessage({ type, ...data });
   // Also fan out a window CustomEvent so same-tab subscribers (e.g. the
