@@ -240,59 +240,56 @@ group('Joyi start list format', () => {
     if (sheetName !== 'Joyi_StartList') throw new Error(`sheet name should be "Joyi_StartList", got "${sheetName}"`);
   });
 
-  test('fixXlsEnvelopeForJoyi byte-patches root → "Root Entry" + Excel CLSID; file stays readable', async () => {
-    // Exercises the REAL exported function (dependency-free byte patch) — not a
-    // re-implementation — so a regression in the actual code path is caught.
+  test('fixXlsForJoyi: ROW records injected, envelope re-stamped, merge kept, still readable', async () => {
+    // Exercises the REAL exported function. Asserts the three things Joyi needs
+    // that SheetJS omits / gets wrong:
+    //   1. ROW records (0x0208) — one per row (Joyi enumerates rows via them)
+    //   2. OLE root "Root Entry" + Excel CLSID
+    //   3. A1:D1 MERGEDCELLS (0x00E5) preserved
+    // ...AND that the result is still a valid, readable workbook.
     const CFB = (await import('cfb')).default || (await import('cfb'));
-    const { fixXlsEnvelopeForJoyi } = await import('../js/startlist.js');
+    const { fixXlsForJoyi } = await import('../js/startlist.js');
     const EXCEL_CLSID = '2008020000000000c000000000000046';
-    const ws = XLSX.utils.aoa_to_sheet([['2026WU'], ['0001', 1, 'WM15', '*AMB Dragon']]);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Joyi_StartList');
-    const written = XLSX.write(wb, { bookType: 'xls', type: 'array', bookSST: true });
-
-    const fixed = fixXlsEnvelopeForJoyi(written);
-    const root = CFB.parse(fixed, { type: 'array' }).FileIndex.find(f => f.type === 5);
-    eq(root.name, 'Root Entry', 'root entry must be named "Root Entry"');
-    eq(root.clsid, EXCEL_CLSID, 'root CLSID must be the Excel workbook class');
-
-    const reread = XLSX.read(fixed, { type: 'array' });
-    eq(reread.SheetNames[0], 'Joyi_StartList', 'sheet name must survive the envelope fix');
-    if (reread.Sheets['Joyi_StartList'].A1?.v !== '2026WU') {
-      throw new Error('cell A1 lost after envelope fix');
-    }
-  });
-
-  test('A1:D1 merge is emitted (MERGEDCELLS record) — Joyi requirement', async () => {
-    // Joyi only accepts the start list when the row-1 banner cell is merged
-    // across the 4 data columns (operator-confirmed: merging A1:D1 made an
-    // otherwise-rejected file load). generateJoyiStartList sets ws['!merges'];
-    // assert SheetJS writes the BIFF MERGEDCELLS (0x00E5) record AND the merge
-    // survives the envelope byte-patch.
-    const CFB = (await import('cfb')).default || (await import('cfb'));
-    const { fixXlsEnvelopeForJoyi } = await import('../js/startlist.js');
-    const ws = XLSX.utils.aoa_to_sheet([['2026WU'], ['考点：'], ['组号', '道次', '准考证号', '姓名'], ['0001', 1, 'WM15', 'X']]);
+    const aoa = [
+      ['2026WU'],
+      ['考点：', '', '', '项目：', '.（2026WU）'],
+      ['组号', '道次', '准考证号', '姓名'],
+      ['0001', 1, 'WM15', '*AMB Dragon'],
+      ['0001', 2, 'WM16', 'Team B'],
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
     ws['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 3 } }];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Joyi_StartList');
-    const fixed = fixXlsEnvelopeForJoyi(XLSX.write(wb, { bookType: 'xls', type: 'array', bookSST: true }));
+    const fixed = fixXlsForJoyi(XLSX.write(wb, { bookType: 'xls', type: 'array', bookSST: true }));
 
-    // Merge present on re-read
-    const reread = XLSX.read(fixed, { type: 'array' });
-    const merges = reread.Sheets['Joyi_StartList']['!merges'] || [];
-    if (!merges.some(m => m.s.r === 0 && m.s.c === 0 && m.e.r === 0 && m.e.c === 3)) {
-      throw new Error('A1:D1 merge missing after write+envelope patch');
-    }
-    // MERGEDCELLS (0x00E5) record present in the Workbook BIFF stream
-    const data = CFB.parse(fixed, { type: 'array' }).FileIndex.find(f => /workbook/i.test(f.name)).content;
-    let off = 0, hasMerge = false;
+    // Envelope
+    const cont = CFB.parse(fixed, { type: 'array' });
+    const root = cont.FileIndex.find(f => f.type === 5);
+    eq(root.name, 'Root Entry', 'root entry must be "Root Entry"');
+    eq(root.clsid, EXCEL_CLSID, 'root CLSID must be the Excel workbook class');
+
+    // ROW + MERGEDCELLS records in the Workbook BIFF stream
+    const data = cont.FileIndex.find(f => /workbook/i.test(f.name)).content;
+    let off = 0, nRow = 0, hasMerge = false;
     while (off + 4 <= data.length) {
       const t = data[off] | (data[off + 1] << 8);
       const len = data[off + 2] | (data[off + 3] << 8);
+      if (t === 0x0208) nRow++;
       if (t === 0x00E5) hasMerge = true;
       off += 4 + len;
     }
-    if (!hasMerge) throw new Error('MERGEDCELLS (0x00E5) record not emitted');
+    eq(nRow, aoa.length, `expected one ROW record per row (${aoa.length}), got ${nRow}`);
+    if (!hasMerge) throw new Error('A1:D1 MERGEDCELLS (0x00E5) record missing');
+
+    // Still a valid workbook
+    const reread = XLSX.read(fixed, { type: 'array' });
+    eq(reread.SheetNames[0], 'Joyi_StartList', 'sheet name must survive the fix');
+    if (reread.Sheets['Joyi_StartList'].A1?.v !== '2026WU') throw new Error('cell A1 lost after fix');
+    const merges = reread.Sheets['Joyi_StartList']['!merges'] || [];
+    if (!merges.some(m => m.s.r === 0 && m.s.c === 0 && m.e.r === 0 && m.e.c === 3)) {
+      throw new Error('A1:D1 merge missing after fix');
+    }
   });
 });
 
