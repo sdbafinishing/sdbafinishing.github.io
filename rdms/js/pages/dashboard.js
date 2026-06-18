@@ -169,39 +169,29 @@ function renderPublicDashboard(container, stationMode) {
   setTimeout(() => {
     const panel = document.getElementById('publicSignalPanel');
     if (!panel) return;
-    // On phones the hero boxes (flex:1) grew to fill the viewport, pushing the
-    // Race number + STOP button below the fold. Cap them on mobile so all three
-    // boxes + the footer fit; keep the big hero layout on larger screens.
-    const isMobile = window.matchMedia('(max-width: 600px)').matches;
+    // Tall hero boxes that fill the available space. The footer (Race # +
+    // STOP) stays visible because the container is sized to 100dvh (so the
+    // mobile URL bar can't push it off-screen) and the boxes flex within the
+    // remaining height (min-height:0 lets them shrink to fit short screens).
     panel.querySelectorAll('.signal-box').forEach(box => {
       const field = box.getAttribute('data-field');
       const isClickable = modeInfo.canToggle === field;
       Object.assign(box.style, {
-        flex: isMobile ? '0 0 auto' : '1',
-        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-        borderRadius: isMobile ? '12px' : '16px',
-        padding: isMobile ? '8px' : '16px',
-        minHeight: '0',
-        maxHeight: isMobile ? '64px' : 'none',
-        fontSize: '14px',
+        flex: '1', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+        borderRadius: '16px', padding: '16px', fontSize: '14px', minHeight: '0',
         borderWidth: isClickable ? '3px' : '2px', opacity: isClickable ? '1' : '0.7',
       });
       const dot = box.querySelector('.signal-dot');
-      if (dot) {
-        const sz = isMobile ? '14px' : '24px';
-        dot.style.width = sz; dot.style.height = sz; dot.style.marginTop = isMobile ? '4px' : '8px';
-      }
+      if (dot) { dot.style.width = '24px'; dot.style.height = '24px'; dot.style.marginTop = '8px'; }
       if (isClickable) {
         const lbl = document.createElement('div');
-        lbl.style.cssText = `font-size:10px; margin-top:${isMobile ? '2px' : '6px'}; opacity:0.5; text-transform:uppercase; letter-spacing:1px;`;
+        lbl.style.cssText = 'font-size:10px; margin-top:6px; opacity:0.5; text-transform:uppercase; letter-spacing:1px;';
         lbl.textContent = 'tap to toggle';
         box.appendChild(lbl);
       }
     });
     const inner = panel.querySelector('div');
-    // Mobile: don't let the box column stretch (flex:1) — keep it compact at the
-    // top so the footer (Race # + STOP) stays visible. Desktop: fill the hero.
-    if (inner) inner.style.cssText = `display:flex; flex-direction:column; gap:${isMobile ? '8px' : '10px'}; ${isMobile ? '' : 'flex:1;'}`;
+    if (inner) inner.style.cssText = 'display:flex; flex-direction:column; gap:10px; flex:1; min-height:0;';
   }, 100);
 
   updatePublicRaceNumber();
