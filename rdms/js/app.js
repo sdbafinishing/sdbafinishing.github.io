@@ -8,7 +8,7 @@ import { requestSourceFolder, isSourceConnected } from './file-access.js';
 import { needsDriveFallback, initDriveApi, requestDriveAccess, isDriveApiConnected } from './drive-api.js';
 import './rbac.js'; // Initialize RBAC (exposes window._hasPermission)
 import { startSyncService } from './sync.js';
-import { initWebVersion, showEventPicker, getWebSupabase } from './web-init.js';
+import { initWebVersion, showEventPicker, getWebSupabase, startWebDashboardPoll } from './web-init.js';
 import { mountDashboard, unmountDashboard } from './pages/dashboard.js';
 import { mountSetup, unmountSetup } from './pages/setup.js';
 import { mountRacePage, unmountRacePage } from './pages/race-page.js';
@@ -254,6 +254,25 @@ window._connectFolder = async (type) => {
     }
   }
   updateFolderIcons();
+
+  // After a (re)connect, resume any watcher whose persisted intent is "on"
+  // but whose timer isn't running this session — e.g. after a DB restore
+  // paused the loops and reset the folder handle. startJoyiWatch/start-
+  // DrawWatch re-resolve the folder path from the (possibly new) event and
+  // re-bootstrap their seen-files baseline. No-op when nothing is enabled,
+  // or after a "switch folder" (which clears the intent via stop*Watch).
+  try {
+    if (isSourceConnected() || isDriveApiConnected()) {
+      const { isJoyiWatchEnabled, isJoyiWatchRunning, startJoyiWatch } = await import('./joyi-watch.js');
+      if (isJoyiWatchEnabled() && !isJoyiWatchRunning()) {
+        try { await startJoyiWatch(); } catch { /* surfaced by start() */ }
+      }
+      const { isDrawWatchEnabled, isDrawWatchRunning, startDrawWatch } = await import('./draw-watch.js');
+      if (isDrawWatchEnabled() && !isDrawWatchRunning()) {
+        try { await startDrawWatch(); } catch { /* surfaced by start() */ }
+      }
+    }
+  } catch { /* watch modules optional */ }
 };
 
 function updateFolderIcons() {
@@ -484,6 +503,11 @@ async function init() {
         routeToDefaultMode(authResult.defaultMode);
       }
     }
+
+    // Keep a left-open web viewer current: poll Supabase for race-snapshot
+    // changes so a second tab showing the dashboard tracks the operator's
+    // local app without a manual reload. Online only; no-op locally.
+    startWebDashboardPoll();
   }
 
   await updateNavEventName();
@@ -503,6 +527,16 @@ async function init() {
 }
 
 async function promptConnectFolderIfMissing() {
+  // View-only / public users never do file IO — they're here to watch the
+  // 3 digital flags, not import/export. Don't nag them to connect a folder.
+  //   • Web + not signed in  → public viewer (note: the RBAC role defaults
+  //     to "admin" before login, so we must check isAuthenticated, not just
+  //     the permission).
+  //   • Any host + signed-in "viewer" role → read-only, lacks file perms.
+  //   • Local dev is always an authenticated admin → falls through.
+  if (!isLocal() && !isAuthenticated) return;
+  if (!hasPermission('race.import_joyi')) return;
+
   // Only show on actual app pages (not the public dashboard / sign-in
   // splash). hasPermission gates on a real user being signed in.
   const localOk = isSourceConnected();

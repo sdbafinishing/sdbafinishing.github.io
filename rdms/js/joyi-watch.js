@@ -127,6 +127,28 @@ export function stopJoyiWatch() {
   onTick = null;
 }
 
+/**
+ * Pause the scan loop WITHOUT clearing the operator's persisted intent.
+ *
+ * Used when the source folder handle is reset mid-session — notably DB
+ * Admin → Restore, which may switch to a different event whose Joyi files
+ * live under a different folder path. The running loop holds a stale
+ * `folderPath` + a `seenMtimes` baseline bootstrapped against the OLD
+ * folder, so it silently imports nothing after the restore (the operator
+ * sees auto-poll "stop working" and has to import manually).
+ *
+ * Pausing here (vs stopJoyiWatch) keeps `isJoyiWatchEnabled()` true, so the
+ * folder-reconnect path restarts the watcher FRESH — re-resolving the path
+ * from the restored config and re-bootstrapping the seen-files baseline.
+ */
+export function pauseJoyiWatch() {
+  if (intervalId) {
+    clearInterval(intervalId);
+    intervalId = null;
+  }
+  onTick = null;
+}
+
 async function scanOnce() {
   if (scanInFlight) return; // skip if previous tick still importing
   scanInFlight = true;
@@ -188,6 +210,13 @@ async function scanOnce() {
             broadcastChange('race-updated', { race_number: raceNumber, joyi_start: true });
             showToast(`Auto-derived Joyi start (${backend}): ${c.name} → Race ${raceNumber}`, 'info', 3500);
           }
+          // #4 — background-generate the photo-finish results PNG into the
+          // results share folder so the race page can read it instantly.
+          // Parallel trigger: fire-and-forget, never blocks the scan loop or
+          // the start-time derive above; no-op if the PNG already exists.
+          import('./photo-finish-png.js')
+            .then(m => m.backgroundGeneratePhotoFinishPng(raceNumber, file))
+            .catch(() => {});
           // Whether iso came out null or not, record the mtime so we
           // don't redo the same file on the next tick. A later
           // file modification (Joyi re-export) would change the mtime
@@ -216,7 +245,9 @@ async function scanOnce() {
         }
         seenMtimes.set(c.key, c.mtime);
         importedSinceStart++;
-        broadcastChange('race-updated', { race_number: parsed?.raceNumber });
+        // joyi_results flags a fresh RESULTS import (vs a start-time/LCD
+        // update) so the race page can auto-open Export & Send when clean.
+        broadcastChange('race-updated', { race_number: parsed?.raceNumber, joyi_results: true });
         if (parsed?.raceNumber) {
           notifyResultEntryStarted(parsed.raceNumber).catch(() => {});
           // Best-effort kick of the lazy LCD fetch in case the sibling

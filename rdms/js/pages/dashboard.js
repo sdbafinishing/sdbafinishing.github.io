@@ -31,6 +31,7 @@ function effectiveStartMs(race) {
 let refreshInterval = null;
 let isAuthenticatedUser = false;
 let lastRaceHash = ''; // Change detection — skip re-render if data unchanged
+let unsubCurrentRace = null; // Firebase live current-race subscription (public view)
 
 export async function mountDashboard(container, params) {
   // Detect auth state
@@ -70,6 +71,7 @@ export function unmountDashboard() {
   delete window._switchStationMode;
   delete window._eventLockOpen;
   lastRaceHash = '';
+  if (unsubCurrentRace) { try { unsubCurrentRace(); } catch {} unsubCurrentRace = null; }
   cleanupSignalPanel();
 }
 
@@ -254,13 +256,32 @@ async function updatePublicRaceNumber() {
   const titleEl = document.getElementById('publicRaceTitle');
   if (!raceEl) return;
 
+  // Initial paint from local config (fallback / instant). May be absent on the
+  // online viewer when Supabase hasn't hydrated — the live Firebase feed below
+  // is the authoritative, real-time source and overrides this.
   if (config?.last_signaled_race) {
     raceEl.textContent = config.last_signaled_race;
-    // Try to get race title
     const races = await getAllRaces();
     const race = races.find(r => r.race_number === config.last_signaled_race);
     if (titleEl && race) titleEl.textContent = race.race_title || '';
   }
+
+  // Live current-race feed from Firebase — same real-time, login-free path as
+  // the digital flags, independent of Supabase. Keeps the label fresh as races
+  // progress and works in pre-login view-only mode.
+  try {
+    const { subscribeCurrentRace } = await import('../flag-signal.js');
+    if (unsubCurrentRace) { try { unsubCurrentRace(); } catch {} }
+    unsubCurrentRace = await subscribeCurrentRace(({ raceNumber, raceTitle }) => {
+      const rEl = document.getElementById('publicCurrentRace');
+      const tEl = document.getElementById('publicRaceTitle');
+      if (!rEl) return;
+      if (raceNumber != null && raceNumber !== '') {
+        rEl.textContent = raceNumber;
+        if (tEl) tEl.textContent = raceTitle || '';
+      }
+    });
+  } catch { /* Firebase unavailable — local fallback already painted */ }
 }
 
 // ──── FULL DASHBOARD (authenticated) ────
@@ -376,7 +397,7 @@ async function renderDashboard() {
 
   renderSummary(races);
   await renderCurrentNext(races);
-  renderDelayTracking(races);
+  await renderDelayTracking(races);
   await renderNextRacePanel();
   await renderAlerts(races);
 
@@ -572,9 +593,26 @@ function parseSchedToday(raceTime) {
   return d;
 }
 
-function renderDelayTracking(races) {
+// Today's date as YYYY-MM-DD in local time (matches config.race_date format).
+function localTodayISO() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+async function renderDelayTracking(races) {
   const panel = document.getElementById('delayPanel');
   if (!panel) return;
+
+  // Schedule / delay tracking is only meaningful for TODAY's event. The
+  // schedule times are anchored onto the current day (parseSchedToday), so for
+  // a past or future event the delta is nonsense (e.g. "started 38854 min
+  // early"). When the configured event date isn't today, hide the banner.
+  const config = await getConfig();
+  const raceDate = (config?.race_date || '').trim();
+  if (raceDate && raceDate !== localTodayISO()) {
+    panel.innerHTML = '';
+    return;
+  }
 
   // Two independent measures of delay, both in minutes:
   //   x = "started delay" — how late the LAST started race actually started

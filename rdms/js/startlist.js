@@ -4,9 +4,53 @@
  * Output to both local 02/ folder (download) and Drive share folder.
  */
 import * as XLSX from 'xlsx';
+import * as CFBmod from 'cfb';
 import { getConfig, getAllRaces, getLaneResults, getRace } from './db.js';
 import { showToast, rowsToCsvBlob } from './utils.js';
 import { writeToBoth, downloadFallback } from './file-access.js';
+
+const CFB = CFBmod.default || CFBmod;
+
+// Excel BIFF8 workbook CLSID — {00020820-0000-0000-C000-000000000046},
+// stored little-endian as the OLE2 root-entry class id.
+const EXCEL_WORKBOOK_CLSID = '2008020000000000c000000000000046';
+
+/**
+ * Re-stamp the OLE2 container envelope SheetJS produces so Joyi's BIFF8
+ * reader accepts the .xls.
+ *
+ * SheetJS writes the compound-file root entry named "R" with an all-zero
+ * CLSID (plus a private "\x01Sh33tJ5" marker stream). Real Excel — and the
+ * file Joyi accepts — names the root "Root Entry" and stamps the Excel
+ * workbook CLSID. Joyi keys on that standard envelope, so the SheetJS
+ * default is silently rejected. We learned this by diffing a generated
+ * file (rejected) against the same file re-saved by Excel (accepted): the
+ * only meaningful difference was the root name + CLSID.
+ *
+ * This rewrites only the directory envelope — the Workbook stream (BIFF
+ * records, SST, sheet name) is untouched, so the file stays byte-for-byte
+ * valid for SheetJS too. Wrapped in try/catch: a cosmetic envelope fix
+ * must never block the export.
+ *
+ * @param {ArrayBuffer|Uint8Array} written - XLSX.write(..., {type:'array'})
+ * @returns {Uint8Array}
+ */
+function fixXlsEnvelopeForJoyi(written) {
+  const u8 = written instanceof Uint8Array ? written : new Uint8Array(written);
+  try {
+    const cont = CFB.parse(u8, { type: 'array' });
+    const root = cont.FileIndex.find(f => f.type === 5);
+    if (!root) return u8;
+    root.name = 'Root Entry';
+    root.clsid = EXCEL_WORKBOOK_CLSID;
+    cont.FullPaths = cont.FullPaths.map(p =>
+      p.replace(/^R\//, 'Root Entry/').replace(/^R$/, 'Root Entry'));
+    const out = CFB.write(cont, { type: 'array' });
+    return out instanceof Uint8Array ? out : new Uint8Array(out);
+  } catch {
+    return u8; // never block the export on the envelope fix
+  }
+}
 
 // Resolve "team in boat lane X for race R". Prefers race.draw_lanes
 // (the draw-time snapshot that survives Joyi imports), falling back to
@@ -93,7 +137,14 @@ export async function generateJoyiStartList() {
   // (pointing into the Shared String Table) instead of inline LABEL
   // records. Joyi's BIFF8 parser only reads strings via the SST — the
   // file we shipped yesterday had an EMPTY SST and Joyi rejected it.
-  const xlsBlob = new Blob([XLSX.write(wb, { bookType: 'xls', type: 'array', bookSST: true })]);
+  // bookSST: true emits LABELSST records (strings via the Shared String
+  // Table) — Joyi's parser only reads strings through the SST.
+  // fixXlsEnvelopeForJoyi then repairs the OLE2 root entry name + CLSID so
+  // Joyi accepts the container itself. Both are required.
+  const xlsBytes = fixXlsEnvelopeForJoyi(
+    XLSX.write(wb, { bookType: 'xls', type: 'array', bookSST: true })
+  );
+  const xlsBlob = new Blob([xlsBytes]);
   const { local, shared } = await writeToBoth(
     '11 Output_Start Lists', filename, xlsBlob,
     `80 Shared/${eventRef}_Joyi`

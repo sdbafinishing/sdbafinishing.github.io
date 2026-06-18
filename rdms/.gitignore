@@ -1,2 +1,5 @@
 node_modules/
 .DS_Store
+
+# Local sample/working files — real event data, never commit
+sample start list/

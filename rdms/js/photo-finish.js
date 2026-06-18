@@ -388,6 +388,71 @@ export async function showPhotoFinishPicker(race, preset = {}) {
  * @param {Object} race - the active race record (provides start_time)
  * @param {File[]} files - selected file(s); we look for one .lcd and one .jyd
  */
+/**
+ * Build the left-side info-panel metadata for a race. Shared reusable
+ * component used by BOTH the interactive crop modal (showPhotoFinishModal)
+ * and the unattended auto PNG generator (photo-finish-png.js) so the panel
+ * content is identical across the two — only the trigger is parallel.
+ *
+ * Field strategy:
+ *   - event_official_name_en/tc are OPTIONAL long names used only on the
+ *     photo-finish export. If both empty, fall back to the short
+ *     event_long_name_en (RDMS internal name), then to the short ref.
+ *   - div_main_name_en/tc are optional long division names with similar
+ *     fallback to the short division_name.
+ *   - Lane draw rows prefer race.draw_lanes (the boat-lane snapshot that
+ *     survives Joyi import); legacy races fall back to lane_results. Skip
+ *     lanes with no team, "---", or a DNS remark.
+ *
+ * laneTextSize is intentionally NOT set here — the caller computes it once
+ * the .lcd is parsed (it depends on the image height).
+ */
+export async function buildPhotoFinishMeta(race) {
+  const { getConfig, getAllDivisions, getLaneResults } = await import('./db.js');
+  const cfg = await getConfig();
+  let divInfo = null;
+  if (race?.division_id) {
+    const divs = await getAllDivisions();
+    divInfo = divs.find(d => d.id === race.division_id) || null;
+  }
+  let laneDraw = [];
+  if (race?.race_number != null) {
+    try {
+      if (Array.isArray(race.draw_lanes) && race.draw_lanes.length > 0) {
+        laneDraw = race.draw_lanes
+          .filter(dl => { const tn = (dl?.team_name || '').trim(); return tn && tn !== '---'; })
+          .sort((a, b) => (a.lane_number || 0) - (b.lane_number || 0))
+          .map(dl => ({ lane: dl.lane_number, team: dl.team_name }));
+      } else {
+        const lanes = await getLaneResults(race.race_number);
+        laneDraw = lanes
+          .filter(lr => {
+            const tn = (lr.team_name || '').trim();
+            if (!tn || tn === '---') return false;
+            if (lr.remarks === 'DNS') return false;
+            return true;
+          })
+          .sort((a, b) => (a.lane_number || 0) - (b.lane_number || 0))
+          .map(lr => ({ lane: lr.lane_number, team: lr.team_name }));
+      }
+    } catch { /* lane fetch is best-effort */ }
+  }
+  return {
+    eventEn: cfg?.event_official_name_en || cfg?.event_long_name_en || '',
+    eventTc: cfg?.event_official_name_tc || '',
+    eventShort: cfg?.event_short_ref || '',
+    eventColour: cfg?.event_colour_code_hex || '#0f172a',
+    raceDate: cfg?.race_date || '',
+    divEn: divInfo?.div_main_name_en || '',
+    divTc: divInfo?.div_main_name_tc || '',
+    divShort: divInfo?.division_name || '',
+    divColour: divInfo?.colour_hex || '',
+    raceNumber: race?.race_number,
+    raceTitle: race?.race_title || '',
+    laneDraw,
+  };
+}
+
 export async function showPhotoFinishModal(race, files) {
   const lcdFile = [...files].find(f => /\.lcd$/i.test(f.name));
   const jydFile = [...files].find(f => /\.jyd$/i.test(f.name));
@@ -409,69 +474,10 @@ export async function showPhotoFinishModal(race, files) {
     }
   }
 
-  // Resolve metadata for the left-side info panel.
-  //
-  // Field strategy:
-  //   - event_official_name_en/tc are the OPTIONAL long names used only on
-  //     the photo-finish export. If both empty, fall back to the existing
-  //     short event_long_name_en (RDMS internal name), then to short ref.
-  //   - div_main_name_en/tc are optional long division names with similar
-  //     fallback to the short division_name.
-  //   - Lane draw rows skip lanes with no team name, with "---" team name,
-  //     or with remarks === "DNS" (operator already marked DNS).
-  const { getConfig: _getCfg, getAllDivisions: _getDivs, getLaneResults: _getLanes } = await import('./db.js');
-  const _cfg = await _getCfg();
-  let _divInfo = null;
-  if (race?.division_id) {
-    const _divs = await _getDivs();
-    _divInfo = _divs.find(d => d.id === race.division_id) || null;
-  }
-  let _laneDraw = [];
-  if (race?.race_number != null) {
-    try {
-      // Prefer race.draw_lanes — the snapshot of {lane_number, team_name}
-      // taken at draw import time and refreshed on next-round-draw
-      // resolve. lane_results.team_name is overwritten by Joyi import
-      // (to the finisher's team name in finish order), so it can NOT
-      // be trusted as a source of truth for "team in boat lane X".
-      if (Array.isArray(race.draw_lanes) && race.draw_lanes.length > 0) {
-        _laneDraw = race.draw_lanes
-          .filter(dl => {
-            const tn = (dl?.team_name || '').trim();
-            return tn && tn !== '---';
-          })
-          .sort((a, b) => (a.lane_number || 0) - (b.lane_number || 0))
-          .map(dl => ({ lane: dl.lane_number, team: dl.team_name }));
-      } else {
-        // Fallback: legacy races without draw_lanes — read lane_results.
-        // Filter out DNS rows + dummy "---" teams as before.
-        const lanes = await _getLanes(race.race_number);
-        _laneDraw = lanes
-          .filter(lr => {
-            const tn = (lr.team_name || '').trim();
-            if (!tn || tn === '---') return false;
-            if (lr.remarks === 'DNS') return false;
-            return true;
-          })
-          .sort((a, b) => (a.lane_number || 0) - (b.lane_number || 0))
-          .map(lr => ({ lane: lr.lane_number, team: lr.team_name }));
-      }
-    } catch { /* lane fetch is best-effort */ }
-  }
-  const meta = {
-    eventEn: _cfg?.event_official_name_en || _cfg?.event_long_name_en || '',
-    eventTc: _cfg?.event_official_name_tc || '',
-    eventShort: _cfg?.event_short_ref || '',
-    eventColour: _cfg?.event_colour_code_hex || '#0f172a',
-    raceDate: _cfg?.race_date || '',
-    divEn: _divInfo?.div_main_name_en || '',
-    divTc: _divInfo?.div_main_name_tc || '',
-    divShort: _divInfo?.division_name || '',
-    divColour: _divInfo?.colour_hex || '',
-    raceNumber: race?.race_number,
-    raceTitle: race?.race_title || '',
-    laneDraw: _laneDraw,
-  };
+  // Resolve metadata for the left-side info panel. Shared with the auto PNG
+  // generator (photo-finish-png.js) via buildPhotoFinishMeta so both paths
+  // render an identical panel — only the trigger differs.
+  const meta = await buildPhotoFinishMeta(race);
 
   // Parse + render the .lcd. Try grayscale first; user can flip render mode.
   // `img` is needed for the lane-text auto-shrink below, so parse first.
@@ -1576,7 +1582,7 @@ function escapeHtml(s) {
  * Returning the same size for both the live HTML view and the export
  * canvas guarantees the rendered panel looks identical across the two.
  */
-function computeLaneTextSize(panelHeight, m) {
+export function computeLaneTextSize(panelHeight, m) {
   const PANEL_W = 320;
   const padX = 16, padY = 14;
   const usableW = PANEL_W - padX * 2;
@@ -1649,7 +1655,7 @@ function computeLaneTextSize(panelHeight, m) {
  * @param {number} h - panel height in canvas px
  * @param {Object} m - metadata object built in showPhotoFinishModal
  */
-function paintMetaPanelOnCanvas(ctx, x, y, w, h, m) {
+export function paintMetaPanelOnCanvas(ctx, x, y, w, h, m) {
   ctx.save();
   // White slab background.
   ctx.fillStyle = '#ffffff';

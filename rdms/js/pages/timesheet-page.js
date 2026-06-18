@@ -3,6 +3,7 @@
  * Timing log for all races: start, restart, export, send times + intervals.
  */
 import { getAllTimesheets, getAllRaces, getAllDivisions } from '../db.js';
+import { getEffectiveStartTime } from '../race.js';
 import { isoToTime } from '../utils.js';
 
 export async function mountTimesheetPage(container) {
@@ -18,13 +19,21 @@ export async function mountTimesheetPage(container) {
     .sort((a, b) => a.race_number - b.race_number)
     .map(r => {
       const ts = timesheets.find(t => t.race_number === r.race_number) || {};
-      return { ...r, ...ts };
+      const merged = { ...r, ...ts };
+      // Effective start respects the operator's per-race preference
+      // (prefer_manual_start) — e.g. when Joyi's start was late and the
+      // RDMS manual START is the authoritative time for the log. Default is
+      // Joyi-wins; matches what the race page shows. (#10)
+      const eff = getEffectiveStartTime(merged);
+      merged._effStart = eff.start;
+      merged._effStartSource = eff.source;
+      return merged;
     });
 
-  // Calculate intervals
+  // Calculate intervals — based on the effective start of each race.
   for (let i = 1; i < rows.length; i++) {
-    if (rows[i].start_time && rows[i - 1].start_time) {
-      const diff = new Date(rows[i].start_time).getTime() - new Date(rows[i - 1].start_time).getTime();
+    if (rows[i]._effStart && rows[i - 1]._effStart) {
+      const diff = new Date(rows[i]._effStart).getTime() - new Date(rows[i - 1]._effStart).getTime();
       rows[i]._interval = diff > 0 ? diff : null;
     }
   }
@@ -90,7 +99,7 @@ export async function mountTimesheetPage(container) {
             return `<tr>
               <td><strong>${r.race_number}</strong></td>
               <td><span class="division-color" style="background:${divColor};"></span>${divName}</td>
-              <td>${isoToTime(r.start_time)}</td>
+              <td>${isoToTime(r._effStart)}${r._effStartSource === 'manual' && r.joyi_start_time ? ' <span style="font-size:10px; color:var(--text-tertiary);">RDMS</span>' : ''}</td>
               <td>${isoToTime(r.restart_time)}</td>
               <td>${isoToTime(r.export_time)}</td>
               <td>${isoToTime(r.re_export_time)}</td>

@@ -283,6 +283,15 @@ async function restoreAll(file) {
     try {
       const { resetFolderAccess } = await import('../file-access.js');
       resetFolderAccess();
+      // Pause (don't stop) the folder watchers. The restored event may
+      // point at a different physical folder + Joyi path, so the running
+      // scan loops now hold a stale path + seen-files baseline and would
+      // silently import nothing. Pausing keeps the operator's "watching"
+      // intent, so reconnecting the folder restarts them fresh. Using
+      // stopJoyiWatch here instead would clear the intent and leave
+      // auto-poll dead until the operator re-enables it by hand.
+      try { const { pauseJoyiWatch } = await import('../joyi-watch.js'); pauseJoyiWatch(); } catch {}
+      try { const { pauseDrawWatch } = await import('../draw-watch.js'); pauseDrawWatch(); } catch {}
       if (typeof window._rdmsUpdateFolderIcons === 'function') window._rdmsUpdateFolderIcons();
     } catch { /* file-access may not be loaded yet */ }
   } catch (e) {

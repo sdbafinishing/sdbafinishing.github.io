@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "cfb": "^1.2.2",
     "dexie": "^4.0.11",
     "fflate": "^0.8.3",
     "xlsx": "^0.18.5"

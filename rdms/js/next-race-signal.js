@@ -62,6 +62,13 @@ export async function signalNextRace(raceNumber) {
     await saveConfig(config);
   }
 
+  // Publish the race number (+ title) to Firebase so the public view-only
+  // dashboard shows it live — same real-time, login-free path as the flags,
+  // independent of Supabase. Fire-and-forget.
+  import('./flag-signal.js')
+    .then(m => m.setCurrentRace(raceNumber, race?.race_title || ''))
+    .catch(() => {});
+
   // Call the Lambda API directly
   const apiUrl = config?.next_race_signal_api;
   if (apiUrl) {

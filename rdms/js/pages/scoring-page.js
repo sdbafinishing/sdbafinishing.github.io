@@ -207,6 +207,11 @@ async function renderScoringDiv(divId, scoredRaces, laneCount, timeMode, divisio
   // Check if any round has results
   const hasResults = teams.some(t => t.total_weighted > 0);
 
+  // Totals are provisional until the final round (RFinal) is scored — label
+  // them "so far" so a mid-series standing isn't mistaken for the final
+  // result. (#15)
+  const finalReached = scoredRaces.some(r => r.scoring_flag === 'RFinal');
+
   content.innerHTML = `
     <div class="card" style="margin-top:16px;">
       <div style="margin-bottom:12px;">
@@ -227,8 +232,8 @@ async function renderScoringDiv(divId, scoredRaces, laneCount, timeMode, divisio
                     ${r.scoring_flag}<br>
                     <a href="#/race/${r.race_number}" style="font-size:11px; color:var(--accent); text-decoration:underline;" title="Open race ${r.race_number}">Race ${r.race_number}</a>
                   </th>`).join('')}
-                  <th class="scoring-header">Total</th>
-                  <th class="scoring-header">Overall</th>
+                  <th class="scoring-header">Total${finalReached ? '' : '<br><span style="font-size:10px; font-weight:600; color:var(--warning-text, #b45309);">so far</span>'}</th>
+                  <th class="scoring-header">Overall${finalReached ? '' : '<br><span style="font-size:10px; font-weight:600; color:var(--warning-text, #b45309);">so far</span>'}</th>
                 </tr>
               </thead>
               <tbody>
@@ -250,6 +255,7 @@ async function renderScoringDiv(divId, scoredRaces, laneCount, timeMode, divisio
             </table>
           </div>
           <p style="font-size:11px; color:var(--text-tertiary); margin-top:8px;">
+            ${finalReached ? '' : '<strong>Provisional standings — the final round (RFinal) has not been scored yet; totals are "so far".</strong><br>'}
             ^ RFinal score includes ×1.001 multiplier as tiebreak decider for total score.
           </p>`
       }

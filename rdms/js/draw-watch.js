@@ -115,6 +115,19 @@ export function stopDrawWatch() {
   onTick = null;
 }
 
+/**
+ * Pause the scan loop WITHOUT clearing the operator's persisted intent.
+ * Mirror of pauseJoyiWatch — used on DB restore so the watcher restarts
+ * fresh against the restored event's folder once it is reconnected.
+ */
+export function pauseDrawWatch() {
+  if (intervalId) {
+    clearInterval(intervalId);
+    intervalId = null;
+  }
+  onTick = null;
+}
+
 async function scanOnce() {
   if (scanInFlight) return;
   scanInFlight = true;

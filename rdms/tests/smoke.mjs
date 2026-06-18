@@ -11,6 +11,7 @@
 import { computeRankings, validateRace, computeDivisionScoring, computeVarianceWarnings, getEffectiveStartTime } from '../js/race.js';
 import { joyiTimeToMs, joyiTimeHasMsPrecision, joyiTimeToRaw } from '../js/utils.js';
 import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx } from '../js/xlsx-patcher.js';
+import { photoFinishPngFilename, autoCropRange } from '../js/photo-finish-png.js';
 import { readFileSync } from 'fs';
 import * as XLSX from 'xlsx';
 import * as fflate from 'fflate';
@@ -236,6 +237,47 @@ group('Joyi start list format', () => {
     }
     if (sstUnique === 0) throw new Error('SST is empty — Joyi will reject. bookSST: true missing?');
     if (sheetName !== 'Joyi_StartList') throw new Error(`sheet name should be "Joyi_StartList", got "${sheetName}"`);
+  });
+
+  test('OLE2 envelope is re-stamped to "Root Entry" + Excel CLSID (Joyi requirement)', async () => {
+    // SheetJS writes the compound-file root entry as "R" with a zero CLSID,
+    // which Joyi rejects. startlist.js post-processes the bytes to rename the
+    // root to "Root Entry" and stamp the Excel workbook CLSID (matching what
+    // Excel writes). This mirrors that exact post-processing and asserts the
+    // result, AND that the file stays readable by SheetJS.
+    const CFB = (await import('cfb')).default || (await import('cfb'));
+    const EXCEL_CLSID = '2008020000000000c000000000000046';
+    const ws = XLSX.utils.aoa_to_sheet([['2026WU'], ['0001', 1, 'WM15', '*AMB Dragon']]);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Joyi_StartList');
+    const written = XLSX.write(wb, { bookType: 'xls', type: 'array', bookSST: true });
+
+    const u8 = written instanceof Uint8Array ? written : new Uint8Array(written);
+    const cont = CFB.parse(u8, { type: 'array' });
+    const rootBefore = cont.FileIndex.find(f => f.type === 5);
+    if (rootBefore.name !== 'R') {
+      // SheetJS default is "R"; if this ever changes the comment in
+      // startlist.js + this test should be revisited.
+      console.log(`    (note: SheetJS root name is "${rootBefore.name}", expected "R")`);
+    }
+    rootBefore.name = 'Root Entry';
+    rootBefore.clsid = EXCEL_CLSID;
+    cont.FullPaths = cont.FullPaths.map(p =>
+      p.replace(/^R\//, 'Root Entry/').replace(/^R$/, 'Root Entry'));
+    const fixedRaw = CFB.write(cont, { type: 'array' });
+    const fixed = fixedRaw instanceof Uint8Array ? fixedRaw : new Uint8Array(fixedRaw);
+
+    const check = CFB.parse(fixed, { type: 'array' });
+    const root = check.FileIndex.find(f => f.type === 5);
+    eq(root.name, 'Root Entry', 'root entry must be named "Root Entry"');
+    eq(root.clsid, EXCEL_CLSID, 'root CLSID must be the Excel workbook class');
+
+    // Still readable as a workbook + sheet name preserved.
+    const reread = XLSX.read(fixed, { type: 'array' });
+    eq(reread.SheetNames[0], 'Joyi_StartList', 'sheet name must survive the envelope fix');
+    if (reread.Sheets['Joyi_StartList'].A1?.v !== '2026WU') {
+      throw new Error('cell A1 lost after envelope fix');
+    }
   });
 });
 
@@ -622,6 +664,30 @@ group('setPageHeaderXlsx', () => {
     const matches = xml.match(/<headerFooter/g) || [];
     eq(matches.length, 1, 'should only have one headerFooter block');
     if (!/New EN/.test(xml)) throw new Error('updated EN line missing');
+  });
+});
+
+// ── Photo-finish PNG (auto-generate) — pure helpers ─────────────────────
+group('photo-finish PNG helpers', () => {
+  test('deterministic filename matches background save + smart read', () => {
+    eq(photoFinishPngFilename('2026WU', 5), 'PhotoFinish_2026WU_R5.png');
+    eq(photoFinishPngFilename('', 12), 'PhotoFinish_RDMS_R12.png'); // ref fallback
+  });
+
+  test('autoCropRange: no JYD → full strip', () => {
+    eq(autoCropRange({ displayWidth: 8000 }, null), [0, 8000]);
+    eq(autoCropRange({ displayWidth: 8000 }, { reachPoints: [] }), [0, 8000]);
+  });
+
+  test('autoCropRange: reach points → padded window, clamped to strip', () => {
+    // pad = 500 each side
+    eq(autoCropRange({ displayWidth: 8000 }, { reachPoints: [{ line: 3000 }, { line: 3200 }] }), [2500, 3700]);
+    // clamps to [0, displayWidth]
+    eq(autoCropRange({ displayWidth: 3300 }, { reachPoints: [{ line: 200 }, { line: 3100 }] }), [0, 3300]);
+  });
+
+  test('autoCropRange: malformed reach lines fall back to full strip', () => {
+    eq(autoCropRange({ displayWidth: 8000 }, { reachPoints: [{ line: NaN }, {}] }), [0, 8000]);
   });
 });
 

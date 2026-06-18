@@ -3,7 +3,35 @@
  * Generate formatted message, copy to clipboard, open WhatsApp Web.
  */
 import { getConfig, getRace, getLaneResults } from './db.js';
+import { computeRankings } from './race.js';
 import { timeToDisplay, showToast } from './utils.js';
+
+/**
+ * Build the finishing sequence string for a quick eyeball check, e.g.
+ * "2-5-6-3-1-4-7-8" — boat/draw lane numbers (lane_input) in finish order.
+ *
+ * Re-ranks from raw_time exactly as the export does (same time mode + batch
+ * delta) so the sequence shown matches the exported result, not whatever
+ * stale computed_position happens to sit in the DB rows. DSQ/DNS/DNF/no-time
+ * rows have no computed_position and are dropped. Returns '' when nothing is
+ * rankable yet.
+ *
+ * @param {number} raceNumber
+ * @returns {Promise<string>}
+ */
+export async function getFinishingSequence(raceNumber) {
+  const config = await getConfig();
+  const race = await getRace(raceNumber);
+  if (!race) return '';
+  const lanes = await getLaneResults(raceNumber);
+  const exportDelta = race.batch_override_enabled ? (race.batch_delta_ms || 0) : 0;
+  computeRankings(lanes, config?.time_format_mode || 'mss00', exportDelta);
+  return lanes
+    .filter(l => l.computed_position != null)
+    .sort((a, b) => a.computed_position - b.computed_position)
+    .map(l => l.lane_input || l.lane_number)
+    .join('-');
+}
 
 /**
  * Generate a WhatsApp-formatted results message for a race.
@@ -69,6 +97,12 @@ export async function sendToWhatsApp(raceNumber) {
     return;
   }
 
+  // Finishing sequence for the operator's eyeball check before sending —
+  // glance the order without parsing every time. Best-effort: never block
+  // the send if it can't be computed.
+  let finishSeq = '';
+  try { finishSeq = await getFinishingSequence(raceNumber); } catch { /* non-fatal */ }
+
   return new Promise((resolve) => {
     // Remove any orphaned modal from a prior aborted send.
     const existing = document.getElementById('rdmsWhatsAppModal');
@@ -87,6 +121,15 @@ export async function sendToWhatsApp(raceNumber) {
           Preparing clipboard… paste into your WhatsApp group. The race is
           recorded as sent now (when this dialog appeared).
         </p>
+        ${finishSeq ? `
+        <div style="display:flex; align-items:center; gap:8px; margin:0 0 12px; padding:10px 12px;
+                    background:var(--bg-elev); border:1px solid var(--border);
+                    border-radius:var(--radius-sm);">
+          <span style="font-size:11px; font-weight:700; text-transform:uppercase;
+                       letter-spacing:0.5px; color:var(--text-tertiary);">Finishing sequence</span>
+          <span style="font-family:monospace; font-size:18px; font-weight:700;
+                       letter-spacing:1px; color:var(--text-primary);">${finishSeq}</span>
+        </div>` : ''}
         <textarea id="waMsgBox" readonly style="
           width:100%; min-height:90px; max-height:200px; resize:vertical;
           padding:10px 12px; font-family:monospace; font-size:13px;

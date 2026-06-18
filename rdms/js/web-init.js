@@ -128,13 +128,42 @@ async function loadEventConfig(eventRef) {
   }
 
   // ────── race_snapshots ──────
+  // Full reset on event (re)selection so a previously-loaded event's races
+  // don't linger when switching to a smaller one.
+  await hydrateRaceSnapshots(eventRef, { clear: true });
+}
+
+/**
+ * Pull race snapshots for an event from Supabase into local IndexedDB.
+ *
+ * Shared by the initial event load (clear:true — full reset, drops stale races
+ * from a previously-selected event) and the periodic dashboard poll
+ * (clear:false — in-place refresh; bulkPut overwrites by primary key so no
+ * duplicates and no flicker while a live event's race count is stable).
+ *
+ * @param {string} eventRef
+ * @param {{ clear?: boolean }} [opts]
+ * @returns {Promise<boolean>} true when snapshots were fetched + applied
+ */
+async function hydrateRaceSnapshots(eventRef, { clear = false } = {}) {
+  if (!supabaseClient) return false;
+  const { db } = await import('./db.js');
+
   const { data: snapshots } = await supabaseClient
     .from('race_snapshots')
     .select('*')
     .eq('event_ref', eventRef)
     .order('race_number');
 
-  if (!snapshots) return;
+  if (!snapshots) return false; // fetch failed — leave existing data intact
+
+  if (clear) {
+    // Done AFTER the fetch succeeded so a transient failure can't blank the
+    // viewer. An empty event (snapshots === []) correctly clears to nothing.
+    await db.races.clear();
+    await db.lane_results.clear();
+    await db.timesheet.clear();
+  }
 
   // Races — preserve everything the snapshot carries (restart_time,
   // export_history, prev_send_time, p1_finish_*).
@@ -202,6 +231,43 @@ async function loadEventConfig(eventRef) {
     .filter(Boolean);
   if (timesheets.length > 0) {
     await db.timesheet.bulkPut(timesheets);
+  }
+
+  return true;
+}
+
+// ────── Live dashboard polling (web viewer only) ──────
+let webPollInterval = null;
+const WEB_POLL_MS = 20000;
+
+/**
+ * Periodically re-pull the selected event's race snapshots from Supabase so a
+ * web viewer left open (e.g. a second tab showing the dashboard while the
+ * operator works in the local app) stays current. The dashboard's own 10s
+ * render tick picks up the refreshed IndexedDB via its hash-based change
+ * detection, so we don't force a render here.
+ *
+ * Online viewer only; no-op locally. Skips polling while the tab is hidden to
+ * avoid needless Supabase traffic.
+ */
+export function startWebDashboardPoll() {
+  if (isLocal() || webPollInterval) return;
+  webPollInterval = setInterval(async () => {
+    if (document.hidden) return;
+    const ref = sessionStorage.getItem('rdms-web-event');
+    if (!ref || !supabaseClient) return;
+    try {
+      await hydrateRaceSnapshots(ref, { clear: false });
+    } catch (err) {
+      console.warn('web dashboard poll failed:', err);
+    }
+  }, WEB_POLL_MS);
+}
+
+export function stopWebDashboardPoll() {
+  if (webPollInterval) {
+    clearInterval(webPollInterval);
+    webPollInterval = null;
   }
 }
 

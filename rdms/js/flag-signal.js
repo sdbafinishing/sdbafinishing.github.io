@@ -80,3 +80,55 @@ export async function setFinishingFlag(ready) {
     return false;
   }
 }
+
+/**
+ * Publish the current/next race number (+ title) to Firebase so the public
+ * view-only dashboard can show it live — the same real-time, login-free path
+ * the flags use, with no Supabase dependency. Written whenever the next race
+ * is signaled.
+ *
+ * Schema:
+ *   race_status/CurrentRace      : number  (the race spectators should ready for)
+ *   race_status/CurrentRaceTitle : string  (optional human label)
+ *
+ * Fire-and-forget: never blocks the caller; logs but doesn't throw on error.
+ *
+ * @param {number} raceNumber
+ * @param {string} [raceTitle]
+ * @returns {Promise<boolean>}
+ */
+export async function setCurrentRace(raceNumber, raceTitle = '') {
+  try {
+    const db = await ensureFirebase();
+    await db.ref('race_status/CurrentRace').set(raceNumber ?? null);
+    await db.ref('race_status/CurrentRaceTitle').set(raceTitle || '');
+    return true;
+  } catch (err) {
+    console.warn('setCurrentRace failed:', err);
+    return false;
+  }
+}
+
+/**
+ * Subscribe to live current-race updates from Firebase. The callback receives
+ * { raceNumber, raceTitle } on every change. Returns an unsubscribe function.
+ * Used by the public view-only dashboard to show the race number live.
+ *
+ * @param {(info: {raceNumber: number|null, raceTitle: string}) => void} callback
+ * @returns {Promise<() => void>}
+ */
+export async function subscribeCurrentRace(callback) {
+  try {
+    const db = await ensureFirebase();
+    const ref = db.ref('race_status');
+    const handler = (snap) => {
+      const v = snap.val() || {};
+      callback({ raceNumber: v.CurrentRace ?? null, raceTitle: v.CurrentRaceTitle || '' });
+    };
+    ref.on('value', handler);
+    return () => { try { ref.off('value', handler); } catch { /* no-op */ } };
+  } catch (err) {
+    console.warn('subscribeCurrentRace failed:', err);
+    return () => {};
+  }
+}

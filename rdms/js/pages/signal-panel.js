@@ -241,6 +241,16 @@ export async function renderMiniSignalPanel(containerId) {
         <span style="font-size:12px; font-weight:700; letter-spacing:0.5px;
                      text-transform:uppercase; color:var(--text-secondary);">FN</span>
       </button>
+      <button id="miniStopBtn"
+              title="STOP RACE — alert all stations (red flash + sound)"
+              style="border:none; background:rgba(239,68,68,0.12); padding:0 12px;
+                     min-height:44px; border-radius:var(--radius-sm); cursor:pointer;
+                     display:flex; align-items:center; gap:6px;
+                     box-shadow:0 0 0 2px #ef4444 inset; color:#ef4444;
+                     font-size:12px; font-weight:800; letter-spacing:0.5px;
+                     text-transform:uppercase;">
+        <i class="material-icons" style="font-size:16px;">warning</i>STOP
+      </button>
     </div>
   `;
 
@@ -252,6 +262,22 @@ export async function renderMiniSignalPanel(containerId) {
         await dbRef.ref('race_status/FinishingReady').set(newVal);
       } catch (err) {
         console.warn('mini-flag toggle failed', err);
+      }
+    });
+  }
+
+  // STOP — fires the same `alertTrigger` the full panel uses (signal-panel
+  // renderSignalPanel → window._signalAlert). All station pages listen on
+  // this node and react with a full-screen red flash + alert sound. Kept
+  // identical so there's one STOP semantic across both panels.
+  const stopBtn = container.querySelector('#miniStopBtn');
+  if (stopBtn) {
+    stopBtn.addEventListener('click', async () => {
+      if (!confirm('Trigger STOP RACE alert to all stations?')) return;
+      try {
+        await dbRef.ref('alertTrigger').set(Date.now());
+      } catch (err) {
+        console.warn('mini STOP failed', err);
       }
     });
   }

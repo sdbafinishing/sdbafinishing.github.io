@@ -334,8 +334,11 @@ export async function mountRacePage(container, params) {
       <span style="border-left:1px solid var(--border); height:20px; margin:0 4px;"></span>
       <button class="btn btn-ghost btn-sm" onclick="window._printDraw()" title="Print draw"><i class="material-icons" style="font-size:16px;">description</i> Print Draw</button>
       <button class="btn btn-ghost btn-sm" onclick="window._downloadDraw()" title="Download draw as .xls"><i class="material-icons" style="font-size:16px;">download</i> Download Draw</button>
-      <button class="btn btn-ghost btn-sm" onclick="window._photoFinish()" title="Open Joyi photo-finish image (.lcd + .jyd)">
+      <button class="btn btn-ghost btn-sm" onclick="window._photoFinish()" title="Open Joyi photo-finish image (.lcd + .jyd) — interactive crop view">
         <i class="material-icons" style="font-size:16px;">photo_camera</i> Photo Finish
+      </button>
+      <button class="btn btn-ghost btn-sm" onclick="window._photoFinishPng()" title="View the photo-finish PNG — reads the saved image if present, else generates it">
+        <i class="material-icons" style="font-size:16px;">image</i> Photo PNG
       </button>
       ${hasPlaceholders && hasPermission('race.import_draw') ? (canResolveNow
         ? `<button class="btn btn-outline btn-sm" onclick="window._resolvePlaceholders()"
@@ -567,6 +570,50 @@ async function _onRaceUpdateRefresh(ev) {
   if (raceData.start_time || raceData.joyi_start_time) {
     if (!timerInterval) startTimer();
   }
+
+  // #7 — fresh Joyi RESULTS import on the race we're viewing: if it's clean,
+  // auto-open Export & Send so the operator just pastes the WhatsApp message.
+  if (detail.joyi_results) {
+    maybeAutoExportOnCleanJoyi().catch(() => {});
+  }
+}
+
+// Races whose clean-Joyi auto-export has already fired this session — guards
+// against re-firing on repeated broadcasts for the same import.
+const _autoExportFired = new Set();
+
+/**
+ * #7 — auto-open the Export & Send flow when a Joyi results import lands
+ * clean on the currently-viewed race. Tightly gated to avoid surprise
+ * exports:
+ *   • opt-out escape hatch (config.auto_export_on_clean_joyi === false)
+ *   • not already exported (don't auto re-export — operator drives revisions)
+ *   • there are actually rankable results
+ *   • zero validation errors AND zero warnings (no missing team, no tight
+ *     finish, no ties, no variance flags)
+ *   • no modal already open; fires at most once per race per session
+ */
+async function maybeAutoExportOnCleanJoyi() {
+  if (!grid || !raceData) return;
+  if (configData?.auto_export_on_clean_joyi === false) return;
+  if (_autoExportFired.has(raceNumber)) return;
+  if (raceData.export_version > 0) return;
+  if (document.getElementById('exportModal') ||
+      document.getElementById('rdmsWhatsAppModal') ||
+      document.getElementById('connectFolderPromptModal') ||
+      document.getElementById('watcherPromptModal')) return;
+
+  const data = grid.getData();
+  if (!data.some(r => r.computed_position != null)) return;
+
+  const result = computeRaceValidation(data);
+  if (result.errors.length > 0 || result.warnings.length > 0) return;
+
+  _autoExportFired.add(raceNumber);
+  showToast('Joyi results clean — opening Export & Send…', 'info', 2500);
+  if (typeof window._exportAndSend === 'function') {
+    await window._exportAndSend();
+  }
 }
 
 export function unmountRacePage() {
@@ -627,6 +674,8 @@ export function unmountRacePage() {
   delete window._downloadDraw;
   delete window._openDraw;
   delete window._openResult;
+  delete window._photoFinish;
+  delete window._photoFinishPng;
 }
 
 /**
@@ -1039,23 +1088,22 @@ function renderOutput(data) {
 
     // Scoring columns (only when the race is on a scored chain).
     //   Score = this round's points (always shown).
-    //   Total Score + Total Place = cumulative across rounds. Only
-    //   make sense AFTER RFinal is complete; before that they're
-    //   partial mid-series numbers that mislead. Render greyed-out
-    //   placeholders ("—") until the current race IS the RFinal.
+    //   Total Score + Total Place = cumulative across rounds. Before the
+    //   final round (RFinal) these are provisional, so we show them tinted
+    //   amber and the header carries a "(so far)" qualifier so a mid-series
+    //   standing isn't mistaken for the final result. (#15)
     let scoreCells = '';
     if (scoringCtx) {
       const teamEntry = scoringCtx.teamTotals.get(teamCode);
       const thisPts = teamEntry?.perRound?.[scoringCtx.scoringFlag]?.pts ?? '';
       const isFinalRound = scoringCtx.scoringFlag === 'RFinal';
-      const totalScore = isFinalRound && teamEntry ? Math.round(teamEntry.total_weighted) : '';
-      const totalPlace = isFinalRound ? (teamEntry?.overall_rank ?? '') : '';
-      const greyStyle = !isFinalRound ? 'color:var(--text-tertiary);' : '';
-      const placeholder = !isFinalRound ? '—' : '';
+      const totalScore = teamEntry ? Math.round(teamEntry.total_weighted) : '';
+      const totalPlace = teamEntry?.overall_rank ?? '';
+      const provStyle = !isFinalRound ? 'color:var(--warning-text);' : '';
       scoreCells = `
         <td style="font-weight:600;">${thisPts}</td>
-        <td style="${greyStyle}">${totalScore || placeholder}</td>
-        <td style="${greyStyle}">${totalPlace || placeholder}</td>`;
+        <td style="${provStyle}">${totalScore === '' ? '—' : totalScore}</td>
+        <td style="${provStyle}">${totalPlace === '' ? '—' : totalPlace}</td>`;
     }
 
     rowsHtml.push(`<tr>
@@ -1069,8 +1117,10 @@ function renderOutput(data) {
     </tr>`);
   }
 
+  const finalRound = scoringCtx?.scoringFlag === 'RFinal';
+  const soFar = finalRound ? '' : ' <span style="font-size:10px; color:var(--warning-text);">(so far)</span>';
   const headerExtra = scoringCtx
-    ? `<th title="Points for this round">Score</th><th title="Sum of weighted points across rounds">Total Score</th><th title="Overall rank in division">Total Place</th>`
+    ? `<th title="Points for this round">Score</th><th title="Sum of weighted points across rounds${finalRound ? '' : ' — provisional until RFinal'}">Total Score${soFar}</th><th title="Overall rank in division${finalRound ? '' : ' — provisional until RFinal'}">Total Place${soFar}</th>`
     : '';
 
   const refTableHtml = scoringCtx ? buildScoringReferenceTable() : '';
@@ -1141,15 +1191,11 @@ function buildScoringReferenceTable() {
     </div>`;
 }
 
-function renderValidation(data) {
-  const panel = document.getElementById('validationPanel');
-  if (!panel) return;
-
+// Compute the combined validation state (base checks + cross-race variance)
+// for the current race. Shared by renderValidation (display) and the #7
+// auto-export gate so both judge "clean" identically.
+function computeRaceValidation(data) {
   const result = validateRace(raceData, data, configData || { lane_count: 6, time_format_mode: 'mss00' });
-
-  // Append variance warnings when we have the cross-race context loaded.
-  // Sync addition — varianceCtx is pre-built async on mount + on
-  // broadcast, so this stays cheap per-keystroke.
   if (varianceCtx && raceData) {
     const v = computeVarianceWarnings({
       race: raceData,
@@ -1164,6 +1210,14 @@ function renderValidation(data) {
     result.errors.push(...v.errors);
     result.warnings.push(...v.warnings);
   }
+  return result;
+}
+
+function renderValidation(data) {
+  const panel = document.getElementById('validationPanel');
+  if (!panel) return;
+
+  const result = computeRaceValidation(data);
 
   if (result.errors.length === 0 && result.warnings.length === 0) {
     const hasData = data.some(r => r.raw_time || r.remarks);
@@ -2036,7 +2090,7 @@ function attachHandlers() {
     scoringCtx = await buildScoringContext(raceData, configData);
     recalculate();
     notifyResultEntryStarted(raceNumber).catch(() => {});
-    broadcastChange('race-updated', { race_number: raceNumber });
+    broadcastChange('race-updated', { race_number: raceNumber, joyi_results: true });
   }
 
   // Batch adjustment — store handler ref for cleanup in unmount
@@ -2155,6 +2209,14 @@ function attachHandlers() {
     if (cancelled) return;
     // Fallback: empty drag-and-drop picker.
     await showPhotoFinishPicker(raceData);
+  };
+
+  // #5 — smart "Photo PNG": read the saved results PNG instantly, else
+  // generate it on the fly from the Joyi files, else open the manual picker.
+  // Parallel to _photoFinish (interactive view); neither affects the other.
+  window._photoFinishPng = async () => {
+    const { smartViewPhotoFinishPng } = await import('../photo-finish-png.js');
+    await smartViewPhotoFinishPng(raceData);
   };
 }
 
