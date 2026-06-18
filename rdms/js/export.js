@@ -419,11 +419,22 @@ export async function exportResults(raceNumber, options = {}) {
 
   broadcastChange('race-updated', { race_number: raceNumber });
 
-  // Auto-backup after every export
-  await backupAfterExport(raceNumber);
-
-  // Queue for Supabase sync
-  await queueRaceSync(raceNumber);
+  // Post-commit side effects are BEST-EFFORT. The export is already durably
+  // committed above (file written + export_time/version + timesheet in a
+  // transaction). If any of these throw, exportResults must STILL resolve
+  // successfully — otherwise the caller's try/catch swallows the error and
+  // skips the follow-on send (onComplete writes send_time to the race + the
+  // timesheet), leaving the race "exported but not sent".
+  try {
+    await backupAfterExport(raceNumber); // Auto-backup after every export
+  } catch (err) {
+    console.warn('Auto-backup after export failed (non-fatal):', err);
+  }
+  try {
+    await queueRaceSync(raceNumber); // Queue for Supabase sync
+  } catch (err) {
+    console.warn('queueRaceSync after export failed (non-fatal):', err);
+  }
 
   // Round-completion check (fire-and-forget). If the round this race
   // belongs to is now fully exported AND auto-prompt is enabled in config,

@@ -1886,6 +1886,10 @@ function attachHandlers() {
       document.getElementById('raceStatus').textContent = 'SENT';
       document.getElementById('raceStatus').className = 'badge badge-sent';
       broadcastChange('race-updated', { race_number: raceNumber });
+      // Back up AFTER the send is persisted so the send_time is captured —
+      // the export-time backup predates it, and for the last race of an event
+      // there's no later export to catch it. Fire-and-forget.
+      import('../backup.js').then(m => m.backupAfterSend(raceNumber)).catch(() => {});
       // Show the WhatsApp copy modal AFTER state is marked sent. The
       // modal auto-copies the message to clipboard; operator just
       // pastes. Resolves on OK / close.
@@ -1932,6 +1936,9 @@ function attachHandlers() {
     document.getElementById('raceStatus').textContent = 'SENT';
     document.getElementById('raceStatus').className = 'badge badge-sent';
     broadcastChange('race-updated', { race_number: raceNumber });
+    // Capture the send in a backup (export-time backup predates it; the last
+    // race has no later export to catch it). Fire-and-forget.
+    import('../backup.js').then(m => m.backupAfterSend(raceNumber)).catch(() => {});
     await sendToWhatsApp(raceNumber);
     await promptNextRaceSignal(raceNumber);
     await checkPreviousRaces(raceNumber);

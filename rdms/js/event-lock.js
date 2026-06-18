@@ -63,6 +63,15 @@ export async function lockEvent({ force = false } = {}) {
   await db.config.put(config);
 
   broadcastChange('config-updated');
+
+  // End-of-day safety net: push every race + the event config to Supabase so
+  // the online view is complete even if a final state hadn't flushed yet
+  // (classically the last race, sent moments before locking). Fire-and-forget
+  // — never block or fail the lock on a sync hiccup; forceFullSync swallows
+  // its own errors. forceFullSync only reads IndexedDB + writes to Supabase,
+  // so the lock-on write guard doesn't apply.
+  import('./sync.js').then(m => m.forceFullSync()).catch(() => {});
+
   return { success: true };
 }
 

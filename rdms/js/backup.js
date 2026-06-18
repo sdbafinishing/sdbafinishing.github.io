@@ -131,3 +131,15 @@ export async function backupAfterSetup() {
 export async function backupAfterExport(raceNumber) {
   return autoBackup(`R${raceNumber}_export`);
 }
+
+/**
+ * Backup after a race is SENT. Without this, the only backups are taken right
+ * after export — before send_time is written — so the send is captured only by
+ * the NEXT race's export-backup. The LAST race of an event has no next export,
+ * so its send_time would never make it into any backup; restoring the
+ * end-of-day backup then shows the final race "exported but not sent".
+ * @param {number} raceNumber
+ */
+export async function backupAfterSend(raceNumber) {
+  return autoBackup(`R${raceNumber}_send`, { silent: true });
+}

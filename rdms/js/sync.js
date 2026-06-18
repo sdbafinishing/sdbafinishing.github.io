@@ -236,16 +236,29 @@ export async function queueRaceSync(raceNumber) {
 /**
  * Flush the sync queue to Supabase.
  */
-let syncPromise = null; // Promise-based lock instead of boolean flag
+let syncPromise = null;   // Promise-based lock instead of boolean flag
+let rerunRequested = false; // Trailing-edge: items queued during an in-flight sync
 
 async function attemptSync() {
-  if (syncPromise) return syncPromise; // Already syncing — return existing promise
+  // If a sync is already running, flag that more work arrived so the current
+  // run loops again once it finishes. Without this, items queued mid-sync
+  // (classically: the `send` upsert that lands a few ms after the `export`
+  // upsert that kicked off the in-flight sync) wait for the next 30s tick —
+  // and on the LAST race of an event the operator usually closes the app
+  // first, stranding the send_time and leaving the online view stuck on
+  // "exported, not sent".
+  if (syncPromise) { rerunRequested = true; return syncPromise; }
   if (!navigator.onLine) return;
 
   const sb = await getSupabase();
   if (!sb) return;
 
-  syncPromise = doSync(sb);
+  syncPromise = (async () => {
+    do {
+      rerunRequested = false;
+      await doSync(sb);
+    } while (rerunRequested); // drain anything queued while we were syncing
+  })();
   try { await syncPromise; } finally { syncPromise = null; }
 }
 
