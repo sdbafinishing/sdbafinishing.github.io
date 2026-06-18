@@ -100,6 +100,13 @@ async function loadEventConfig(eventRef) {
       ...localConfig,
       ...cfg,
       event_short_ref: eventRef,
+      // buildEventSnapshot (sync.js) renames several config fields for the
+      // mobile/web reader shape. Map them back to the canonical local schema
+      // the viewer UI reads — otherwise e.g. the navbar event colour falls
+      // back to the default orange instead of the configured event colour.
+      event_colour_code_hex: cfg.event_colour ?? localConfig.event_colour_code_hex ?? '',
+      event_long_name_en: cfg.event_name ?? localConfig.event_long_name_en ?? '',
+      race_date: cfg.event_date ?? localConfig.race_date ?? '',
       supabase_url: WEB_CONFIG.supabase_url,
       supabase_anon_key: WEB_CONFIG.supabase_anon_key,
       google_client_id: WEB_CONFIG.google_client_id,

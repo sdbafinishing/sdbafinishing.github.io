@@ -4,49 +4,58 @@
  * Output to both local 02/ folder (download) and Drive share folder.
  */
 import * as XLSX from 'xlsx';
-import * as CFBmod from 'cfb';
 import { getConfig, getAllRaces, getLaneResults, getRace } from './db.js';
 import { showToast, rowsToCsvBlob } from './utils.js';
 import { writeToBoth, downloadFallback } from './file-access.js';
 
-const CFB = CFBmod.default || CFBmod;
-
-// Excel BIFF8 workbook CLSID — {00020820-0000-0000-C000-000000000046},
-// stored little-endian as the OLE2 root-entry class id.
-const EXCEL_WORKBOOK_CLSID = '2008020000000000c000000000000046';
+// Excel BIFF8 workbook CLSID {00020820-0000-0000-C000-000000000046}, stored
+// in the OLE2 directory's CLSID field (little-endian per GUID convention).
+const EXCEL_WORKBOOK_CLSID = [
+  0x20, 0x08, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
+];
+const OLE_SIGNATURE = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 
 /**
- * Re-stamp the OLE2 container envelope SheetJS produces so Joyi's BIFF8
- * reader accepts the .xls.
+ * Re-stamp the OLE2 container envelope SheetJS produces so Joyi's reader
+ * accepts the .xls.
  *
- * SheetJS writes the compound-file root entry named "R" with an all-zero
- * CLSID (plus a private "\x01Sh33tJ5" marker stream). Real Excel — and the
- * file Joyi accepts — names the root "Root Entry" and stamps the Excel
- * workbook CLSID. Joyi keys on that standard envelope, so the SheetJS
- * default is silently rejected. We learned this by diffing a generated
- * file (rejected) against the same file re-saved by Excel (accepted): the
- * only meaningful difference was the root name + CLSID.
+ * SheetJS names the compound-file root entry "R" with an all-zero CLSID. Real
+ * Excel — and the file Joyi accepts — names the root "Root Entry" and stamps
+ * the Excel workbook CLSID. We confirmed by diffing a generated file
+ * (rejected) against the same file re-saved by Excel (accepted): the root
+ * name + CLSID were the OLE-level difference.
  *
- * This rewrites only the directory envelope — the Workbook stream (BIFF
- * records, SST, sheet name) is untouched, so the file stays byte-for-byte
- * valid for SheetJS too. Wrapped in try/catch: a cosmetic envelope fix
- * must never block the export.
+ * Implemented as a DIRECT byte patch of the OLE2 directory (entry 0 = root)
+ * rather than via the `cfb` library on purpose: no extra dependency to bundle
+ * (a missing bundle would make the fix silently no-op in the browser), pure
+ * Uint8Array work, and it touches only the 128-byte root directory entry —
+ * the Workbook stream (BIFF records, SST) is left byte-for-byte intact.
  *
  * @param {ArrayBuffer|Uint8Array} written - XLSX.write(..., {type:'array'})
  * @returns {Uint8Array}
  */
-function fixXlsEnvelopeForJoyi(written) {
+export function fixXlsEnvelopeForJoyi(written) {
   const u8 = written instanceof Uint8Array ? written : new Uint8Array(written);
   try {
-    const cont = CFB.parse(u8, { type: 'array' });
-    const root = cont.FileIndex.find(f => f.type === 5);
-    if (!root) return u8;
-    root.name = 'Root Entry';
-    root.clsid = EXCEL_WORKBOOK_CLSID;
-    cont.FullPaths = cont.FullPaths.map(p =>
-      p.replace(/^R\//, 'Root Entry/').replace(/^R$/, 'Root Entry'));
-    const out = CFB.write(cont, { type: 'array' });
-    return out instanceof Uint8Array ? out : new Uint8Array(out);
+    for (let i = 0; i < 8; i++) {
+      if (u8[i] !== OLE_SIGNATURE[i]) return u8; // not an OLE2 file — leave as-is
+    }
+    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    const sectorSize = 1 << dv.getUint16(30, true);   // header byte 30 = sector shift (→ 512)
+    const firstDirSector = dv.getUint32(48, true);     // header byte 48 = first directory sector
+    const dirOff = (firstDirSector + 1) * sectorSize;  // sector N lives at byte (N+1)*sectorSize
+    if (dirOff + 128 > u8.length) return u8;            // malformed — don't touch
+
+    // Directory entry 0 = root storage. Layout: name[0..63] (UTF-16LE),
+    // nameLen u16 @64, type u8 @66 (5 = root), CLSID[80..95].
+    if (u8[dirOff + 66] !== 5) return u8;              // entry 0 isn't the root — bail
+    const name = 'Root Entry';
+    for (let i = 0; i < 64; i++) u8[dirOff + i] = 0;
+    for (let i = 0; i < name.length; i++) dv.setUint16(dirOff + i * 2, name.charCodeAt(i), true);
+    dv.setUint16(dirOff + 64, (name.length + 1) * 2, true); // length includes the null terminator
+    for (let i = 0; i < 16; i++) u8[dirOff + 80 + i] = EXCEL_WORKBOOK_CLSID[i];
+    return u8;
   } catch {
     return u8; // never block the export on the envelope fix
   }
@@ -127,6 +136,10 @@ export async function generateJoyiStartList() {
   // keys on it (the reference template confirms; "StartList" alone was
   // not recognised).
   const ws = XLSX.utils.aoa_to_sheet(wsData);
+  // Merge A1:D1 to match the Joyi reference / the operator's known-good
+  // (Excel-saved) start list, where the event ref banner spans the four
+  // data columns.
+  ws['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 3 } }];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Joyi_StartList');
 

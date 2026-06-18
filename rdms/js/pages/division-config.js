@@ -10,6 +10,7 @@ import { broadcastChange } from '../app.js';
 import { autoPopulateDivisions, saveProposedDivisions } from '../auto-populate.js';
 import { runFlowchartAudit } from '../flowchart-audit.js';
 import { downloadFallback } from '../file-access.js';
+import { computeChainScoringFlags } from '../division-scoring.js';
 
 /**
  * Parse a race-number range string into a sorted unique integer array.
@@ -67,83 +68,6 @@ function formatRaceRanges(nums) {
     }
   }
   return parts.join(', ');
-}
-
-/**
- * Compute scoring flags for each round based on 1:1 progression chains.
- *
- * A progression edge (A → B) is "1:1" iff A has exactly one outgoing
- * progression AND B has exactly one incoming progression. Rounds linked
- * by 1:1 edges form chains. Within each chain, scoring positions are
- * assigned by chain position:
- *   length 1  → no chain, all N (no scoring without a progression edge)
- *   length 2  → R1, RFinal
- *   length 3  → R1, R2, RFinal
- *   length 4+ → R1, R2, N, …, N, RFinal
- * Any round not on a 1:1 chain → 'N'.
- *
- * @param {Array<number>} roundIds  every round in the division
- * @param {Array<{from_round_id:number, to_round_id:number}>} edges
- * @returns {Map<number, 'N'|'R1'|'R2'|'RFinal'>}
- */
-function computeChainScoringFlags(roundIds, edges) {
-  const flag = new Map();
-  for (const id of roundIds) flag.set(id, 'N');
-
-  // Degree counts
-  const outDeg = new Map();
-  const inDeg = new Map();
-  for (const id of roundIds) { outDeg.set(id, 0); inDeg.set(id, 0); }
-  for (const e of edges) {
-    outDeg.set(e.from_round_id, (outDeg.get(e.from_round_id) || 0) + 1);
-    inDeg.set(e.to_round_id, (inDeg.get(e.to_round_id) || 0) + 1);
-  }
-
-  // Keep only "1:1" edges
-  const oneToOne = edges.filter(e =>
-    outDeg.get(e.from_round_id) === 1 && inDeg.get(e.to_round_id) === 1,
-  );
-  if (oneToOne.length === 0) return flag;
-
-  // Build next-pointer (each from has at most one 1:1 successor) and a
-  // set of rounds that ARE the target of some 1:1 edge (so chain starts
-  // are rounds with a 1:1 outgoing edge but no 1:1 incoming edge).
-  const nextOf = new Map();
-  const hasIncoming = new Set();
-  for (const e of oneToOne) {
-    nextOf.set(e.from_round_id, e.to_round_id);
-    hasIncoming.add(e.to_round_id);
-  }
-
-  const visited = new Set();
-  for (const e of oneToOne) {
-    const start = e.from_round_id;
-    if (hasIncoming.has(start)) continue; // not a chain head
-    if (visited.has(start)) continue;
-
-    // Walk the chain from `start` following `nextOf`.
-    const chain = [start];
-    let cur = nextOf.get(start);
-    while (cur != null && !visited.has(cur)) {
-      chain.push(cur);
-      visited.add(cur);
-      cur = nextOf.get(cur);
-    }
-    visited.add(start);
-
-    // Assign flags by chain position
-    const n = chain.length;
-    if (n < 2) continue; // a single round isn't a scored chain
-    flag.set(chain[0], 'R1');
-    flag.set(chain[n - 1], 'RFinal');
-    if (n === 3) {
-      flag.set(chain[1], 'R2');
-    } else if (n >= 4) {
-      flag.set(chain[1], 'R2');
-      // chain[2..n-2] stay at default 'N'
-    }
-  }
-  return flag;
 }
 
 /**

@@ -633,22 +633,34 @@ async function renderConfigTab(container) {
   };
   refreshConnectState();
 
-  // Auto-populate the three shared folder paths when the operator types
-  // (or pastes) an Event Short Ref. Only fills BLANK fields — never
-  // overwrites a value the operator already customised. Default
-  // convention matches the rest of the app: 80 Shared/{ref}_{purpose}.
+  // Auto-populate the three shared folder paths from the Event Short Ref as
+  // the operator types (or pastes). The paths TRACK the ref — re-deriving on
+  // every keystroke — until the operator edits a path field directly, at
+  // which point that field is left alone. The old "only fill if blank" logic
+  // was buggy: after the first keystroke ("2") the field was non-blank, so
+  // the rest of "2026TN" was ignored and you got "80 Shared/2_Joyi".
   const refInput = document.getElementById('cfgEventRef');
   if (refInput) {
+    const pathFields = [
+      { id: 'cfgSharedResults', suffix: 'Output_Results' },
+      { id: 'cfgSharedDraws', suffix: 'Next_Round_Draws' },
+      { id: 'cfgSharedJoyi', suffix: 'Joyi' },
+    ];
+    // A field pre-filled on render (existing event) or edited by the operator
+    // is "customised" — never auto-overwrite it.
+    pathFields.forEach(f => {
+      const el = document.getElementById(f.id);
+      if (!el) return;
+      if (el.value.trim()) el.dataset.userEdited = '1';
+      el.addEventListener('input', () => { el.dataset.userEdited = '1'; });
+    });
     refInput.addEventListener('input', () => {
       const ref = refInput.value.trim();
-      if (!ref) return;
-      const fill = (id, value) => {
-        const el = document.getElementById(id);
-        if (el && !el.value.trim()) el.value = value;
-      };
-      fill('cfgSharedResults', `80 Shared/${ref}_Output_Results`);
-      fill('cfgSharedDraws', `80 Shared/${ref}_Next_Round_Draws`);
-      fill('cfgSharedJoyi', `80 Shared/${ref}_Joyi`);
+      pathFields.forEach(f => {
+        const el = document.getElementById(f.id);
+        if (!el || el.dataset.userEdited === '1') return;
+        el.value = ref ? `80 Shared/${ref}_${f.suffix}` : '';
+      });
     });
   }
 
@@ -878,6 +890,21 @@ async function renderConfigTab(container) {
       const { refreshLockBanner } = await import('../event-lock.js');
       await refreshLockBanner();
     } catch { /* event-lock optional */ }
+
+    // Disconnect the previous event's folder — the new event lives in a
+    // different directory, so the operator must connect it fresh. Stop the
+    // watchers (clear intent: a brand-new event starts with watchers off,
+    // re-enabled once configured) and refresh both the navbar folder icon
+    // and the Setup connect state (the config-tab re-render below handles
+    // the latter once the handle is cleared).
+    try {
+      const { resetFolderAccess } = await import('../file-access.js');
+      resetFolderAccess();
+    } catch { /* file-access optional */ }
+    try { const { stopJoyiWatch } = await import('../joyi-watch.js'); stopJoyiWatch(); } catch {}
+    try { const { stopDrawWatch } = await import('../draw-watch.js'); stopDrawWatch(); } catch {}
+    if (typeof window._rdmsUpdateFolderIcons === 'function') window._rdmsUpdateFolderIcons();
+
     broadcastChange('config-updated');
     showToast('Database cleared. Configure your new event.', 'info');
     // Re-render the config tab

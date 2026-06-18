@@ -12,6 +12,7 @@ import { computeRankings, validateRace, computeDivisionScoring, computeVarianceW
 import { joyiTimeToMs, joyiTimeHasMsPrecision, joyiTimeToRaw } from '../js/utils.js';
 import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx } from '../js/xlsx-patcher.js';
 import { photoFinishPngFilename, autoCropRange } from '../js/photo-finish-png.js';
+import { computeChainScoringFlags } from '../js/division-scoring.js';
 import { readFileSync } from 'fs';
 import * as XLSX from 'xlsx';
 import * as fflate from 'fflate';
@@ -239,45 +240,59 @@ group('Joyi start list format', () => {
     if (sheetName !== 'Joyi_StartList') throw new Error(`sheet name should be "Joyi_StartList", got "${sheetName}"`);
   });
 
-  test('OLE2 envelope is re-stamped to "Root Entry" + Excel CLSID (Joyi requirement)', async () => {
-    // SheetJS writes the compound-file root entry as "R" with a zero CLSID,
-    // which Joyi rejects. startlist.js post-processes the bytes to rename the
-    // root to "Root Entry" and stamp the Excel workbook CLSID (matching what
-    // Excel writes). This mirrors that exact post-processing and asserts the
-    // result, AND that the file stays readable by SheetJS.
+  test('fixXlsEnvelopeForJoyi byte-patches root → "Root Entry" + Excel CLSID; file stays readable', async () => {
+    // Exercises the REAL exported function (dependency-free byte patch) — not a
+    // re-implementation — so a regression in the actual code path is caught.
     const CFB = (await import('cfb')).default || (await import('cfb'));
+    const { fixXlsEnvelopeForJoyi } = await import('../js/startlist.js');
     const EXCEL_CLSID = '2008020000000000c000000000000046';
     const ws = XLSX.utils.aoa_to_sheet([['2026WU'], ['0001', 1, 'WM15', '*AMB Dragon']]);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Joyi_StartList');
     const written = XLSX.write(wb, { bookType: 'xls', type: 'array', bookSST: true });
 
-    const u8 = written instanceof Uint8Array ? written : new Uint8Array(written);
-    const cont = CFB.parse(u8, { type: 'array' });
-    const rootBefore = cont.FileIndex.find(f => f.type === 5);
-    if (rootBefore.name !== 'R') {
-      // SheetJS default is "R"; if this ever changes the comment in
-      // startlist.js + this test should be revisited.
-      console.log(`    (note: SheetJS root name is "${rootBefore.name}", expected "R")`);
-    }
-    rootBefore.name = 'Root Entry';
-    rootBefore.clsid = EXCEL_CLSID;
-    cont.FullPaths = cont.FullPaths.map(p =>
-      p.replace(/^R\//, 'Root Entry/').replace(/^R$/, 'Root Entry'));
-    const fixedRaw = CFB.write(cont, { type: 'array' });
-    const fixed = fixedRaw instanceof Uint8Array ? fixedRaw : new Uint8Array(fixedRaw);
-
-    const check = CFB.parse(fixed, { type: 'array' });
-    const root = check.FileIndex.find(f => f.type === 5);
+    const fixed = fixXlsEnvelopeForJoyi(written);
+    const root = CFB.parse(fixed, { type: 'array' }).FileIndex.find(f => f.type === 5);
     eq(root.name, 'Root Entry', 'root entry must be named "Root Entry"');
     eq(root.clsid, EXCEL_CLSID, 'root CLSID must be the Excel workbook class');
 
-    // Still readable as a workbook + sheet name preserved.
     const reread = XLSX.read(fixed, { type: 'array' });
     eq(reread.SheetNames[0], 'Joyi_StartList', 'sheet name must survive the envelope fix');
     if (reread.Sheets['Joyi_StartList'].A1?.v !== '2026WU') {
       throw new Error('cell A1 lost after envelope fix');
     }
+  });
+
+  test('A1:D1 merge is emitted (MERGEDCELLS record) — Joyi requirement', async () => {
+    // Joyi only accepts the start list when the row-1 banner cell is merged
+    // across the 4 data columns (operator-confirmed: merging A1:D1 made an
+    // otherwise-rejected file load). generateJoyiStartList sets ws['!merges'];
+    // assert SheetJS writes the BIFF MERGEDCELLS (0x00E5) record AND the merge
+    // survives the envelope byte-patch.
+    const CFB = (await import('cfb')).default || (await import('cfb'));
+    const { fixXlsEnvelopeForJoyi } = await import('../js/startlist.js');
+    const ws = XLSX.utils.aoa_to_sheet([['2026WU'], ['考点：'], ['组号', '道次', '准考证号', '姓名'], ['0001', 1, 'WM15', 'X']]);
+    ws['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 3 } }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Joyi_StartList');
+    const fixed = fixXlsEnvelopeForJoyi(XLSX.write(wb, { bookType: 'xls', type: 'array', bookSST: true }));
+
+    // Merge present on re-read
+    const reread = XLSX.read(fixed, { type: 'array' });
+    const merges = reread.Sheets['Joyi_StartList']['!merges'] || [];
+    if (!merges.some(m => m.s.r === 0 && m.s.c === 0 && m.e.r === 0 && m.e.c === 3)) {
+      throw new Error('A1:D1 merge missing after write+envelope patch');
+    }
+    // MERGEDCELLS (0x00E5) record present in the Workbook BIFF stream
+    const data = CFB.parse(fixed, { type: 'array' }).FileIndex.find(f => /workbook/i.test(f.name)).content;
+    let off = 0, hasMerge = false;
+    while (off + 4 <= data.length) {
+      const t = data[off] | (data[off + 1] << 8);
+      const len = data[off + 2] | (data[off + 3] << 8);
+      if (t === 0x00E5) hasMerge = true;
+      off += 4 + len;
+    }
+    if (!hasMerge) throw new Error('MERGEDCELLS (0x00E5) record not emitted');
   });
 });
 
@@ -688,6 +703,38 @@ group('photo-finish PNG helpers', () => {
 
   test('autoCropRange: malformed reach lines fall back to full strip', () => {
     eq(autoCropRange({ displayWidth: 8000 }, { reachPoints: [{ line: NaN }, {}] }), [0, 8000]);
+  });
+});
+
+// ── Division scoring — chain flag derivation ────────────────────────────
+group('computeChainScoringFlags', () => {
+  test('2-round 1:1 chain → R1, RFinal', () => {
+    const flags = computeChainScoringFlags([10, 20], [{ from_round_id: 10, to_round_id: 20 }]);
+    eq(flags.get(10), 'R1');
+    eq(flags.get(20), 'RFinal');
+  });
+  test('3-round 1:1 chain → R1, R2, RFinal', () => {
+    const flags = computeChainScoringFlags([1, 2, 3], [
+      { from_round_id: 1, to_round_id: 2 },
+      { from_round_id: 2, to_round_id: 3 },
+    ]);
+    eq(flags.get(1), 'R1'); eq(flags.get(2), 'R2'); eq(flags.get(3), 'RFinal');
+  });
+  test('branching (heat → 2 outgoing) is off-chain → all N', () => {
+    const flags = computeChainScoringFlags([1, 2, 3], [
+      { from_round_id: 1, to_round_id: 2 },
+      { from_round_id: 1, to_round_id: 3 },
+    ]);
+    eq(flags.get(1), 'N'); eq(flags.get(2), 'N'); eq(flags.get(3), 'N');
+  });
+  test('separate cup/plate 1:1 pairs each score R1/RFinal', () => {
+    // semiCup(1)→finalCup(2), semiPlate(3)→finalPlate(4)
+    const flags = computeChainScoringFlags([1, 2, 3, 4], [
+      { from_round_id: 1, to_round_id: 2 },
+      { from_round_id: 3, to_round_id: 4 },
+    ]);
+    eq(flags.get(1), 'R1'); eq(flags.get(2), 'RFinal');
+    eq(flags.get(3), 'R1'); eq(flags.get(4), 'RFinal');
   });
 });
 

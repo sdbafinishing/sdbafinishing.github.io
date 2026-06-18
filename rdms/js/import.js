@@ -153,6 +153,20 @@ export async function importDrawToDb(parsed) {
   });
   await saveRace(race);
 
+  // If divisions were configured BEFORE this draw was imported, the divisions
+  // editor couldn't assign this race (it didn't exist yet) — so apply the
+  // saved division config now. Scoped to this race + only when it has no
+  // division yet, so it never clobbers an existing assignment or a manual
+  // Schedule-tab override. No-op when no divisions are configured.
+  if (race.division_id == null) {
+    try {
+      const { reapplyDivisionAssignments } = await import('./division-scoring.js');
+      await reapplyDivisionAssignments({ onlyRace: parsed.raceNumber, onlyIfUnassigned: true });
+    } catch (err) {
+      console.warn('division reassignment after draw import failed:', err);
+    }
+  }
+
   // Build lane results, preserving any existing result fields on each
   // row (so re-importing a draw to refresh team_name / race.draw_lanes
   // doesn't wipe raw_time, joyi data, or operator-typed remarks).
