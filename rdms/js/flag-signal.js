@@ -34,16 +34,26 @@ let dbRef = null;
 
 function loadScript(src) {
   return new Promise((resolve, reject) => {
-    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
+    const existing = document.querySelector(`script[src="${src}"]`);
+    if (existing) {
+      // A tag may exist but NOT be loaded yet (a concurrent caller appended
+      // it a tick ago). Resolving on mere tag-existence is the bug that made
+      // a second consumer use window.firebase before it was ready. Wait for
+      // the real load instead.
+      if (existing.dataset.loaded === '1') { resolve(); return; }
+      existing.addEventListener('load', () => resolve());
+      existing.addEventListener('error', reject);
+      return;
+    }
     const s = document.createElement('script');
     s.src = src;
-    s.onload = resolve;
+    s.onload = () => { s.dataset.loaded = '1'; resolve(); };
     s.onerror = reject;
     document.head.appendChild(s);
   });
 }
 
-async function ensureFirebase() {
+export async function ensureFirebase() {
   if (dbRef) return dbRef;
   if (initPromise) return initPromise;
   initPromise = (async () => {

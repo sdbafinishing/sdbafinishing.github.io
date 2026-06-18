@@ -11,54 +11,17 @@
  *   view-only    — read-only for all
  */
 
-// Firebase config (same as sdbafinishing.github.io)
-const FIREBASE_CONFIG = {
-  apiKey: "AIzaSyBmRxbnhGwVeRlzkgCICuBGaMM7jBzWIKo",
-  authDomain: "dbracecontrol.firebaseapp.com",
-  databaseURL: "https://dbracecontrol-default-rtdb.firebaseio.com",
-  projectId: "dbracecontrol",
-  storageBucket: "dbracecontrol.firebasestorage.app",
-  messagingSenderId: "833788584631",
-  appId: "1:833788584631:web:cdd6697b6378fbb2b46332",
-};
+// Firebase init is shared with flag-signal.js via a single ensureFirebase()
+// — one SDK load + one initializeApp for the whole app. Previously this module
+// loaded + initialised Firebase independently; on the public dashboard that
+// raced the flag-signal init (both appended the SDK <script>; the loser used
+// window.firebase before it loaded → "Firebase failed to load").
+import { ensureFirebase } from '../flag-signal.js';
 
-let firebaseApp = null;
 let dbRef = null;
 let statusListener = null;
 let alertListener = null;
 let currentStatus = { RaceControlReady: false, StarterReady: false, FinishingReady: false };
-
-/**
- * Initialize Firebase (lazy load SDK from CDN).
- */
-async function initFirebase() {
-  if (firebaseApp) return;
-
-  // Dynamically load Firebase SDK
-  if (!window.firebase) {
-    await loadScript('https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js');
-    await loadScript('https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js');
-  }
-
-  // Guard against double-init — flag-signal.js may already have done it.
-  if (!window.firebase.apps?.length) {
-    firebaseApp = window.firebase.initializeApp(FIREBASE_CONFIG);
-  } else {
-    firebaseApp = window.firebase.apps[0];
-  }
-  dbRef = window.firebase.database();
-}
-
-function loadScript(src) {
-  return new Promise((resolve, reject) => {
-    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
-    const s = document.createElement('script');
-    s.src = src;
-    s.onload = resolve;
-    s.onerror = reject;
-    document.head.appendChild(s);
-  });
-}
 
 /**
  * Render the signal panel as an embeddable HTML block.
@@ -70,7 +33,7 @@ export async function renderSignalPanel(containerId, mode = 'view-only') {
   if (!container) return;
 
   try {
-    await initFirebase();
+    dbRef = await ensureFirebase();
   } catch {
     container.innerHTML = '<p style="color:var(--danger); font-size:12px;">Firebase failed to load.</p>';
     return;
@@ -217,7 +180,7 @@ export async function renderMiniSignalPanel(containerId) {
   if (!container) return;
 
   try {
-    await initFirebase();
+    dbRef = await ensureFirebase();
   } catch {
     container.innerHTML = '<span style="font-size:11px; color:var(--danger);">flag offline</span>';
     return;
