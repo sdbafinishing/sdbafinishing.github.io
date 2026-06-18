@@ -104,6 +104,7 @@ export async function refreshLockBanner() {
   let banner = document.getElementById('rdmsLockBanner');
   if (!locked) {
     if (banner) banner.remove();
+    document.body.classList.remove('rdms-event-locked');
     return;
   }
   const config = await getConfig();
@@ -112,14 +113,21 @@ export async function refreshLockBanner() {
   if (!banner) {
     banner = document.createElement('div');
     banner.id = 'rdmsLockBanner';
+    // Pin BELOW the fixed navbar (top:var(--navbar-height)) with a z-index
+    // under the navbar's (1000) so it never covers — and blocks clicks on —
+    // the nav links. Modals (z-index 9998+) still sit above it. The
+    // rdms-event-locked body class pushes #app content down so the banner
+    // doesn't overlap the page either (see app.css).
     banner.style.cssText = `
-      position:sticky; top:0; z-index:9000;
-      background:rgba(245,158,11,0.18); border-bottom:2px solid var(--warning);
-      color:var(--warning-text, var(--text-primary));
+      position:fixed; top:var(--navbar-height); left:0; right:0; z-index:999;
+      background:var(--bg-card); border-bottom:2px solid var(--warning);
+      color:var(--text-primary);
       font-size:13px; padding:6px 14px;
-      display:flex; align-items:center; gap:10px;`;
-    document.body.insertBefore(banner, document.body.firstChild);
+      display:flex; align-items:center; gap:10px;
+      box-shadow:0 2px 6px rgba(0,0,0,0.25);`;
+    document.body.appendChild(banner);
   }
+  document.body.classList.add('rdms-event-locked');
   const unlockBtn = hasPermission('config.edit')
     ? `<button class="btn btn-ghost btn-sm" style="margin-left:auto; color:var(--warning);"
               onclick="window._eventLockUnlock()">

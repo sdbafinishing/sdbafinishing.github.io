@@ -126,6 +126,14 @@
   margin-right: auto;
 }
 
+/* When the event-locked banner is shown it's fixed just below the navbar
+   (see event-lock.js); push the content down so the banner doesn't overlap
+   the top of the page. ~37px = banner padding (12) + line (~13) + border (2)
+   with headroom. */
+body.rdms-event-locked #app {
+  margin-top: calc(var(--navbar-height) + 38px);
+}
+
 /* ========== CARD ========== */
 .card {
   background: var(--bg-card);

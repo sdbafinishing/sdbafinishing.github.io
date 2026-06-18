@@ -32,6 +32,7 @@ let refreshInterval = null;
 let isAuthenticatedUser = false;
 let lastRaceHash = ''; // Change detection — skip re-render if data unchanged
 let unsubCurrentRace = null; // Firebase live current-race subscription (public view)
+let onConfigUpdatedHandler = null; // window listener for lock/unlock + config changes
 
 export async function mountDashboard(container, params) {
   // Detect auth state
@@ -72,6 +73,10 @@ export function unmountDashboard() {
   delete window._eventLockOpen;
   lastRaceHash = '';
   if (unsubCurrentRace) { try { unsubCurrentRace(); } catch {} unsubCurrentRace = null; }
+  if (onConfigUpdatedHandler) {
+    window.removeEventListener('rdms-config-updated', onConfigUpdatedHandler);
+    onConfigUpdatedHandler = null;
+  }
   cleanupSignalPanel();
 }
 
@@ -383,6 +388,14 @@ async function renderFullDashboard(container, stationMode) {
 
   await renderDashboard();
   refreshInterval = setInterval(renderDashboard, 10000);
+
+  // Re-render on config changes (notably lock/unlock). renderDashboard's hash
+  // gate keys on race status/times only, so a lock toggle — which changes
+  // config, not races — would otherwise leave the footer lock row stale
+  // (showing "Lock event" after the event was already locked). Reset the hash
+  // so the re-render actually runs.
+  onConfigUpdatedHandler = () => { lastRaceHash = ''; renderDashboard(); };
+  window.addEventListener('rdms-config-updated', onConfigUpdatedHandler);
 }
 
 async function renderDashboard() {

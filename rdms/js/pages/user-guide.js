@@ -482,7 +482,8 @@ export function renderUserGuideTab(container) {
             <li>Audit trail on the config record: <code>event_locked_at</code>, <code>event_locked_by</code>, <code>event_unlocked_at</code>, <code>event_unlocked_by</code>.</li>
           </ul>
           <p><strong>How to unlock</strong></p>
-          <p>Admins see an <em>Unlock event</em> button in the top banner. Same type-the-ref confirmation. Editors and viewers see "Ask an admin to unlock" instead.</p>
+          <p>Admins see an <em>Unlock event</em> button in the top banner. Same type-the-ref confirmation. Editors and viewers see "Ask an admin to unlock" instead. The banner sits below the navbar so the nav links stay clickable while locked.</p>
+          <div class="gtip">The lock protects the <strong>locked event's own data</strong> from edits. Starting a different event (restore a backup, or set up a new event) is not blocked by it — the lock travels with the event it sealed.</div>
           <div class="gtip">Use Event Lock at the end of race day after the last results are exported and signed off. If you're mid-event and just want to pause for lunch, leave the lock off — it's meant as a permanent seal, not a temporary brake.</div>
         </div>
 

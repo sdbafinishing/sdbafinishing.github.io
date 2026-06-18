@@ -185,6 +185,10 @@ channel.onmessage = (event) => {
   const { type } = event.data;
   if (type === 'config-updated') {
     updateNavEventName();
+    // Lock state lives on config — refresh the banner so lock / unlock /
+    // New Event / restore / event-switch all reflect immediately (New Event
+    // clears the config, so a stale locked banner must come down).
+    refreshLockBanner().catch(() => {});
   }
   if (type === 'draw-imported' || type === 'race-updated') {
     // Re-mount current page if it cares about race data
@@ -201,6 +205,7 @@ channel.onmessage = (event) => {
 // page reload. The CustomEvent is dispatched in broadcastChange below.
 window.addEventListener('rdms-config-updated', () => {
   updateNavEventName();
+  refreshLockBanner().catch(() => {});
 });
 
 export function broadcastChange(type, data = {}) {
