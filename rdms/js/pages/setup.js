@@ -870,6 +870,14 @@ async function renderConfigTab(container) {
 
     const { clearAllData } = await import('../db.js');
     await clearAllData();
+    // clearAllData wipes the config singleton, so the event_locked flag is
+    // gone — but explicitly bring the lock banner + body offset down now so
+    // a new event never starts under a stale "locked" UI, independent of
+    // broadcast timing.
+    try {
+      const { refreshLockBanner } = await import('../event-lock.js');
+      await refreshLockBanner();
+    } catch { /* event-lock optional */ }
     broadcastChange('config-updated');
     showToast('Database cleared. Configure your new event.', 'info');
     // Re-render the config tab
