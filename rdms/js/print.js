@@ -102,8 +102,12 @@ export async function printDrawSet(raceNumbers) {
  * @param {number} raceNumber
  */
 export async function openFileFromFolder(subfolder, raceNumber) {
-  // Try to read from connected source folder
+  // Try to read from connected source folder. Results are now exported as
+  // .xlsx (see export.js) — try that first, then fall back to .xls for draws
+  // (RMS source files) and results exported before the rename.
   const filenames = [
+    `Second Round - ${raceNumber}.xlsx`,
+    `${raceNumber}.xlsx`,
     `Second Round - ${raceNumber}.xls`,
     `${raceNumber}.xls`,
   ];

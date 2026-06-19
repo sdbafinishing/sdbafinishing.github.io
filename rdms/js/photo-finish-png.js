@@ -179,9 +179,16 @@ export async function generateAndSavePhotoFinishPng(race, files = null) {
 /**
  * #4 background entry point — called fire-and-forget from joyi-watch when an
  * .lcd lands. Skips work when the PNG already exists so re-scans are cheap.
+ *
+ * FEATURE-FLAGGED OFF BY DEFAULT: writing each PNG to the shared results folder
+ * triggers a Google Drive sync, which was slowing race-day sync noticeably.
+ * Auto-generation only runs when config.auto_photo_finish_png === true. The
+ * on-demand "Photo PNG" button (smartViewPhotoFinishPng) is unaffected.
  */
 export async function backgroundGeneratePhotoFinishPng(raceNumber, lcdFile, jydFile) {
   try {
+    const cfg = await getConfig();
+    if (!cfg?.auto_photo_finish_png) return; // off by default — see note above
     const race = await getRace(raceNumber);
     if (!race) return;
     const existing = await readPhotoFinishPng(race);

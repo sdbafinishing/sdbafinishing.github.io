@@ -255,5 +255,18 @@ export function patchXlsxCells(xlsxBytes, mods) {
   }
 
   files[SHEET_PATH] = strToU8(sheetXml);
+
+  // Keep sharedStrings.xml's `count` consistent with the sheet. We convert
+  // patched string cells to inlineStr (and blank others), so the number of
+  // t="s" references drops below the template's declared count. A stale count
+  // is tolerated when the file is read as .xls (content-sniffed) but makes
+  // Excel flag a .xlsx as needing repair ("removed unreadable content"). The
+  // `<si>` entries + uniqueCount are untouched, so only `count` needs updating.
+  if (sstXml) {
+    const refs = (sheetXml.match(/ t="s"/g) || []).length;
+    const updatedSst = sstXml.replace(/(<sst\b[^>]*?\bcount=")\d+(")/, `$1${refs}$2`);
+    files[SST_PATH] = strToU8(updatedSst);
+  }
+
   return zipSync(files);
 }

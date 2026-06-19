@@ -198,6 +198,24 @@ group('xlsx-patcher (race result template)', () => {
       throw new Error('B4 should be a self-closed cell with style attr');
     }
   });
+
+  test('sharedStrings count stays consistent after patching (Excel .xlsx repair guard)', () => {
+    // Patching converts t="s" cells to inlineStr, dropping shared-string
+    // references below the template's declared count. A stale count makes Excel
+    // flag a .xlsx as needing repair ("removed unreadable content"). The
+    // patcher must rewrite count to match the remaining t="s" refs.
+    const patched = patchXlsxCells(tpl, [
+      { addr: 'A1', value: 'Race 4' }, { addr: 'B4', value: 'Team A' },
+      { addr: 'C4', value: 'WL1' }, { addr: 'D4', value: '1.25.00' }, { addr: 'E4', value: '1' },
+    ]);
+    const files = fflate.unzipSync(new Uint8Array(patched));
+    const dec = new TextDecoder();
+    const sheet = dec.decode(files['xl/worksheets/sheet1.xml']);
+    const sst = dec.decode(files['xl/sharedStrings.xml']);
+    const declared = parseInt(sst.match(/<sst\b[^>]*?\bcount="(\d+)"/)?.[1] ?? '-1', 10);
+    const refs = (sheet.match(/ t="s"/g) || []).length;
+    eq(declared, refs, `sst count (${declared}) must equal actual t="s" refs (${refs})`);
+  });
 });
 
 // ── Joyi start list — BIFF8 format Joyi expects ─────────────────────────
