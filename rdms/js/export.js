@@ -205,11 +205,10 @@ export async function exportResults(raceNumber, options = {}) {
   });
 
   const ref = config?.event_short_ref || 'RDMS';
-  // Output filename mirrors the draw naming convention. Round 1+ races
-  // use `{N}.xls`; second-round files used "Second Round - {N}.xls" in
-  // the legacy flow — we keep the same names here so downstream pairing
-  // by filename keeps working.
-  const filename = `${raceNumber}.xls`;
+  // The exported content is already an xlsx workbook (the bundled
+  // race-template.xlsx patched cell-by-cell), so name it .xlsx. The bytes are
+  // unchanged from before — only the extension changes.
+  const filename = `${raceNumber}.xlsx`;
 
   // Build the cell-update list. The bundled template has these fixed
   // positions (1-indexed rows; same layout used for every race):
