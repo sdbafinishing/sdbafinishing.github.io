@@ -9,7 +9,7 @@
  * Exit code: 0 on success, 1 on any failure.
  */
 import { computeRankings, validateRace, computeDivisionScoring, computeVarianceWarnings, getEffectiveStartTime } from '../js/race.js';
-import { joyiTimeToMs, joyiTimeHasMsPrecision, joyiTimeToRaw } from '../js/utils.js';
+import { joyiTimeToMs, joyiTimeHasMsPrecision, joyiTimeToRaw, msToTime } from '../js/utils.js';
 import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx } from '../js/xlsx-patcher.js';
 import { photoFinishPngFilename, autoCropRange } from '../js/photo-finish-png.js';
 import { computeChainScoringFlags } from '../js/division-scoring.js';
@@ -445,6 +445,14 @@ group('joyiTimeToMs / joyiTimeHasMsPrecision', () => {
   test('truncated raw_time still loses thousandth via joyiTimeToRaw', () => {
     // joyiTimeToRaw drops to centiseconds (used as raw_time string).
     eq(joyiTimeToRaw('00:01:26.143', 'mss00'), '12614');
+  });
+  test('msToTime TRUNCATES thousandths — never rounds up (race rule)', () => {
+    // .jyd import feeds full Score ms straight into msToTime. 86146 (1:26.146)
+    // must display as 1:26.14, NOT 1:26.15.
+    eq(msToTime(86140, 'mss00'), '12614');
+    eq(msToTime(86146, 'mss00'), '12614'); // would be 12615 if it rounded
+    eq(msToTime(86149, 'mss00'), '12614');
+    eq(msToTime(86150, 'mss00'), '12615'); // exact centisecond boundary
   });
   test('malformed inputs return null', () => {
     eq(joyiTimeToMs(''), null);

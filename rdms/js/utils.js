@@ -43,7 +43,13 @@ export function timeToMs(raw, mode = 'mss00') {
  */
 export function msToTime(ms, mode = 'mss00') {
   if (ms == null || ms < 0) return '';
-  const totalCs = Math.round(ms / 10);
+  // TRUNCATE thousandths to centiseconds — never round. Race rule: the
+  // displayed/exported time drops the thousandth digit (1:26.146 → 1:26.14,
+  // not 1:26.15). Full ms precision is preserved separately in raw_time_ms
+  // and used only for ranking (so a faster thousandth still places ahead).
+  // Rounding here made .jyd-imported times (import.js feeds full Score ms)
+  // round up at the half-centisecond.
+  const totalCs = Math.floor(ms / 10);
   const cs = totalCs % 100;
   const totalSec = Math.floor(totalCs / 100);
   const sec = totalSec % 60;
