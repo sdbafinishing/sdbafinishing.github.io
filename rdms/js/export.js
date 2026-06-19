@@ -447,25 +447,44 @@ export async function exportResults(raceNumber, options = {}) {
 }
 
 /**
- * Detect duplicate raw_time among rankable lanes. Returns an array of
- * {time, lanes:[laneNum,...]} for any time that appears on 2+ lanes
- * (excluding DSQ/DQ/DNS/DNF rows). Empty array on no duplicates.
+ * Detect GENUINE ties — lanes that will share the same Place in the export.
+ *
+ * Buckets by the actual computed_position (not the displayed raw_time), so it
+ * mirrors exactly what the export ranks. This respects everything the ranking
+ * uses to break ties: raw_time_ms (Joyi thousandths — two lanes showing the
+ * same hundredth but different thousandth get DIFFERENT places, so they are
+ * NOT a tie), penalty_time, and the batch delta. Also means a manual override
+ * on the results grid that changes the order clears the warning.
+ *
+ * Returns [{ time, place, lanes:[laneNum,...] }] for any place shared by 2+
+ * lanes. Empty array when there are no real ties.
  */
 async function detectDuplicateTimes(raceNumber) {
+  const config = await getConfig();
+  const race = await getRace(raceNumber);
   const lanes = await getLaneResults(raceNumber);
-  const buckets = new Map();
-  const MARKER_SET = new Set(['DSQ', 'DQ', 'DNS', 'DNF']);
+  const timeMode = config?.time_format_mode || 'mss00';
+  const exportDelta = race?.batch_override_enabled ? (race.batch_delta_ms || 0) : 0;
+  // Same ranking the export applies — sets computed_position using raw_time_ms
+  // when present.
+  computeRankings(lanes, timeMode, exportDelta);
+
+  const byPlace = new Map();
   for (const lr of lanes) {
-    if (!lr.raw_time) continue;
-    if (MARKER_SET.has((lr.remarks || '').toUpperCase())) continue;
-    const t = String(lr.raw_time).trim();
-    if (!t || /^0+$/.test(t)) continue;
-    if (!buckets.has(t)) buckets.set(t, []);
-    buckets.get(t).push(lr.lane_input || lr.lane_number);
+    if (lr.computed_position == null) continue; // unranked: DSQ/DNS/no-time/dummy
+    if (!byPlace.has(lr.computed_position)) byPlace.set(lr.computed_position, []);
+    byPlace.get(lr.computed_position).push(lr);
   }
+
   const dupes = [];
-  for (const [time, ls] of buckets) {
-    if (ls.length > 1) dupes.push({ time, lanes: ls });
+  for (const [place, ls] of byPlace) {
+    if (ls.length > 1) {
+      dupes.push({
+        time: ls[0].raw_time,
+        place,
+        lanes: ls.map(l => l.lane_input || l.lane_number),
+      });
+    }
   }
   return dupes;
 }
