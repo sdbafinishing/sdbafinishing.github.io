@@ -250,25 +250,39 @@ const WEB_POLL_MS = 20000;
 /**
  * Periodically re-pull the selected event's race snapshots from Supabase so a
  * web viewer left open (e.g. a second tab showing the dashboard while the
- * operator works in the local app) stays current. The dashboard's own 10s
- * render tick picks up the refreshed IndexedDB via its hash-based change
- * detection, so we don't force a render here.
+ * operator works in the local app) stays current. After each pull we dispatch
+ * `rdms-web-pulled` so the dashboard repaints immediately (it also repaints on
+ * its own 10s tick).
  *
- * Online viewer only; no-op locally. Skips polling while the tab is hidden to
- * avoid needless Supabase traffic.
+ * Online viewer only; no-op locally. While the tab is HIDDEN we slow the loop
+ * (no point hammering Supabase), but we poll IMMEDIATELY when the tab becomes
+ * visible again — so a monitoring tab is fresh the moment you look at it
+ * instead of stale for up to a full interval.
  */
+async function pollWebDashboardOnce() {
+  const ref = sessionStorage.getItem('rdms-web-event');
+  if (!ref || !supabaseClient) return;
+  try {
+    const ok = await hydrateRaceSnapshots(ref, { clear: false });
+    if (ok) {
+      try { window.dispatchEvent(new CustomEvent('rdms-web-pulled')); } catch { /* no-op */ }
+    }
+  } catch (err) {
+    console.warn('web dashboard poll failed:', err);
+  }
+}
+
 export function startWebDashboardPoll() {
   if (isLocal() || webPollInterval) return;
-  webPollInterval = setInterval(async () => {
-    if (document.hidden) return;
-    const ref = sessionStorage.getItem('rdms-web-event');
-    if (!ref || !supabaseClient) return;
-    try {
-      await hydrateRaceSnapshots(ref, { clear: false });
-    } catch (err) {
-      console.warn('web dashboard poll failed:', err);
-    }
+  webPollInterval = setInterval(() => {
+    if (document.hidden) return; // visibilitychange handler catches us up
+    pollWebDashboardOnce();
   }, WEB_POLL_MS);
+  // Pull right away on load + whenever the operator switches back to this tab.
+  pollWebDashboardOnce();
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) pollWebDashboardOnce();
+  });
 }
 
 export function stopWebDashboardPoll() {

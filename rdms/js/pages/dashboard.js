@@ -75,6 +75,7 @@ export function unmountDashboard() {
   if (unsubCurrentRace) { try { unsubCurrentRace(); } catch {} unsubCurrentRace = null; }
   if (onConfigUpdatedHandler) {
     window.removeEventListener('rdms-config-updated', onConfigUpdatedHandler);
+    window.removeEventListener('rdms-web-pulled', onConfigUpdatedHandler);
     onConfigUpdatedHandler = null;
   }
   cleanupSignalPanel();
@@ -402,6 +403,10 @@ async function renderFullDashboard(container, stationMode) {
   // so the re-render actually runs.
   onConfigUpdatedHandler = () => { lastRaceHash = ''; renderDashboard(); };
   window.addEventListener('rdms-config-updated', onConfigUpdatedHandler);
+  // Web viewer: repaint immediately when the background poll pulls fresh data
+  // from Supabase (web-init dispatches rdms-web-pulled), rather than waiting
+  // for the next 10s tick. Same reset-hash-then-render path.
+  window.addEventListener('rdms-web-pulled', onConfigUpdatedHandler);
 }
 
 async function renderDashboard() {
