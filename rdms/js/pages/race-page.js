@@ -607,7 +607,11 @@ async function maybeAutoExportOnCleanJoyi() {
   if (!data.some(r => r.computed_position != null)) return;
 
   const result = computeRaceValidation(data);
-  if (result.errors.length > 0 || result.warnings.length > 0) return;
+  // A missing start time does NOT block auto export+send — as long as results
+  // are present we can publish. (Joyi often hasn't stamped the start yet, or
+  // the operator never clicked START.) Every other warning/error still blocks.
+  const blockingWarnings = result.warnings.filter(w => !/no start time/i.test(w));
+  if (result.errors.length > 0 || blockingWarnings.length > 0) return;
 
   _autoExportFired.add(raceNumber);
   showToast('Joyi results clean — opening Export & Send…', 'info', 2500);
