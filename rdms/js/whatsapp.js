@@ -118,8 +118,8 @@ export async function sendToWhatsApp(raceNumber) {
           WhatsApp message ready
         </h5>
         <p id="waCopyHint" style="font-size:12px; color:var(--text-secondary); margin:0 0 10px;">
-          Preparing clipboard… paste into your WhatsApp group. The race is
-          recorded as sent now (when this dialog appeared).
+          Click <strong>Copy message</strong>, then paste into your WhatsApp group.
+          The race is recorded as sent now (when this dialog appeared).
         </p>
         ${finishSeq ? `
         <div style="display:flex; align-items:center; gap:8px; margin:0 0 12px; padding:10px 12px;
@@ -137,11 +137,10 @@ export async function sendToWhatsApp(raceNumber) {
           border-radius:var(--radius-sm); color:var(--text-primary);
           margin-bottom:12px;"></textarea>
         <div style="display:flex; gap:8px; justify-content:flex-end;">
-          <button class="btn btn-ghost" id="waCopyBtn"
-                  title="If the auto-copy got blocked, click here to copy again">
-            <i class="material-icons" style="font-size:16px;">content_copy</i> Copy again
+          <button class="btn btn-ghost" id="waCloseBtn">Close</button>
+          <button class="btn btn-primary" id="waCopyBtn">
+            <i class="material-icons" style="font-size:16px;">content_copy</i> Copy message
           </button>
-          <button class="btn btn-primary" id="waCloseBtn">OK</button>
         </div>
       </div>
     `;
@@ -149,34 +148,42 @@ export async function sendToWhatsApp(raceNumber) {
 
     const textarea = modal.querySelector('#waMsgBox');
     textarea.value = message;
+    const hint = modal.querySelector('#waCopyHint');
+    const copyBtn = modal.querySelector('#waCopyBtn');
+
+    const markCopied = () => {
+      if (hint) hint.innerHTML = '<i class="material-icons" style="font-size:14px; vertical-align:middle; color:var(--success);">done</i> Copied to clipboard — paste into WhatsApp.';
+      copyBtn.innerHTML = '<i class="material-icons" style="font-size:16px;">done</i> Copied';
+    };
+
+    // Try to auto-copy, but DON'T trust it: the modal is often opened by the
+    // auto-export flow (a folder-watch tick), which has no user activation, so
+    // the browser silently rejects clipboard writes — leaving the PREVIOUS
+    // race's text on the clipboard. So "Copy message" is a prominent one-click
+    // (user-gesture) action that always works, and the hint tells the operator
+    // to use it. Pre-select the text too so Cmd/Ctrl+C is available.
     textarea.focus();
     textarea.select();
-
-    // Copy to clipboard automatically — the operator shouldn't have to
-    // click an extra button. They just need to paste. If the browser
-    // blocks the auto-clipboard write (some require explicit user
-    // gesture), the Copy button below stays as a fallback.
-    let autoCopied = false;
     (async () => {
       try {
         await navigator.clipboard.writeText(message);
-        autoCopied = true;
-        const hint = modal.querySelector('#waCopyHint');
-        if (hint) hint.innerHTML = '<i class="material-icons" style="font-size:14px; vertical-align:middle; color:var(--success);">done</i> Copied to clipboard — paste into WhatsApp.';
+        markCopied(); // only reached when the browser actually allowed it
       } catch {
-        // Pre-select stays in effect so Cmd/Ctrl+C still works.
+        // No activation — operator must click Copy. Hint already says so.
+        textarea.select();
       }
     })();
 
     const cleanup = () => { modal.remove(); resolve(); };
 
-    modal.querySelector('#waCopyBtn').addEventListener('click', async () => {
+    copyBtn.addEventListener('click', async () => {
       try {
-        await navigator.clipboard.writeText(message);
-        showToast('Copied again.', 'success', 1500);
+        await navigator.clipboard.writeText(message); // user gesture → reliable
+        markCopied();
+        showToast('Copied — paste into WhatsApp.', 'success', 1500);
       } catch {
         textarea.select();
-        showToast('Clipboard blocked — select the text above and Cmd/Ctrl+C.', 'warning', 4000);
+        showToast('Clipboard blocked — select the text above and press Cmd/Ctrl+C.', 'warning', 4000);
       }
     });
     modal.querySelector('#waCloseBtn').addEventListener('click', cleanup);
