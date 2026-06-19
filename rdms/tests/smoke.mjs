@@ -623,6 +623,23 @@ group('computeVarianceWarnings', () => {
 group('resizeLaneRowsXlsx', () => {
   const tpl = readFileSync(new URL('../templates/race-template.xlsx', import.meta.url));
 
+  test('no duplicate / out-of-order rows at any lane count (Excel cell-info repair guard)', () => {
+    // The template has a self-closed <row r="19"/>. A regex that glued it to
+    // the next row duplicated row 21 on expand (laneCount >= 9), making Excel
+    // strip "cell information" from the .xlsx. Guard every realistic count.
+    for (let lc = 1; lc <= 12; lc++) {
+      const xml = new TextDecoder().decode(
+        fflate.unzipSync(new Uint8Array(resizeLaneRowsXlsx(tpl, lc)))['xl/worksheets/sheet1.xml'],
+      );
+      const seq = [...xml.matchAll(/<row r="(\d+)"/g)].map(m => +m[1]);
+      const dups = seq.filter((x, i) => seq.indexOf(x) !== i);
+      if (dups.length) throw new Error(`lc=${lc}: duplicate rows ${[...new Set(dups)]}`);
+      for (let i = 1; i < seq.length; i++) {
+        if (seq[i] <= seq[i - 1]) throw new Error(`lc=${lc}: rows not ascending (${seq[i - 1]} then ${seq[i]})`);
+      }
+    }
+  });
+
   function decodeSheet(bytes) {
     const files = fflate.unzipSync(new Uint8Array(bytes));
     return new TextDecoder().decode(files['xl/worksheets/sheet1.xml']);

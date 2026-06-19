@@ -90,17 +90,29 @@ export function resizeLaneRowsXlsx(xlsxBytes, laneCount) {
 }
 
 function shiftRowsBy(xml, startRow, delta) {
-  return xml.replace(/<row r="(\d+)"([^>]*)>([\s\S]*?)<\/row>/g, (m, n, attrs, inner) => {
-    const num = parseInt(n, 10);
-    if (num < startRow) return m;
-    const newNum = num + delta;
-    // Each cell inside this row has r="<col><num>" — update only when
-    // the cell row matches the row we're shifting (defensive).
-    const newInner = inner.replace(/r="([A-Z]+)(\d+)"/g, (mm, col, rn) => {
-      return parseInt(rn, 10) === num ? `r="${col}${newNum}"` : mm;
-    });
-    return `<row r="${newNum}"${attrs}>${newInner}</row>`;
-  });
+  // Match a full row in EITHER form: self-closed `<row .../>` or
+  // `<row ...>...</row>`. The bundled template has a self-closed empty row
+  // (`<row r="19" .../>`); a naive `<row ...>([\s\S]*?)</row>` regex would
+  // glue that self-closed tag to the NEXT row's content, duplicating/merging
+  // rows on expand — which made Excel strip "cell information" from the .xlsx.
+  return xml.replace(
+    /<row r="(\d+)"([^>]*?)(?:\/>|>([\s\S]*?)<\/row>)/g,
+    (m, n, attrs, inner) => {
+      const num = parseInt(n, 10);
+      if (num < startRow) return m;
+      const newNum = num + delta;
+      if (inner === undefined) {
+        // self-closed empty row — just renumber
+        return `<row r="${newNum}"${attrs}/>`;
+      }
+      // Each cell inside this row has r="<col><num>" — update only when the
+      // cell row matches the row we're shifting (defensive).
+      const newInner = inner.replace(/r="([A-Z]+)(\d+)"/g, (mm, col, rn) => {
+        return parseInt(rn, 10) === num ? `r="${col}${newNum}"` : mm;
+      });
+      return `<row r="${newNum}"${attrs}>${newInner}</row>`;
+    },
+  );
 }
 
 /**
