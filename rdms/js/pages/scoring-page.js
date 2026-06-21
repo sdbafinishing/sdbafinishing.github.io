@@ -52,6 +52,7 @@ export async function mountScoringPage(container) {
     const name = div?.division_name || `Division ${divId}`;
     const colour = div?.colour_hex || '#9ca3af';
     tabsHtml += `<button class="tab ${idx === 0 ? 'active' : ''}" data-tab="scoring-${divId}"
+                          data-colour="${colour}"
                           onclick="window._scoringTab('${divId}')"
                           style="border-bottom-color:${idx === 0 ? colour : 'transparent'};">
                    <span style="display:inline-block; width:8px; height:8px; border-radius:2px; background:${colour}; margin-right:6px;"></span>
@@ -76,6 +77,10 @@ export async function mountScoringPage(container) {
     document.querySelectorAll('.tab').forEach(t => {
       const isActive = t.dataset.tab === `scoring-${divId}`;
       t.classList.toggle('active', isActive);
+      // The underline colour is an inline style (per-division colour), which
+      // overrides the .active CSS — so move it explicitly, else the underline
+      // stays under the first tab.
+      t.style.borderBottomColor = isActive ? (t.dataset.colour || '') : 'transparent';
     });
     await renderScoringDiv(divId, divGroups[divId], laneCount, timeMode, divisions);
   };
@@ -135,6 +140,12 @@ async function renderScoringDiv(divId, scoredRaces, laneCount, timeMode, divisio
 
   // Collect results from all scored races in parallel (avoid N+1)
   const allLanes = await Promise.all(scoredRaces.map(r => getLaneResults(r.race_number)));
+  // Rank each race from raw_time rather than trusting the stored
+  // computed_position — a Joyi re-import can leave it null, which would score
+  // the race 0 points (the bug where one category showed RFinal = 0).
+  scoredRaces.forEach((r, i) => {
+    computeRankings(allLanes[i], timeMode, r.batch_override_enabled ? (r.batch_delta_ms || 0) : 0);
+  });
   const roundResults = {};
   scoredRaces.forEach((r, i) => { roundResults[r.scoring_flag] = allLanes[i]; });
 

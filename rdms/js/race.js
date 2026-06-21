@@ -507,15 +507,18 @@ export function computeVarianceWarnings(ctx) {
       if (!curLane) continue;
       const curMs = Number.isFinite(curLane.raw_time_ms) ? curLane.raw_time_ms : timeToMs(curLane.raw_time, timeMode);
       if (!curMs || curMs === 0) continue;
-      const delta = Math.abs(curMs - prev.ms);
+      const signedDeltaMs = curMs - prev.ms; // + = slower now, - = faster now
+      const delta = Math.abs(signedDeltaMs);
+      // Signed so the operator sees direction at a glance: +Xs slower, -Xs faster.
+      const deltaStr = `${signedDeltaMs >= 0 ? '+' : '-'}${(delta / 1000).toFixed(1)}s`;
       const teamLabel = `${dl.team_name || dl.team_code} (lane ${dl.lane_number})`;
       if (delta >= HARD_MS) {
         out.errors.push(
-          `${teamLabel}: ${(curMs / 1000).toFixed(2)}s now vs ${(prev.ms / 1000).toFixed(2)}s in Race ${prev.race_number} — Δ${(delta / 1000).toFixed(1)}s. Verify.`,
+          `${teamLabel}: ${(curMs / 1000).toFixed(2)}s now vs ${(prev.ms / 1000).toFixed(2)}s in Race ${prev.race_number} — ${deltaStr}. Verify.`,
         );
       } else if (delta >= SOFT_MS) {
         out.warnings.push(
-          `${teamLabel}: ${(curMs / 1000).toFixed(2)}s now vs ${(prev.ms / 1000).toFixed(2)}s in Race ${prev.race_number} — Δ${(delta / 1000).toFixed(1)}s.`,
+          `${teamLabel}: ${(curMs / 1000).toFixed(2)}s now vs ${(prev.ms / 1000).toFixed(2)}s in Race ${prev.race_number} — ${deltaStr}.`,
         );
       }
     }
@@ -541,7 +544,7 @@ export function computeVarianceWarnings(ctx) {
  * Pure function — no DB calls — so it's safe to call from both the
  * race-page and the export pipeline.
  */
-export function computeDivisionScoring(race, allRaces, allLaneResultsByRace, laneCount) {
+export function computeDivisionScoring(race, allRaces, allLaneResultsByRace, laneCount, timeMode = 'mss00') {
   if (!race?.scoring_flag || race.scoring_flag === 'N' || !race.division_id) return null;
   const order = { 'R1': 1, 'R2': 2, 'RFinal': 3 };
   const scoredRaces = allRaces
@@ -553,6 +556,11 @@ export function computeDivisionScoring(race, allRaces, allLaneResultsByRace, lan
   const teamTotals = new Map();
   for (const r of scoredRaces) {
     const lanes = allLaneResultsByRace.get(r.race_number) || [];
+    // Rank from raw_time here rather than trusting the stored computed_position:
+    // a Joyi re-import (or any import) can leave it null, which would score the
+    // whole race 0 points even though it has valid times + places. Derives the
+    // same value the export uses.
+    computeRankings(lanes, timeMode, r.batch_override_enabled ? (r.batch_delta_ms || 0) : 0);
     const drawLanes = Array.isArray(r.draw_lanes) ? r.draw_lanes : [];
     for (const lr of lanes) {
       if (!lr.team_name || lr.team_name === '---' || lr.team_name === '') continue;

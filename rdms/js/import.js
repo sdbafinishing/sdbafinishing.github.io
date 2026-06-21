@@ -5,6 +5,7 @@
 import * as XLSX from 'xlsx';
 import { getConfig, getRace, saveRace, getLaneResults, bulkSaveLaneResults, bulkSaveRaces, addImportLog } from './db.js';
 import { sanitiseTitle, extractRaceNumber, extractJoyiRaceNumber, joyiTimeToRaw, joyiTimeToMs, joyiTimeHasMsPrecision, msToTime, showToast } from './utils.js';
+import { computeRankings } from './race.js';
 
 /**
  * Parse a draw .xls file and return structured data.
@@ -657,6 +658,16 @@ export async function importJoyiToDb(parsed, opts = {}) {
       team_name: joyiResult.joyi_name || '',
     });
   }
+
+  // Compute + persist computed_position from the imported times. Joyi gives us
+  // raw_time(_ms) but no places; without this, places live only in the race
+  // page's in-memory recalc and the STORED computed_position stays null —
+  // which makes the flowchart show a blank Place and division scoring count 0
+  // points for the race (a re-import after export also wipes a previously
+  // saved position). Ranking here keeps the DB authoritative.
+  const timeMode = config?.time_format_mode || 'mss00';
+  const batchDelta = race.batch_override_enabled ? (race.batch_delta_ms || 0) : 0;
+  computeRankings(laneResults, timeMode, batchDelta);
 
   await bulkSaveLaneResults(laneResults);
 

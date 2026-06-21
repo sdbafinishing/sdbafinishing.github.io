@@ -401,8 +401,10 @@ async function renderTeamProgression(selectedTeamCodes, races, raceMap) {
     return;
   }
 
-  const { getLaneResults } = await import('../db.js');
+  const { getLaneResults, getConfig } = await import('../db.js');
   const { timeToDisplay } = await import('../utils.js');
+  const { computeRankings } = await import('../race.js');
+  const timeMode = (await getConfig())?.time_format_mode || 'mss00';
 
   // For each selected team, walk races that include that team_code (per
   // race.draw_lanes — Joyi-safe). Collect race-by-race rows.
@@ -418,6 +420,13 @@ async function renderTeamProgression(selectedTeamCodes, races, raceMap) {
       let position = null, raw_time = '', remarks = '', lane_input = null;
       try {
         const lanes = await getLaneResults(r.race_number);
+        // Compute the Place live rather than trusting the stored
+        // computed_position: Joyi import writes times but not positions (only
+        // export persists them), so a stored null would render a blank Place
+        // for any race that wasn't exported. computeRankings derives it from
+        // raw_time / raw_time_ms exactly like the export does.
+        const exportDelta = r.batch_override_enabled ? (r.batch_delta_ms || 0) : 0;
+        computeRankings(lanes, timeMode, exportDelta);
         const lr = lanes.find(l => parseInt(l.lane_input, 10) === draw.lane_number);
         if (lr) {
           position = lr.computed_position;

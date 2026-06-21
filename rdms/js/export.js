@@ -251,7 +251,7 @@ export async function exportResults(raceNumber, options = {}) {
     for (const r of scoredRaces) {
       lanesByRace.set(r.race_number, await getLaneResults(r.race_number));
     }
-    scoreCtx = computeDivisionScoring(race, allRaces, lanesByRace, laneCount);
+    scoreCtx = computeDivisionScoring(race, allRaces, lanesByRace, laneCount, timeMode);
   }
   const isRFinal = scoreCtx?.scoringFlag === 'RFinal';
 

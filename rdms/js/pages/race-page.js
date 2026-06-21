@@ -101,9 +101,13 @@ async function buildScoringContext(race, configData) {
   }
 
   const teamTotals = new Map();
+  const timeMode = configData?.time_format_mode || 'mss00';
   const { getLaneResults: _getLanes } = await import('../db.js');
   for (const r of scoredRaces) {
     const lanes = await _getLanes(r.race_number);
+    // Rank from raw_time — the stored computed_position can be null after a
+    // Joyi re-import, which would silently score the race 0 points.
+    computeRankings(lanes, timeMode, r.batch_override_enabled ? (r.batch_delta_ms || 0) : 0);
     for (const lr of lanes) {
       if (!lr.team_name || lr.team_name === '---' || lr.team_name === '') continue;
       const boatLane = parseInt(lr.lane_input, 10) || lr.lane_number;

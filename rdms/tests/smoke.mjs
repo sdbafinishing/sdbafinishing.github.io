@@ -622,8 +622,9 @@ group('computeVarianceWarnings', () => {
       divProgs: [prog],
       laneCount: 6, timeMode: 'mss00',
     });
-    const hasPerTeam = [...out.warnings, ...out.errors].some(w => /X.*Δ/.test(w) || /lane 5.*Δ/.test(w));
-    if (!hasPerTeam) throw new Error('expected per-team variance for team X, got: ' + JSON.stringify(out));
+    // Per-team warning shows a SIGNED delta (e.g. "lane 5: ... — +5.5s.").
+    const hasPerTeam = [...out.warnings, ...out.errors].some(w => /lane 5.*[+-]\d+\.\d+s/.test(w));
+    if (!hasPerTeam) throw new Error('expected signed per-team variance for team X, got: ' + JSON.stringify(out));
   });
 });
 
