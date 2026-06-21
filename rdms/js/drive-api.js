@@ -302,11 +302,23 @@ async function fetchWithRefresh(input, init = {}) {
     },
   });
   let resp = await fetch(input, buildInit());
-  if (resp.status === 401 || resp.status === 403) {
+  // 401 = expired/invalid token → silent refresh + one retry. We deliberately
+  // do NOT refresh on 403: a 403 is a permission / API-not-enabled / quota
+  // problem that a fresh token can't fix, and refreshing would pop a useless
+  // consent window mid-export (exactly the bug seen during testing).
+  if (resp.status === 401) {
     const ok = await refreshDriveToken();
     if (ok) {
       resp = await fetch(input, buildInit());
     }
+  }
+  if (!resp.ok) {
+    // Surface Google's actual error reason (e.g. accessNotConfigured =
+    // "Drive API not enabled in this project", or insufficientPermissions).
+    try {
+      const body = (await resp.clone().text()).slice(0, 700);
+      console.warn('Drive API error', resp.status, body);
+    } catch { /* ignore body read failure */ }
   }
   return resp;
 }

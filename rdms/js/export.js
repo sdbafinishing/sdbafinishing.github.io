@@ -402,7 +402,8 @@ export async function exportResults(raceNumber, options = {}) {
     try {
       const res = await writeDriveFileWithLink(sharedSub, filename, xlsBlob, XLSX_MIME);
       if (res?.directUrl) { directUrl = res.directUrl; shared = true; }
-    } catch (err) { console.warn('Drive API result write failed:', err); }
+      else { showToast('Drive API write returned no link — used folder', 'warning', 3500); }
+    } catch (err) { console.warn('Drive API result write failed:', err); showToast('Drive API write failed — used folder', 'warning', 3500); }
     if (!shared) {
       // API shared write failed — fall back to the mounted-folder write so the
       // result still reaches the shared folder (folder link in the message).
