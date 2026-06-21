@@ -402,7 +402,10 @@ export async function uploadFinishImage(raceNumber, blob) {
     const { error } = await sb.storage.from(FINISH_IMAGE_BUCKET).upload(path, blob, {
       upsert: true,
       contentType: 'image/jpeg',
-      cacheControl: '3600',
+      // Short TTL so a re-generated image propagates quickly (the viewer also
+      // cache-busts per open). A finish image rarely changes after publish, so
+      // a 1-minute cache is plenty and keeps repeat views cheap.
+      cacheControl: '60',
     });
     if (error) {
       console.warn('finish-image upload failed:', error.message || error);

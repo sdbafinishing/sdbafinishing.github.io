@@ -455,7 +455,12 @@ export async function smartViewPhotoFinishPng(race) {
   // ONLINE (no local file access — iPad at another station): read the published
   // small JPEG straight from the public Supabase Storage bucket by URL.
   if (!isSourceConnected()) {
-    const url = finishImagePublicUrl(cfg?.supabase_url, cfg?.event_short_ref, race.race_number);
+    const base = finishImagePublicUrl(cfg?.supabase_url, cfg?.event_short_ref, race.race_number);
+    // Cache-bust: Supabase Storage serves public objects via a CDN with a
+    // cache TTL, so a deleted/replaced image keeps being served until it
+    // expires. A per-open token forces a fresh fetch (so re-generate / delete
+    // shows immediately). Use the SAME busted URL for the probe + the viewer.
+    const url = base ? `${base}?t=${Date.now()}` : null;
     const stop = showSpinner(race.race_number);
     const ok = url ? await imageUrlLoads(url) : false;
     stop();

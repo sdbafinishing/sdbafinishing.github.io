@@ -409,6 +409,7 @@ export async function mountRacePage(container, params) {
         <div class="form-group" style="margin:0;">
           <label class="form-label">P1 Time (${timeMode})</label>
           <input class="form-input" id="batchP1Time" type="text" style="width:120px; font-family:monospace;"
+                 value="${raceData.p1_finish_elapsed_ms != null ? msToTime(raceData.p1_finish_elapsed_ms, timeMode) : ''}"
                  placeholder="${timeMode === 'mmss00' ? '000000' : '00000'}">
         </div>
         <div>
@@ -446,6 +447,8 @@ export async function mountRacePage(container, params) {
         </div>
       </div>
       <div id="outputTableContainer" class="race-output-scroll" style="overflow-x:auto; -webkit-overflow-scrolling:touch;"></div>
+      ${(raceData.progression_text || '').trim() ? `
+      <div style="margin-top:10px; padding-top:8px; border-top:1px solid var(--border); font-size:13px; color:var(--text-secondary); white-space:pre-wrap; word-break:break-word;">${(raceData.progression_text || '').trim().replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>` : ''}
     </div>
 
     <!-- Blocking overlay: only shown when the operator has started result
@@ -2154,6 +2157,11 @@ function attachHandlers() {
       recalculate();
     });
   }
+
+  // Restore the batch Difference display from the saved P1 time when reopening
+  // a race (the input value is restored in the template above; this recomputes
+  // the delta against the current first-boat time so it isn't shown as 0.00.00).
+  if (p1Input?.value && p1InputHandler) p1InputHandler();
 
   // Photo Finish — try to auto-find the .lcd/.jyd pair in the Joyi shared
   // folder first (saves the operator a manual pick during race-day). On
