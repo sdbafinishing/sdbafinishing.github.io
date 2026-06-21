@@ -469,36 +469,27 @@ export async function smartViewPhotoFinishPng(race) {
     return;
   }
 
-  // LOCAL — show fast from local files, and publish the small JPEG to Supabase
-  // in the background so the online viewer can read it.
-  // 1) Existing PNG — instant.
-  try {
-    const existing = await readPhotoFinishPng(race);
-    if (existing) {
-      showPngViewer(existing, race);
-      publishFinishImage(race).catch(() => {});
-      return;
-    }
-  } catch { /* fall through */ }
-
-  // 2) Generate on demand from Joyi files.
+  // LOCAL — generate the finish image fresh from the Joyi files for display and
+  // publish the small JPEG to Supabase. We no longer SAVE a PNG into the
+  // results / Drive folder — the Supabase JPEG is the shareable artifact now
+  // (writing a PNG to the synced folder was the old, slow-on-the-uplink path).
   const stop = showSpinner(race.race_number);
   try {
     const found = await findJoyiPhotoFiles(race);
     if (found.lcd) {
-      const blob = await generateAndSavePhotoFinishPng(race, found);
+      // generatePhotoFinishBlob renders for DISPLAY only — it does not write to
+      // the folder (unlike generateAndSavePhotoFinishPng).
+      const blob = await generatePhotoFinishBlob(race, found.lcd, found.jyd);
       stop();
-      if (blob) {
-        showPngViewer(blob, race);
-        publishFinishImage(race, found).catch(() => {});
-        return;
-      }
+      showPngViewer(blob, race);
+      publishFinishImage(race, found).catch(() => {});
+      return;
     } else {
       stop();
     }
   } catch (err) {
     stop();
-    console.warn('on-demand photo-finish PNG failed:', err);
+    console.warn('on-demand finish image failed:', err);
   }
 
   // 3) Fallback — manual picker (mirrors the Photo Finish button).

@@ -9,7 +9,7 @@ import { timeToDisplay, msToTime, nowISO, isoToTime, showToast } from './utils.j
 import { broadcastChange } from './app.js';
 import { backupAfterExport } from './backup.js';
 import { writeToBoth, writeToSourceSubfolder, downloadFallback } from './file-access.js';
-import { isDriveApiConnected, writeDriveFileWithLink } from './drive-api.js';
+import { initDriveApi, isDriveApiConnected, writeDriveFileWithLink } from './drive-api.js';
 import { queueRaceSync } from './sync.js';
 import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx } from './xlsx-patcher.js';
 import raceTemplateUrl from '../templates/race-template.xlsx?url';
@@ -389,7 +389,12 @@ export async function exportResults(raceNumber, options = {}) {
   // write to the mounted folder exactly as before and use the folder link.
   let local = false, shared = false, directUrl = null;
   let driveConn = false;
-  try { driveConn = isDriveApiConnected(); } catch { driveConn = false; }
+  // initDriveApi() restores the access token from sessionStorage on a fresh page
+  // load — isDriveApiConnected() alone returns false until that runs, which is
+  // why a re-export after reload was falling back to the folder link even though
+  // Setup showed "Connected". Returns the live connection state.
+  try { driveConn = await initDriveApi(); } catch { driveConn = false; }
+  if (!driveConn) { try { driveConn = isDriveApiConnected(); } catch { /* ignore */ } }
 
   if (driveConn) {
     try { local = !!(await writeToSourceSubfolder('12 Output_Results', filename, xlsBlob)); }
