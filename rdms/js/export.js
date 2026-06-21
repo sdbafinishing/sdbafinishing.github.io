@@ -424,16 +424,14 @@ export async function exportResults(raceNumber, options = {}) {
   // successfully — otherwise the caller's try/catch swallows the error and
   // skips the follow-on send (onComplete writes send_time to the race + the
   // timesheet), leaving the race "exported but not sent".
-  try {
-    await backupAfterExport(raceNumber); // Auto-backup after every export
-  } catch (err) {
-    console.warn('Auto-backup after export failed (non-fatal):', err);
-  }
-  try {
-    await queueRaceSync(raceNumber); // Queue for Supabase sync
-  } catch (err) {
-    console.warn('queueRaceSync after export failed (non-fatal):', err);
-  }
+  // Fire-and-forget — do NOT await. The export is already committed above, so
+  // a slow Drive write (saturated upload queue on a weak network) must never
+  // freeze the Export & Send button. Backup still runs after EVERY export
+  // (it's <500 KB), just off the critical path.
+  backupAfterExport(raceNumber).catch(err =>
+    console.warn('Auto-backup after export failed (non-fatal):', err));
+  queueRaceSync(raceNumber).catch(err =>
+    console.warn('queueRaceSync after export failed (non-fatal):', err));
 
   // Round-completion check (fire-and-forget). If the round this race
   // belongs to is now fully exported AND auto-prompt is enabled in config,

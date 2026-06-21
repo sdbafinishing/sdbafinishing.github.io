@@ -279,7 +279,7 @@ export async function mountRacePage(container, params) {
           <div>
             <div style="font-size:11px; color:var(--text-tertiary); text-transform:uppercase; letter-spacing:0.5px;">Race</div>
             <div style="font-size:22px; font-weight:700; line-height:1.1;">${raceNumber}</div>
-            <div style="font-size:13px; color:var(--text-secondary); margin-top:2px;">${raceData.race_title || 'Untitled'}</div>
+            <div style="font-size:13px; color:var(--text-secondary); margin-top:2px; max-width:340px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${(raceData.race_title || 'Untitled').replace(/"/g, '&quot;')}">${raceData.race_title || 'Untitled'}</div>
           </div>
         </div>
         <div class="race-header-times" style="display:grid; grid-template-columns:repeat(4, auto); gap:14px; text-align:center;">
@@ -1400,27 +1400,32 @@ function renderStartTimeText(race) {
  * Header "Export" cell — if there's been more than one export, show the
  * previous one struck through next to the latest.
  */
+// Stack the previous (struck-through) value ABOVE the latest so a re-export /
+// re-send keeps the header cell NARROW. Showing them side-by-side ("old → new")
+// roughly doubled the column width and pushed the header onto a second line.
+function stackedTimeText(prevIso, currentIso) {
+  return `<span style="display:inline-flex; flex-direction:column; align-items:center; line-height:1.05;">`
+    + `<s style="color:var(--text-tertiary); font-weight:400; font-size:10px;">${isoToTime(prevIso)}</s>`
+    + `<span>${isoToTime(currentIso)}</span></span>`;
+}
+
 function renderExportTimeText(race) {
   if (!race.export_time) return '—';
   const history = race.export_history || [];
   if (history.length >= 2) {
     const prev = history[history.length - 2]?.timestamp;
-    if (prev) {
-      return `<s style="color:var(--text-tertiary); font-weight:400;">${isoToTime(prev)}</s> → ${isoToTime(race.export_time)}`;
-    }
+    if (prev) return stackedTimeText(prev, race.export_time);
   }
   return isoToTime(race.export_time);
 }
 
 /**
  * Header "Send" cell — if there's been a re-send, show the previous send
- * struck through next to the latest.
+ * struck through above the latest (stacked, to keep the cell narrow).
  */
 function renderSendTimeText(race) {
   if (!race.send_time) return '—';
-  if (race.prev_send_time) {
-    return `<s style="color:var(--text-tertiary); font-weight:400;">${isoToTime(race.prev_send_time)}</s> → ${isoToTime(race.send_time)}`;
-  }
+  if (race.prev_send_time) return stackedTimeText(race.prev_send_time, race.send_time);
   return isoToTime(race.send_time);
 }
 

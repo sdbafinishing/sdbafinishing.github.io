@@ -208,6 +208,13 @@ window.addEventListener('rdms-config-updated', () => {
   refreshLockBanner().catch(() => {});
 });
 
+// Web viewer: the background poll (web-init) dispatches rdms-web-pulled when
+// Supabase data actually changed. Re-render the current page the same way
+// navigating away + back does (a full re-mount) so the dashboard, timesheet,
+// and scoring all reflect the operator's latest actions without a manual
+// refresh. Only fires online — the poll is a no-op locally.
+window.addEventListener('rdms-web-pulled', () => { navigate().catch(() => {}); });
+
 export function broadcastChange(type, data = {}) {
   channel.postMessage({ type, ...data });
   // Also fan out a window CustomEvent so same-tab subscribers (e.g. the

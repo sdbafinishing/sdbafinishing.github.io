@@ -164,6 +164,14 @@ async function hydrateRaceSnapshots(eventRef, { clear = false } = {}) {
 
   if (!snapshots) return false; // fetch failed — leave existing data intact
 
+  // Detect whether anything actually changed since the last hydrate, so the
+  // poll only forces a re-render on real updates (no needless remount/flicker).
+  const hash = snapshots
+    .map(s => `${s.race_number}:${s.updated_at}`)
+    .join('|');
+  const changed = hash !== webDataHash;
+  webDataHash = hash;
+
   if (clear) {
     // Done AFTER the fetch succeeded so a transient failure can't blank the
     // viewer. An empty event (snapshots === []) correctly clears to nothing.
@@ -240,11 +248,12 @@ async function hydrateRaceSnapshots(eventRef, { clear = false } = {}) {
     await db.timesheet.bulkPut(timesheets);
   }
 
-  return true;
+  return changed;
 }
 
 // ────── Live dashboard polling (web viewer only) ──────
 let webPollInterval = null;
+let webDataHash = null; // signature of last-hydrated snapshots (change detection)
 const WEB_POLL_MS = 20000;
 
 /**
