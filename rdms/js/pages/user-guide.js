@@ -466,8 +466,9 @@ export function renderUserGuideTab(container) {
           <h4>11. Past Events Archive</h4>
           <p>${ic('archive')} <strong>Archive</strong> nav link (admin + editor only). Read-only browser of every event in Supabase except the one currently loaded.</p>
           <ul>
-            <li>Per-event row shows ref / event name / date / total races / exported count / Drive folder link / "Open" detail view.</li>
-            <li>"Open" expands to a per-race list. Each race expands inline to a Pos/Lane/Team/Time/TP/Remarks table — the same shape the original results export carries.</li>
+            <li>Per-event row shows ref / event name / date / total races / exported count / Drive folder link / <strong>"All tabs"</strong> / "Open" detail view.</li>
+            <li>"Open" expands to a per-race list (read-only results). Each race expands inline to a Pos/Lane/Team/Time/TP/Remarks table — the same shape the original results export carries.</li>
+            <li><strong>"All tabs" (browse a past event everywhere).</strong> The local Archive can't safely swap the live event in IndexedDB, so this hands off to the <strong>online viewer</strong> — it opens the deployed site pre-switched to that event (via a <code>?event=&lt;ref&gt;</code> deep link) so you can browse it across <em>every</em> tab (Dashboard, Timesheet, Scoring, Flowchart) read-only. On the online viewer you can also switch events any time by clicking the <strong>event badge in the navbar</strong>. (The local app stays pinned to the live event because its IndexedDB is the authoritative copy.)</li>
             <li>Drive deep-link is built from the <code>drive_source_folder_id</code> captured in the synced event config — so you can jump straight into <code>2024TN/</code> from the archive without remembering the URL.</li>
           </ul>
           <div class="gtip">Archive reads Supabase's <code>event_config</code> + <code>race_snapshots</code> tables — exactly the data the web dashboard hydrates from. Anything synced is browsable; anything that never made it to Supabase isn't.</div>

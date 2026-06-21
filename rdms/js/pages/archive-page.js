@@ -15,6 +15,15 @@ import { timeToDisplay, showToast } from '../utils.js';
 
 let supabaseRef = null; // shared between mount and inner navigation
 
+// Deployed online viewer (GitHub Pages). The local Archive is read-only and
+// can't safely swap the live event in IndexedDB, so to browse a past event
+// across ALL tabs we hand off to the online viewer (its IndexedDB is a
+// disposable cache) pre-switched to the event via the ?event= param that
+// web-init.js honours. Hash route lands on the dashboard.
+const ONLINE_VIEWER_BASE = 'https://sdbafinishing.github.io/rdms/';
+const onlineViewerUrl = (ref) =>
+  `${ONLINE_VIEWER_BASE}?event=${encodeURIComponent(ref)}#/dashboard`;
+
 // Lazy-load supabase client using the current configured URL/key. Mirrors
 // sync.js getSupabase() but local to this module so we don't disturb the
 // sync queue's client reference.
@@ -132,6 +141,7 @@ async function renderEventList(container, currentRef) {
           <th style="text-align:center; width:90px;">Races</th>
           <th style="text-align:center; width:90px;">Exported</th>
           <th style="width:90px;"></th>
+          <th style="width:110px;"></th>
           <th style="width:130px;"></th>
         </tr>
       </thead>
@@ -164,6 +174,12 @@ async function renderEventList(container, currentRef) {
                   : '<span style="font-size:11px; color:var(--text-tertiary);">no link</span>'}
               </td>
               <td>
+                <a class="btn btn-ghost btn-sm" href="${onlineViewerUrl(ref)}" target="_blank" rel="noopener"
+                   title="Open this event in the online viewer — browse it across all tabs (Dashboard, Timesheet, Scoring, Flowchart)">
+                  <i class="material-icons" style="font-size:14px;">open_in_new</i> All tabs
+                </a>
+              </td>
+              <td>
                 <a class="btn btn-outline btn-sm" href="#/archive/${encodeURIComponent(ref)}">
                   <i class="material-icons" style="font-size:14px;">visibility</i> Open
                 </a>
@@ -179,9 +195,15 @@ async function renderEventRaces(container, eventRef) {
   container.innerHTML = `
     <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
       <h4 style="font-size:18px; font-weight:600; margin:0;">Archive — ${eventRef}</h4>
-      <a class="btn btn-ghost" href="#/archive">
-        <i class="material-icons" style="font-size:16px;">arrow_back</i> All Past Events
-      </a>
+      <div style="display:flex; gap:6px;">
+        <a class="btn btn-outline btn-sm" href="${onlineViewerUrl(eventRef)}" target="_blank" rel="noopener"
+           title="Open this event in the online viewer — browse it across all tabs">
+          <i class="material-icons" style="font-size:16px;">open_in_new</i> Open all tabs
+        </a>
+        <a class="btn btn-ghost" href="#/archive">
+          <i class="material-icons" style="font-size:16px;">arrow_back</i> All Past Events
+        </a>
+      </div>
     </div>
     <div id="archEventMeta" style="margin-bottom:10px;"></div>
     <div class="card" id="archRacesCard" style="padding:0;">

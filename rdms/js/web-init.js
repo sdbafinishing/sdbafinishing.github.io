@@ -39,6 +39,17 @@ export async function initWebVersion() {
 
   supabaseClient = window.supabase.createClient(WEB_CONFIG.supabase_url, WEB_CONFIG.supabase_anon_key);
 
+  // Deep link: ?event=<ref> (used by the local Archive's "All tabs" hand-off)
+  // selects that event across all viewer tabs. Wins over the saved session
+  // selection and the auto-latest default. The param sits before the hash
+  // (e.g. .../rdms/?event=2026WU#/dashboard), so location.search has it.
+  const urlEvent = new URLSearchParams(location.search).get('event');
+  if (urlEvent) {
+    sessionStorage.setItem('rdms-web-event', urlEvent);
+    await loadEventConfig(urlEvent);
+    return { ready: true, eventRef: urlEvent };
+  }
+
   // Check if we already have a selected event in this session
   const savedRef = sessionStorage.getItem('rdms-web-event');
   if (savedRef) {
