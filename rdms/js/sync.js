@@ -20,6 +20,7 @@
  */
 import { db, getConfig, getAllRaces, getLaneResults, getTimesheet } from './db.js';
 import { timeToDisplay, isoToTime, showToast } from './utils.js';
+import { FINISH_IMAGE_BUCKET, finishImagePath, finishImagePublicUrl } from './finish-image.js';
 
 let supabaseClient = null;
 let syncInterval = null;
@@ -377,6 +378,41 @@ export async function forceFullSync() {
   lastSyncWrites = writes;
   lastSyncError = firstErr ? (firstErr.message || String(firstErr)) : null;
   return { writes, error: firstErr ? (firstErr.message || String(firstErr)) : null };
+}
+
+/**
+ * Upload a small finish-image JPEG to the public `finish-images` Storage bucket
+ * so the online / iPad viewer can read it by URL (see finish-image.js). Uses
+ * the service-role client (local writer), upserts so a re-generate overwrites.
+ *
+ * Returns the public URL on success, null otherwise. Never throws — the caller
+ * treats it as best-effort (the Quick View still works locally either way).
+ *
+ * @param {number} raceNumber
+ * @param {Blob} blob  JPEG blob
+ * @returns {Promise<string|null>}
+ */
+export async function uploadFinishImage(raceNumber, blob) {
+  try {
+    const sb = await getSupabase();
+    if (!sb || !blob) return null;
+    const config = await getConfig();
+    const ref = config?.event_short_ref || 'RDMS';
+    const path = finishImagePath(ref, raceNumber);
+    const { error } = await sb.storage.from(FINISH_IMAGE_BUCKET).upload(path, blob, {
+      upsert: true,
+      contentType: 'image/jpeg',
+      cacheControl: '3600',
+    });
+    if (error) {
+      console.warn('finish-image upload failed:', error.message || error);
+      return null;
+    }
+    return finishImagePublicUrl(config?.supabase_url, ref, raceNumber);
+  } catch (err) {
+    console.warn('finish-image upload error:', err);
+    return null;
+  }
 }
 
 // ──── Lifecycle ────

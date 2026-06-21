@@ -29,6 +29,8 @@ import {
   buildPhotoFinishMeta,
 } from './photo-finish.js';
 import { getConfig, getRace } from './db.js';
+import { showToast } from './utils.js';
+import { finishImagePublicUrl } from './finish-image.js';
 import {
   writeToBoth,
   readFromSourceSubfolder,
@@ -80,10 +82,11 @@ export function autoCropRange(img, jydData) {
 }
 
 /**
- * Render the composite PNG (panel + auto-cropped strip) for a race.
- * @returns {Promise<Blob>}
+ * Render the composite finish image (panel + auto-cropped strip) for a race to
+ * a canvas. Shared by the PNG (full-res) and JPEG (small, for Supabase) paths.
+ * @returns {Promise<{canvas: HTMLCanvasElement, width: number, height: number}>}
  */
-export async function generatePhotoFinishBlob(race, lcdFile, jydFile) {
+async function renderPhotoFinishCanvas(race, lcdFile, jydFile) {
   const buf = await lcdFile.arrayBuffer();
   const img = parseLcdHeader(buf);
 
@@ -120,9 +123,63 @@ export async function generatePhotoFinishBlob(race, lcdFile, jydFile) {
   renderLcdRangeToCanvas(imgCanvas.getContext('2d'), img, 'trilinear-rgb', colStart, colEnd);
   ctx.drawImage(imgCanvas, PANEL_W, 0, imageOutW, outH);
 
+  return { canvas: out, width: outW, height: outH };
+}
+
+/**
+ * Render the composite PNG (panel + auto-cropped strip) for a race.
+ * @returns {Promise<Blob>}
+ */
+export async function generatePhotoFinishBlob(race, lcdFile, jydFile) {
+  const { canvas } = await renderPhotoFinishCanvas(race, lcdFile, jydFile);
   return await new Promise((resolve, reject) => {
-    out.toBlob(b => (b ? resolve(b) : reject(new Error('toBlob returned null'))), 'image/png');
+    canvas.toBlob(b => (b ? resolve(b) : reject(new Error('toBlob returned null'))), 'image/png');
   });
+}
+
+/**
+ * Render a SMALL JPEG (downscaled to maxWidth, quality-compressed) for fast
+ * sharing via Supabase Storage to the online / iPad viewer. Much smaller than
+ * the PNG and never written to the Drive-synced folder.
+ * @returns {Promise<Blob>}
+ */
+export async function generatePhotoFinishJpeg(race, lcdFile, jydFile, maxWidth = 1800, quality = 0.82) {
+  const { canvas, width, height } = await renderPhotoFinishCanvas(race, lcdFile, jydFile);
+  const targetW = Math.min(width, maxWidth);
+  const scale = targetW / width;
+  const small = document.createElement('canvas');
+  small.width = Math.max(1, Math.round(width * scale));
+  small.height = Math.max(1, Math.round(height * scale));
+  const sctx = small.getContext('2d');
+  sctx.imageSmoothingEnabled = true;
+  sctx.imageSmoothingQuality = 'high';
+  sctx.drawImage(canvas, 0, 0, small.width, small.height);
+  return await new Promise((resolve, reject) => {
+    small.toBlob(b => (b ? resolve(b) : reject(new Error('toBlob returned null'))), 'image/jpeg', quality);
+  });
+}
+
+/**
+ * Best-effort: generate the small JPEG for a race and upload it to Supabase
+ * Storage so the online / iPad viewer can read it. Fire-and-forget — never
+ * throws, never blocks the local view. Dynamic-imports sync.js to avoid a
+ * circular dependency.
+ */
+export async function publishFinishImage(race, files = null) {
+  try {
+    let { lcd, jyd } = files || {};
+    if (!lcd) {
+      const found = await findJoyiPhotoFiles(race);
+      lcd = found.lcd; jyd = found.jyd;
+    }
+    if (!lcd) return null;
+    const jpeg = await generatePhotoFinishJpeg(race, lcd, jyd);
+    const { uploadFinishImage } = await import('./sync.js');
+    return await uploadFinishImage(race.race_number, jpeg);
+  } catch (err) {
+    console.warn('publishFinishImage failed (non-fatal):', err);
+    return null;
+  }
 }
 
 /** Read the previously-saved PNG for a race (local results folder). */
@@ -199,18 +256,40 @@ export async function backgroundGeneratePhotoFinishPng(raceNumber, lcdFile, jydF
   }
 }
 
+/** Resolve true if an image URL loads (used to probe the Supabase JPEG). */
+function imageUrlLoads(url) {
+  return new Promise((resolve) => {
+    const probe = new Image();
+    probe.onload = () => resolve(true);
+    probe.onerror = () => resolve(false);
+    probe.src = url;
+  });
+}
+
+/** Minimal full-screen viewer for a finish image given a ready URL (online). */
+function showImageUrlViewer(url, race) {
+  showImageModal(url, race, false);
+}
+
 /** Minimal full-screen viewer for a photo-finish PNG blob/File. */
 function showPngViewer(blob, race) {
+  showImageModal(URL.createObjectURL(blob), race, true);
+}
+
+/**
+ * Shared full-screen image modal.
+ * @param {string} url  object URL (revoke=true) or a public URL (revoke=false)
+ */
+function showImageModal(url, race, revoke) {
   const existing = document.getElementById('pfPngViewer');
   if (existing) existing.remove();
-  const url = URL.createObjectURL(blob);
   const modal = document.createElement('div');
   modal.id = 'pfPngViewer';
   modal.style.cssText = 'position:fixed; inset:0; background:rgba(0,0,0,0.85); z-index:9998; display:flex; flex-direction:column; padding:16px;';
   modal.innerHTML = `
     <div style="display:flex; align-items:center; gap:12px; margin-bottom:10px; color:#fff;">
       <strong style="font-size:14px;">Photo Finish — Race ${race.race_number}</strong>
-      <a href="${url}" download="${photoFinishPngFilename(race._eventRef || '', race.race_number)}"
+      <a href="${url}" download="PhotoFinish_${race._eventRef || 'RDMS'}_R${race.race_number}.${revoke ? 'png' : 'jpg'}"
          class="btn btn-sm btn-outline" style="margin-left:auto;">
         <i class="material-icons" style="font-size:16px;">download</i> Download
       </a>
@@ -224,7 +303,7 @@ function showPngViewer(blob, race) {
     </div>
   `;
   document.body.appendChild(modal);
-  const cleanup = () => { URL.revokeObjectURL(url); modal.remove(); };
+  const cleanup = () => { if (revoke) URL.revokeObjectURL(url); modal.remove(); };
   modal.querySelector('#pfPngClose').addEventListener('click', cleanup);
   modal.addEventListener('click', (e) => { if (e.target === modal) cleanup(); });
 }
@@ -258,10 +337,28 @@ export async function smartViewPhotoFinishPng(race) {
   const cfg = await getConfig();
   race._eventRef = cfg?.event_short_ref || '';
 
+  // ONLINE (no local file access — iPad at another station): read the published
+  // small JPEG straight from the public Supabase Storage bucket by URL.
+  if (!isSourceConnected()) {
+    const url = finishImagePublicUrl(cfg?.supabase_url, cfg?.event_short_ref, race.race_number);
+    const stop = showSpinner(race.race_number);
+    const ok = url ? await imageUrlLoads(url) : false;
+    stop();
+    if (ok) { showImageUrlViewer(url, race); return; }
+    showToast(`Finish image for Race ${race.race_number} isn't published yet.`, 'info');
+    return;
+  }
+
+  // LOCAL — show fast from local files, and publish the small JPEG to Supabase
+  // in the background so the online viewer can read it.
   // 1) Existing PNG — instant.
   try {
     const existing = await readPhotoFinishPng(race);
-    if (existing) { showPngViewer(existing, race); return; }
+    if (existing) {
+      showPngViewer(existing, race);
+      publishFinishImage(race).catch(() => {});
+      return;
+    }
   } catch { /* fall through */ }
 
   // 2) Generate on demand from Joyi files.
@@ -271,7 +368,11 @@ export async function smartViewPhotoFinishPng(race) {
     if (found.lcd) {
       const blob = await generateAndSavePhotoFinishPng(race, found);
       stop();
-      if (blob) { showPngViewer(blob, race); return; }
+      if (blob) {
+        showPngViewer(blob, race);
+        publishFinishImage(race, found).catch(() => {});
+        return;
+      }
     } else {
       stop();
     }
@@ -285,4 +386,26 @@ export async function smartViewPhotoFinishPng(race) {
     const { showPhotoFinishPicker } = await import('./photo-finish.js');
     await showPhotoFinishPicker(race);
   } catch { /* nothing more we can do */ }
+}
+
+/**
+ * Background entry point — called fire-and-forget from joyi-watch when an .lcd
+ * lands, to pre-publish the small JPEG to Supabase so the iPad viewer sees the
+ * image for EVERY race without the operator opening Quick View first.
+ *
+ * Unlike the PNG auto-save this does NOT write to the Drive-synced folder (it
+ * uploads straight to Supabase Storage), so it doesn't compete for the uplink.
+ * Gated by config.auto_finish_image_upload (default ON when Supabase is set).
+ */
+export async function backgroundUploadFinishImage(raceNumber, lcdFile, jydFile) {
+  try {
+    const cfg = await getConfig();
+    if (cfg?.auto_finish_image_upload === false) return; // explicit opt-out
+    if (!cfg?.supabase_url) return; // no Supabase → nowhere to publish
+    const race = await getRace(raceNumber);
+    if (!race) return;
+    await publishFinishImage(race, { lcd: lcdFile, jyd: jydFile });
+  } catch (err) {
+    console.warn('background finish-image upload failed:', err);
+  }
 }

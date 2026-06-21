@@ -215,7 +215,13 @@ async function scanOnce() {
           // Parallel trigger: fire-and-forget, never blocks the scan loop or
           // the start-time derive above; no-op if the PNG already exists.
           import('./photo-finish-png.js')
-            .then(m => m.backgroundGeneratePhotoFinishPng(raceNumber, file))
+            .then(m => {
+              m.backgroundGeneratePhotoFinishPng(raceNumber, file);
+              // Also publish a small JPEG to Supabase Storage (NOT the Drive
+              // folder) so the online / iPad Quick View sees every race's
+              // finish image without the operator opening it first.
+              m.backgroundUploadFinishImage(raceNumber, file);
+            })
             .catch(() => {});
           // Whether iso came out null or not, record the mtime so we
           // don't redo the same file on the next tick. A later
