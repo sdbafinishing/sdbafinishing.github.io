@@ -100,7 +100,14 @@ export async function unlockEvent() {
  * call this from app.js after every navigation so it survives page swaps.
  */
 export async function refreshLockBanner() {
-  const locked = await isEventLocked();
+  // The Past Events archive is a READ-ONLY view of OTHER events pulled from
+  // Supabase — it never touches the local (live) event. The lock banner reflects
+  // the LIVE event's write-lock, so showing it over an archived event is
+  // misleading (it looks like the archived event is locked). Suppress it on the
+  // archive route; navigate() re-runs this on every route change so it returns
+  // automatically when you leave the archive.
+  const onArchive = (location.hash || '').startsWith('#/archive');
+  const locked = onArchive ? false : await isEventLocked();
   let banner = document.getElementById('rdmsLockBanner');
   if (!locked) {
     if (banner) banner.remove();
