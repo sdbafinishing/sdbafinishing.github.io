@@ -16,9 +16,14 @@
 
 export const FINISH_IMAGE_BUCKET = 'finish-images';
 
-/** Deterministic object path so upload + read agree: `{ref}/{race}.jpg`. */
+/**
+ * Deterministic object path so upload + read agree. Foldered by event with a
+ * descriptive filename, e.g. `2026TN/2026TN-R47.jpg` — so a direct download is
+ * named `2026TN-R47.jpg`.
+ */
 export function finishImagePath(eventRef, raceNumber) {
-  return `${eventRef || 'RDMS'}/${raceNumber}.jpg`;
+  const ref = eventRef || 'RDMS';
+  return `${ref}/${ref}-R${raceNumber}.jpg`;
 }
 
 /**

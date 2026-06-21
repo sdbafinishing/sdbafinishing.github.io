@@ -27,6 +27,10 @@ import {
   paintMetaPanelOnCanvas,
   computeLaneTextSize,
   buildPhotoFinishMeta,
+  calibrateFromMetadata,
+  pickTickStep,
+  finishMs,
+  formatMs,
 } from './photo-finish.js';
 import { getConfig, getRace } from './db.js';
 import { showToast } from './utils.js';
@@ -123,7 +127,118 @@ async function renderPhotoFinishCanvas(race, lcdFile, jydFile) {
   renderLcdRangeToCanvas(imgCanvas.getContext('2d'), img, 'trilinear-rgb', colStart, colEnd);
   ctx.drawImage(imgCanvas, PANEL_W, 0, imageOutW, outH);
 
+  // 3) Overlay — red reach lines, per-boat lane#/time labels and the bottom
+  // time-scale axis, baked directly onto the canvas (the interactive modal
+  // draws the same via live SVG; here we draw with the Canvas API so the
+  // unattended Quick View matches "the actual photo finishing"). No-op when
+  // there's no .jyd reach data.
+  paintFinishOverlay(ctx, img, jydData, {
+    panelW: PANEL_W, colStart, colEnd, outH,
+  });
+
   return { canvas: out, width: outW, height: outH };
+}
+
+/**
+ * Paint reach lines + lane#/time labels + the time-scale axis onto the baked
+ * canvas, mirroring the interactive viewer's SVG overlay. The strip is drawn at
+ * native width (1 column = 1 CSS px) starting at x=panelW, so a full-image
+ * column maps to x = panelW + (col - colStart).
+ */
+function paintFinishOverlay(ctx, img, jydData, { panelW, colStart, colEnd, outH }) {
+  if (!jydData?.reachPoints?.length) return;
+  const cal = calibrateFromMetadata(img, jydData);
+  if (!cal || !Number.isFinite(cal.pxPerSec) || cal.pxPerSec <= 0) return;
+
+  const UI = 'system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+  const axisH = 24;
+  const axisY = outH - axisH;
+  const stripX0 = panelW;
+  const colToX = (col) => stripX0 + (col - colStart);
+  const inView = (col) => col >= colStart && col < colEnd;
+  const colToMs = (col) => ((col - cal.colAtZero) / cal.pxPerSec) * 1000;
+
+  ctx.save();
+  ctx.lineJoin = 'round';
+
+  // Time-axis strip along the bottom of the photo.
+  ctx.fillStyle = '#0f172a';
+  ctx.fillRect(stripX0, axisY, colEnd - colStart, axisH);
+  ctx.fillStyle = 'rgba(255,255,255,0.08)';
+  ctx.fillRect(stripX0, axisY, colEnd - colStart, 1);
+
+  // Tick marks every ~100 px (zoom = 1 in the baked image).
+  const tickStepSec = pickTickStep(100 / cal.pxPerSec);
+  const firstColMs = colToMs(colStart);
+  const lastColMs = colToMs(colEnd - 1);
+  const startSec = Math.floor(firstColMs / 1000 / tickStepSec) * tickStepSec;
+  ctx.font = `500 11px ${UI}`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  for (let sec = startSec; sec * 1000 <= lastColMs; sec += tickStepSec) {
+    const col = cal.colAtZero + sec * cal.pxPerSec;
+    if (!inView(col)) continue;
+    const x = colToX(col);
+    ctx.fillStyle = 'rgba(255,255,255,0.65)';
+    ctx.fillRect(Math.round(x), axisY + 1, 1, 5);
+    ctx.fillStyle = 'rgba(255,255,255,0.92)';
+    ctx.fillText(formatMs(sec * 1000), x, axisY + 9);
+  }
+
+  const reaches = [...jydData.reachPoints].sort((a, b) => a.line - b.line);
+
+  // Pass 1 — red reach lines (drawn before labels so labels sit on top).
+  ctx.strokeStyle = 'rgba(239,68,68,0.85)';
+  ctx.lineWidth = 1;
+  for (const rp of reaches) {
+    if (!inView(rp.line)) continue;
+    const x = Math.round(colToX(rp.line)) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, axisY);
+    ctx.stroke();
+  }
+
+  // Pass 2 — lane# + time labels, greedy top-bias slot placement, dark halo.
+  const byLane = new Map((jydData.players || []).map(p => [p.lane, p]));
+  const PODIUM = { 1: '#fbbf24', 2: '#e5e7eb', 3: '#f97316' };
+  const slotLastRight = [];
+  const slotHeight = 30, labelWidth = 70, slotGap = 4;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  for (const rp of reaches) {
+    if (!inView(rp.line)) continue;
+    const x = colToX(rp.line);
+    const lane = rp.no + 1;
+    const player = byLane.get(lane);
+    const tMs = finishMs(player);
+    const tLabel = tMs != null ? formatMs(tMs) : '';
+    const rank = Number.isFinite(player?.rank) ? player.rank : null;
+    const laneFill = (rank && PODIUM[rank]) || '#ffffff';
+
+    let slot = 0;
+    while (slot < slotLastRight.length && slotLastRight[slot] > x - slotGap) slot++;
+    slotLastRight[slot] = x + labelWidth;
+    const yOff = 6 + slot * slotHeight;
+
+    ctx.font = `700 15px ${UI}`;
+    ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+    ctx.lineWidth = 5;
+    ctx.strokeText(String(lane), x + 4, yOff);
+    ctx.fillStyle = laneFill;
+    ctx.fillText(String(lane), x + 4, yOff);
+
+    if (tLabel) {
+      ctx.font = `500 11px ${UI}`;
+      ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+      ctx.lineWidth = 5;
+      ctx.strokeText(tLabel, x + 4, yOff + 16);
+      ctx.fillStyle = '#fecaca';
+      ctx.fillText(tLabel, x + 4, yOff + 16);
+    }
+  }
+
+  ctx.restore();
 }
 
 /**
@@ -289,7 +404,7 @@ function showImageModal(url, race, revoke) {
   modal.innerHTML = `
     <div style="display:flex; align-items:center; gap:12px; margin-bottom:10px; color:#fff;">
       <strong style="font-size:14px;">Photo Finish — Race ${race.race_number}</strong>
-      <a href="${url}" download="PhotoFinish_${race._eventRef || 'RDMS'}_R${race.race_number}.${revoke ? 'png' : 'jpg'}"
+      <a href="${url}" download="${revoke ? `PhotoFinish_${race._eventRef || 'RDMS'}_R${race.race_number}.png` : `${race._eventRef || 'RDMS'}-R${race.race_number}.jpg`}"
          class="btn btn-sm btn-outline" style="margin-left:auto;">
         <i class="material-icons" style="font-size:16px;">download</i> Download
       </a>

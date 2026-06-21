@@ -56,9 +56,12 @@ export async function generateWhatsAppMessage(raceNumber) {
 
   if (race.race_title) msg += `\n${race.race_title}`;
 
-  // Dedicated share URL preferred; falls back to legacy "url stuffed
-  // into shared_results_folder" behavior for old configs.
-  const resultsLink = (config?.shared_results_url || '').trim()
+  // Per-race DIRECT-DOWNLOAD link (#4) preferred — set on export when the Drive
+  // API wrote the file (one-click download for the scoring team). Falls back to
+  // the dedicated share URL, then the legacy "url stuffed into
+  // shared_results_folder" behavior for old configs.
+  const resultsLink = (race?.result_direct_url || '').trim()
+    || (config?.shared_results_url || '').trim()
     || ((config?.shared_results_folder || '').startsWith('http')
          ? config.shared_results_folder
          : '');

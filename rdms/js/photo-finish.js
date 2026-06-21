@@ -1376,13 +1376,13 @@ export async function showPhotoFinishModal(race, files) {
  * .jyd's TimeDelta correction baked in — what gets exported to results); fall
  * back to RealScore for older .jyd files that didn't carry Score.
  */
-function finishMs(player) {
+export function finishMs(player) {
   if (!player) return null;
   if (Number.isFinite(player.scoreMs)) return player.scoreMs;
   return player.realScoreMs;
 }
 
-function calibrateFromMetadata(img, jydData) {
+export function calibrateFromMetadata(img, jydData) {
   const jydFit = fitJyd(jydData);
 
   // pxPerSec: metadata > JYD fit > hard default.
@@ -1442,7 +1442,7 @@ function fitJyd(jydData) {
  * Pick a human-friendly tick step (seconds) given the rough desired tick
  * spacing in seconds. Tries 0.1, 0.2, 0.5, 1, 2, 5, 10, ...
  */
-function pickTickStep(approxSec) {
+export function pickTickStep(approxSec) {
   const candidates = [0.05, 0.1, 0.2, 0.25, 0.5, 1, 2, 5, 10, 30, 60];
   for (const c of candidates) {
     if (c >= approxSec) return c;
@@ -1889,7 +1889,7 @@ function formatSignedSec(ms) {
  * second) format, but the photo-finish viewer is the place where the extra
  * precision actually means something, so we don't truncate here.
  */
-function formatMs(ms) {
+export function formatMs(ms) {
   if (!Number.isFinite(ms)) return '';
   const sign = ms < 0 ? '-' : '';
   const abs = Math.round(Math.abs(ms));

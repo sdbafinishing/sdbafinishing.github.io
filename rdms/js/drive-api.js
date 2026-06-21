@@ -376,7 +376,10 @@ export async function readDriveFileRange(fileId, start, end) {
  * @param {string} filename
  * @param {Blob|ArrayBuffer} content
  * @param {string} mimeType
- * @returns {boolean}
+ * @returns {string|false} the Drive file ID on success (truthy), false on failure.
+ *   Returning the ID lets callers build a direct-download link (#4) and update
+ *   the SAME file on re-export so the link stays stable; existing boolean
+ *   callers (e.g. backup.js `if (written)`) still work because an ID is truthy.
  */
 export async function writeDriveFile(subfolderPath, filename, content, mimeType = 'application/octet-stream') {
   if (!accessToken) return false;
@@ -391,14 +394,15 @@ export async function writeDriveFile(subfolderPath, filename, content, mimeType 
   const blob = content instanceof Blob ? content : new Blob([content]);
 
   if (existing) {
-    // Update existing file
+    // Update existing file — keeps the SAME file ID (stable direct link even
+    // after a manual edit-and-override or a re-export).
     const url = `https://www.googleapis.com/upload/drive/v3/files/${existing.id}?uploadType=media`;
     const resp = await fetchWithRefresh(url, {
       method: 'PATCH',
       headers: { 'Content-Type': mimeType },
       body: blob,
     });
-    return resp.ok;
+    return resp.ok ? existing.id : false;
   } else {
     // Create new file (multipart upload)
     const metadata = JSON.stringify({ name: filename, parents: [folderId] });
@@ -410,8 +414,53 @@ export async function writeDriveFile(subfolderPath, filename, content, mimeType 
       method: 'POST',
       body: form,
     });
-    return resp.ok;
+    if (!resp.ok) return false;
+    try {
+      const data = await resp.json();
+      return data?.id || true; // true keeps boolean callers happy if id missing
+    } catch {
+      return true;
+    }
   }
+}
+
+/** Direct-download URL for a Drive file ID (forces download, not a preview). */
+export function driveDirectDownloadUrl(fileId) {
+  return fileId ? `https://drive.google.com/uc?export=download&id=${fileId}` : null;
+}
+
+/**
+ * Make a Drive file readable by anyone with the link (idempotent — Drive
+ * accepts a repeat "anyone/reader" grant). Returns true on success.
+ */
+export async function shareDriveFileAnyone(fileId) {
+  if (!accessToken || !fileId) return false;
+  try {
+    const resp = await fetchWithRefresh(
+      `https://www.googleapis.com/drive/v3/files/${fileId}/permissions`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: 'reader', type: 'anyone' }),
+      },
+    );
+    return resp.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Write a file via the Drive API AND return a public direct-download link
+ * (#4 approach A). Writes to the SAME file on re-export (stable ID/link), shares
+ * it anyone-with-link, and returns { id, directUrl }. Returns null on any
+ * failure so the caller can fall back to the mounted-folder write.
+ */
+export async function writeDriveFileWithLink(subfolderPath, filename, content, mimeType) {
+  const id = await writeDriveFile(subfolderPath, filename, content, mimeType);
+  if (!id || id === true) return null;
+  await shareDriveFileAnyone(id);
+  return { id, directUrl: driveDirectDownloadUrl(id) };
 }
 
 /**

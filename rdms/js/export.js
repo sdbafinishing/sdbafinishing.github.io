@@ -8,7 +8,8 @@ import { computeRankings, computeDivisionScoring } from './race.js';
 import { timeToDisplay, msToTime, nowISO, isoToTime, showToast } from './utils.js';
 import { broadcastChange } from './app.js';
 import { backupAfterExport } from './backup.js';
-import { writeToBoth, downloadFallback } from './file-access.js';
+import { writeToBoth, writeToSourceSubfolder, downloadFallback } from './file-access.js';
+import { isDriveApiConnected, writeDriveFileWithLink } from './drive-api.js';
 import { queueRaceSync } from './sync.js';
 import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx } from './xlsx-patcher.js';
 import raceTemplateUrl from '../templates/race-template.xlsx?url';
@@ -375,16 +376,52 @@ export async function exportResults(raceNumber, options = {}) {
   );
   const patched = patchXlsxCells(templateBytes, mods);
   const xlsBlob = new Blob([patched]);
-  const { local, shared } = await writeToBoth(
-    '12 Output_Results', filename, xlsBlob,
-    `80 Shared/${ref}_Output_Results`,
-  );
+  const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  const sharedSub = `80 Shared/${ref}_Output_Results`;
+
+  // #4 (approach A) — when the Drive API is connected, write the SHARED copy
+  // via the API so we get the file ID immediately and can put a per-race
+  // DIRECT-DOWNLOAD link in the WhatsApp message (one-click download for the
+  // scoring team, not a folder). Re-export updates the SAME file → the link is
+  // stable, and Drive syncs it DOWN to the mounted shared folder so manual
+  // edit-and-override still works. The local copy is written via FS for instant
+  // print/open. FALLBACK: if Drive isn't connected (or the API write fails),
+  // write to the mounted folder exactly as before and use the folder link.
+  let local = false, shared = false, directUrl = null;
+  let driveConn = false;
+  try { driveConn = isDriveApiConnected(); } catch { driveConn = false; }
+
+  if (driveConn) {
+    try { local = !!(await writeToSourceSubfolder('12 Output_Results', filename, xlsBlob)); }
+    catch (err) { console.warn('local results write failed:', err); }
+    try {
+      const res = await writeDriveFileWithLink(sharedSub, filename, xlsBlob, XLSX_MIME);
+      if (res?.directUrl) { directUrl = res.directUrl; shared = true; }
+    } catch (err) { console.warn('Drive API result write failed:', err); }
+    if (!shared) {
+      // API shared write failed — fall back to the mounted-folder write so the
+      // result still reaches the shared folder (folder link in the message).
+      try {
+        const both = await writeToBoth('12 Output_Results', filename, xlsBlob, sharedSub);
+        local = local || !!both.local; shared = !!both.shared;
+      } catch (err) { console.warn('fallback writeToBoth failed:', err); }
+    }
+  } else {
+    const both = await writeToBoth('12 Output_Results', filename, xlsBlob, sharedSub);
+    local = !!both.local; shared = !!both.shared;
+  }
+
+  // Persist the direct link (or clear it when Drive isn't the writer) so the
+  // WhatsApp message prefers it over the generic folder link.
+  race.result_direct_url = directUrl;
 
   if (!local) {
     downloadFallback(filename, xlsBlob);
   }
 
-  if (local && shared) {
+  if (directUrl) {
+    showToast(`Results saved + direct link ready`, 'info', 2000);
+  } else if (local && shared) {
     showToast(`Results saved to local + shared`, 'info', 2000);
   } else if (local) {
     showToast(`Results saved locally`, 'info', 2000);
