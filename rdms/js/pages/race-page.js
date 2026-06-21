@@ -341,8 +341,8 @@ export async function mountRacePage(container, params) {
       <button class="btn btn-ghost btn-sm" onclick="window._photoFinish()" title="Open Joyi photo-finish image (.lcd + .jyd) — interactive crop view">
         <i class="material-icons" style="font-size:16px;">photo_camera</i> Photo Finish
       </button>
-      <button class="btn btn-ghost btn-sm" onclick="window._photoFinishPng()" title="View the photo-finish PNG — reads the saved image if present, else generates it">
-        <i class="material-icons" style="font-size:16px;">image</i> Photo PNG
+      <button class="btn btn-ghost btn-sm" onclick="window._photoFinishPng()" title="Quick view of the finish image — fast, works on local + online">
+        <i class="material-icons" style="font-size:16px;">image</i> Quick View
       </button>
       ${hasPlaceholders && hasPermission('race.import_draw') ? (canResolveNow
         ? `<button class="btn btn-outline btn-sm" onclick="window._resolvePlaceholders()"
