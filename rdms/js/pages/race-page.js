@@ -89,6 +89,24 @@ async function buildScoringContext(race, configData) {
       return (order[a.scoring_flag] || 99) - (order[b.scoring_flag] || 99);
     });
   if (scoredRaces.length === 0) return null;
+
+  // Time-scored divisions (#1/#2) use the canonical standing so the preview
+  // matches the export instead of showing points. Totals show TBC until done.
+  const { getAllDivisions, getDivisionRounds, getLaneResults: _gl0 } = await import('../db.js');
+  const division = (await getAllDivisions()).find(d => d.id === race.division_id) || null;
+  const sm = division?.standings_method || 'points';
+  if (sm === 'time_sum' || sm === 'time_combined') {
+    const { computeDivisionStanding } = await import('../division-standing.js');
+    const lanesByRace = new Map();
+    for (const r of scoredRaces) lanesByRace.set(r.race_number, await _gl0(r.race_number));
+    const rounds = await getDivisionRounds(race.division_id);
+    const standing = computeDivisionStanding(
+      division, rounds, scoredRaces, lanesByRace,
+      configData?.lane_count || 6, configData?.time_format_mode || 'mss00',
+    );
+    return { timeMethod: true, method: sm, scoringFlag: race.scoring_flag, laneCount, scoredRaces, standing };
+  }
+
   const multipliers = { 'R1': 1.0000001, 'R2': 1.00001, 'RFinal': 1.001 };
 
   // Aggregate teams across all scored rounds — keyed by team_code (the
@@ -1104,7 +1122,19 @@ function renderOutput(data) {
     //   amber and the header carries a "(so far)" qualifier so a mid-series
     //   standing isn't mistaken for the final result. (#15)
     let scoreCells = '';
-    if (scoringCtx) {
+    if (scoringCtx?.timeMethod) {
+      // Time methods: no per-race Score; Total Score (time, method #2) + Total
+      // Place are TBC until the round/series completes, then filled.
+      const entry = scoringCtx.standing?.teamTotals.get(teamCode);
+      const complete = scoringCtx.standing?.complete;
+      const prov = complete ? '' : 'color:var(--warning-text);';
+      const totalScore = complete ? (entry?.total_display || '—') : 'TBC';
+      const totalPlace = complete ? (entry?.total_place ?? '—') : 'TBC';
+      scoreCells = `
+        <td></td>
+        <td style="${prov}">${totalScore}</td>
+        <td style="${prov}">${totalPlace}</td>`;
+    } else if (scoringCtx) {
       const teamEntry = scoringCtx.teamTotals.get(teamCode);
       const thisPts = teamEntry?.perRound?.[scoringCtx.scoringFlag]?.pts ?? '';
       const isFinalRound = scoringCtx.scoringFlag === 'RFinal';

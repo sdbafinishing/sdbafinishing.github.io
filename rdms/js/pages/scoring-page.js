@@ -4,8 +4,9 @@
  * Points: 1st = lane_count+1, Nth = lane_count-(N-1), DNS/DNF/DSQ/DQ = 0.
  * Tiebreak: RFinal × 1.001 > R2 × 1.00001 > R1 × 1.0000001.
  */
-import { getAllRaces, getAllDivisions, getLaneResults, getConfig, getRace, bulkSaveLaneResults } from '../db.js';
+import { getAllRaces, getAllDivisions, getLaneResults, getConfig, getRace, getDivisionRounds, bulkSaveLaneResults } from '../db.js';
 import { positionToPoints, computeRankings } from '../race.js';
+import { computeDivisionStanding, formatTotalTime } from '../division-standing.js';
 import { timeToDisplay, showToast } from '../utils.js';
 import { broadcastChange } from '../app.js';
 
@@ -113,6 +114,22 @@ export async function mountScoringPage(container) {
     }
   };
 
+  // Export just the overall standings for a division (any method).
+  window._exportOverallRanks = async (divId) => {
+    showToast('Exporting overall ranks…', 'info', 1500);
+    try {
+      const { exportOverallRanks } = await import('../scoring-export.js');
+      const res = await exportOverallRanks(divId);
+      if (res.success) {
+        showToast(`Overall ranks exported: ${res.filename}${res.complete ? '' : ' (PROVISIONAL — totals TBC)'}`, 'success', 4500);
+      } else {
+        showToast(`Export failed: ${res.error}`, 'error', 5000);
+      }
+    } catch (err) {
+      showToast(`Export failed: ${err.message}`, 'error', 5000);
+    }
+  };
+
   // Render first division
   await renderScoringDiv(divIds[0], divGroups[divIds[0]], laneCount, timeMode, divisions);
 }
@@ -120,6 +137,7 @@ export async function mountScoringPage(container) {
 export function unmountScoringPage() {
   delete window._scoringTab;
   delete window._recomputeAllScoring;
+  delete window._exportOverallRanks;
 }
 
 async function renderScoringDiv(divId, scoredRaces, laneCount, timeMode, divisions) {
@@ -131,6 +149,15 @@ async function renderScoringDiv(divId, scoredRaces, laneCount, timeMode, divisio
   // Sort races by scoring flag order: R1 < R2 < RFinal
   const flagOrder = { 'R1': 1, 'R2': 2, 'RFinal': 3 };
   scoredRaces.sort((a, b) => (flagOrder[a.scoring_flag] || 0) - (flagOrder[b.scoring_flag] || 0));
+
+  const exportBtn = `<button class="btn btn-outline btn-sm" onclick="window._exportOverallRanks('${divId}')" title="Export just the overall standings (Rank / Team / per-round / Total) as an .xlsx for the scoring team."><i class="material-icons" style="font-size:15px;">file_download</i> Export overall ranks</button>`;
+
+  // ── Time-scored divisions (methods #1/#2) render their own table ──
+  const method = div?.standings_method || 'points';
+  if (method === 'time_sum' || method === 'time_combined') {
+    await renderTimeScoringDiv(content, div, scoredRaces, laneCount, timeMode, exportBtn);
+    return;
+  }
 
   // Tiebreaker multipliers
   const multipliers = { 'R1': 1.0000001, 'R2': 1.00001, 'RFinal': 1.001 };
@@ -225,9 +252,12 @@ async function renderScoringDiv(divId, scoredRaces, laneCount, timeMode, divisio
 
   content.innerHTML = `
     <div class="card" style="margin-top:16px;">
-      <div style="margin-bottom:12px;">
-        <strong style="font-size:14px;">${div?.division_name || 'Unassigned Division'}</strong>
-        <span style="font-size:13px; color:var(--text-tertiary); margin-left:12px;">${raceHeaders}</span>
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px;">
+        <div>
+          <strong style="font-size:14px;">${div?.division_name || 'Unassigned Division'}</strong>
+          <span style="font-size:13px; color:var(--text-tertiary); margin-left:12px;">${raceHeaders}</span>
+        </div>
+        ${exportBtn}
       </div>
 
       ${!hasResults
@@ -268,6 +298,83 @@ async function renderScoringDiv(divId, scoredRaces, laneCount, timeMode, divisio
           <p style="font-size:11px; color:var(--text-tertiary); margin-top:8px;">
             ${finalReached ? '' : '<strong>Provisional standings — the final round (RFinal) has not been scored yet; totals are "so far".</strong><br>'}
             ^ RFinal score includes ×1.001 multiplier as tiebreak decider for total score.
+          </p>`
+      }
+    </div>
+  `;
+}
+
+/**
+ * Time-scored divisions (method #1 combined-time, #2 sum-of-times). Renders the
+ * standing from the canonical computeDivisionStanding so it matches the export.
+ * Totals show "TBC" until the round/series is complete.
+ */
+async function renderTimeScoringDiv(content, div, scoredRaces, laneCount, timeMode, exportBtn) {
+  const lanesByRace = new Map();
+  await Promise.all(scoredRaces.map(async r => lanesByRace.set(r.race_number, await getLaneResults(r.race_number))));
+  const rounds = await getDivisionRounds(div.id);
+  const standing = computeDivisionStanding(div, rounds, scoredRaces, lanesByRace, laneCount, timeMode);
+
+  const methodLabel = div.standings_method === 'time_sum'
+    ? 'Sum of times across rounds (method #2)'
+    : 'Combined time of the final round (method #1)';
+  const raceHeaders = scoredRaces.map(r => `${r.scoring_flag} = Race ${r.race_number}`).join(', ');
+
+  const teams = standing
+    ? [...standing.teamTotals.values()].sort((a, b) => (a.total_place ?? 9999) - (b.total_place ?? 9999))
+    : [];
+  const complete = standing?.complete;
+  const isSum = div.standings_method === 'time_sum';
+
+  const cell = (t, r) => {
+    const pr = t.perRound?.[r.race_number];
+    if (!pr) return '—';
+    const ms = pr.exported_ms ?? pr.time_ms;
+    return ms != null ? `${formatTotalTime(ms)}<br><span style="font-size:11px; color:var(--text-tertiary);">P${pr.position ?? '—'}</span>` : '—';
+  };
+
+  content.innerHTML = `
+    <div class="card" style="margin-top:16px;">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px;">
+        <div>
+          <strong style="font-size:14px;">${div?.division_name || 'Division'}</strong>
+          <span style="font-size:13px; color:var(--text-tertiary); margin-left:12px;">${raceHeaders}</span>
+          <div style="font-size:11px; color:var(--text-tertiary); margin-top:2px;">Scoring: ${methodLabel}</div>
+        </div>
+        ${exportBtn}
+      </div>
+      ${teams.length === 0
+        ? '<p style="color:var(--text-tertiary); font-size:13px;">No results yet for scored races in this division.</p>'
+        : `<div style="overflow:auto;">
+            <table class="output-table">
+              <thead>
+                <tr>
+                  <th>Rank${complete ? '' : '<br><span style="font-size:10px; font-weight:600; color:var(--warning-text, #b45309);">TBC</span>'}</th>
+                  <th style="text-align:left;">Team Name</th>
+                  <th>Code</th>
+                  ${scoredRaces.map(r => `<th class="scoring-header">${r.scoring_flag}<br><a href="#/race/${r.race_number}" style="font-size:11px; color:var(--accent); text-decoration:underline;">Race ${r.race_number}</a></th>`).join('')}
+                  <th class="scoring-header">${isSum ? 'Total Time' : 'Final'}${complete ? '' : '<br><span style="font-size:10px; font-weight:600; color:var(--warning-text, #b45309);">TBC</span>'}</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${teams.map(t => `
+                  <tr>
+                    <td class="cell-position ${t.total_place === 1 ? 'first' : t.total_place === 2 ? 'second' : t.total_place === 3 ? 'third' : ''}">${complete ? (t.total_place ?? '—') : 'TBC'}</td>
+                    <td class="team-name">${t.team_name || ''}</td>
+                    <td>${t.team_code || ''}</td>
+                    ${scoredRaces.map(r => `<td class="scoring-cell">${cell(t, r)}</td>`).join('')}
+                    <td class="scoring-cell" style="font-weight:700;">${complete ? (t.total_display || (isSum ? '—' : '')) : 'TBC'}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+          <p style="font-size:11px; color:var(--text-tertiary); margin-top:8px;">
+            ${complete
+              ? 'Standings are final.'
+              : '<strong>Provisional — Total / Rank show TBC until every race in the ' + (isSum ? 'series' : 'final round') + ' is exported, then re-export the sheets.</strong>'}
+            ${standing?.unresolvedTie ? '<br><strong style="color:var(--danger);">⚠ An unbroken tie needs manual resolution.</strong>' : ''}
+            Times are the exported (hundredth) times; full ms breaks ties.
           </p>`
       }
     </div>

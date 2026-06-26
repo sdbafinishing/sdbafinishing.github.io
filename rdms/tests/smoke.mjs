@@ -13,6 +13,9 @@ import { joyiTimeToMs, joyiTimeHasMsPrecision, joyiTimeToRaw, msToTime } from '.
 import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx } from '../js/xlsx-patcher.js';
 import { photoFinishPngFilename, autoCropRange } from '../js/photo-finish-png.js';
 import { computeChainScoringFlags } from '../js/division-scoring.js';
+import { parsePlaceholder, parseRaceList } from '../js/placeholders.js';
+import { pooledTimeStandings, sumTimeStandings } from '../js/time-standings.js';
+import { computeDivisionStanding, formatTotalTime } from '../js/division-standing.js';
 import { readFileSync } from 'fs';
 import * as XLSX from 'xlsx';
 import * as fflate from 'fflate';
@@ -776,6 +779,112 @@ group('computeChainScoringFlags', () => {
     ]);
     eq(flags.get(1), 'R1'); eq(flags.get(2), 'RFinal');
     eq(flags.get(3), 'R1'); eq(flags.get(4), 'RFinal');
+  });
+});
+
+// ── New scoring methods: placeholder grammar + time standings ────────────
+const _lane = (n, code, t) => ({ lane_number: n, team_code: code, team_name: code, raw_time: t, remarks: '' });
+
+group('Placeholder grammar (new scoring methods)', () => {
+  test('single R16P3 (legacy/default)', () => {
+    const p = parsePlaceholder('R16P3');
+    eq(p.kind, 'single'); eq(p.races, [16]); eq(p.position, 3);
+  });
+  test('pooled R1-3,5P2 (method #1)', () => {
+    const p = parsePlaceholder('R1-3,5P2');
+    eq(p.kind, 'pooled'); eq(p.races, [1, 2, 3, 5]); eq(p.position, 2);
+  });
+  test('sum SUMR1-3,5P2 (method #2)', () => {
+    const p = parsePlaceholder('SUMR1-3,5P2');
+    eq(p.kind, 'sum'); eq(p.races, [1, 2, 3, 5]); eq(p.position, 2);
+  });
+  test('case-insensitive', () => {
+    eq(parsePlaceholder('r5p1').kind, 'single');
+    eq(parsePlaceholder('sumr1-2p1').kind, 'sum');
+  });
+  test('non-placeholder → null', () => {
+    eq(parsePlaceholder('Team A'), null);
+    eq(parsePlaceholder(''), null);
+  });
+  test('parseRaceList ranges + bad token', () => {
+    eq(parseRaceList('1-3,5'), [1, 2, 3, 5]);
+    eq(parseRaceList('bad'), []);
+  });
+});
+
+group('Pooled time standings (method #1)', () => {
+  test('ranks across races by exported time', () => {
+    const races = [
+      { race_number: 1, lanes: [_lane(1, 'A', '12000'), _lane(2, 'B', '12500')] },
+      { race_number: 2, lanes: [_lane(1, 'C', '11800'), _lane(2, 'D', '12200')] },
+    ];
+    const { entries } = pooledTimeStandings(races, 'mss00');
+    eq(entries.map(e => e.team_code), ['C', 'A', 'D', 'B']);
+    eq(entries.find(e => e.team_code === 'A').position, 2);
+  });
+});
+
+group('Sum time standings (method #2)', () => {
+  test('ranks by summed exported time', () => {
+    const races = [
+      { race_number: 1, lanes: [_lane(1, 'A', '12000'), _lane(2, 'B', '12500')] },
+      { race_number: 2, lanes: [_lane(1, 'A', '11500'), _lane(2, 'B', '12000')] },
+    ];
+    const { teams } = sumTimeStandings(races, 'mss00');
+    eq(teams.map(t => t.team_code), ['A', 'B']);
+    eq(teams.find(t => t.team_code === 'A').overall_rank, 1);
+  });
+  test('team missing a leg is excluded from the ranked total', () => {
+    const races = [
+      { race_number: 1, lanes: [_lane(1, 'A', '12000'), _lane(2, 'B', '12500')] },
+      { race_number: 2, lanes: [_lane(1, 'A', '11500')] }, // B absent in race 2
+    ];
+    const { teams, incomplete } = sumTimeStandings(races, 'mss00');
+    eq(teams.map(t => t.team_code), ['A']);
+    eq(incomplete.map(t => t.team_code), ['B']);
+  });
+});
+
+group('Division standing (canonical, by method)', () => {
+  const rounds = [
+    { round_number: 1, race_numbers: [1] },
+    { round_number: 2, race_numbers: [2] },
+  ];
+  const mkRace = (n, flag, status = 'exported') => ({ race_number: n, division_id: 1, scoring_flag: flag, status });
+  const lanesByRace = () => new Map([
+    [1, [_lane(1, 'A', '12000'), _lane(2, 'B', '12500')]],
+    [2, [_lane(1, 'A', '11500'), _lane(2, 'B', '12000')]],
+  ]);
+
+  test('formatTotalTime', () => {
+    eq(formatTotalTime(155000), '2:35.00');
+    eq(formatTotalTime(75000), '1:15.00');
+  });
+  test('time_sum → total time + place, complete', () => {
+    const div = { id: 1, standings_method: 'time_sum' };
+    const s = computeDivisionStanding(div, rounds, [mkRace(1, 'R1'), mkRace(2, 'RFinal')], lanesByRace(), 6, 'mss00');
+    eq(s.method, 'time_sum'); eq(s.complete, true);
+    eq(s.teamTotals.get('A').total_place, 1);
+    eq(s.teamTotals.get('A').total_display, '2:35.00');
+    eq(s.teamTotals.get('B').total_place, 2);
+  });
+  test('time_sum → incomplete when a race not exported', () => {
+    const div = { id: 1, standings_method: 'time_sum' };
+    const s = computeDivisionStanding(div, rounds, [mkRace(1, 'R1'), mkRace(2, 'RFinal', 'pending')], lanesByRace(), 6, 'mss00');
+    eq(s.complete, false);
+  });
+  test('time_combined → final round only, Total Score blank', () => {
+    const div = { id: 1, standings_method: 'time_combined' };
+    const s = computeDivisionStanding(div, rounds, [mkRace(1, 'R1'), mkRace(2, 'RFinal')], lanesByRace(), 6, 'mss00');
+    eq(s.method, 'time_combined');
+    eq(s.teamTotals.get('A').total_place, 1);   // A fastest in final race
+    eq(s.teamTotals.get('A').total_display, ''); // combined: no Total Score
+  });
+  test('points → delegates, normalized shape', () => {
+    const div = { id: 1, standings_method: 'points' };
+    const s = computeDivisionStanding(div, rounds, [mkRace(1, 'R1'), mkRace(2, 'RFinal')], lanesByRace(), 6, 'mss00');
+    eq(s.method, 'points');
+    eq(s.teamTotals.get('A').total_place, 1); // A wins both → top points
   });
 });
 

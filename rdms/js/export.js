@@ -3,8 +3,9 @@
  * Export results to .xls (stamp into original draw file).
  * Generate start lists (Joyi + SprintTimer formats).
  */
-import { getConfig, getRace, saveRace, getLaneResults, bulkSaveLaneResults, getAllRaces, saveTimesheet, getTimesheet } from './db.js';
+import { getConfig, getRace, saveRace, getLaneResults, bulkSaveLaneResults, getAllRaces, getAllDivisions, getDivisionRounds, saveTimesheet, getTimesheet } from './db.js';
 import { computeRankings, computeDivisionScoring } from './race.js';
+import { computeDivisionStanding } from './division-standing.js';
 import { timeToDisplay, msToTime, nowISO, isoToTime, showToast } from './utils.js';
 import { broadcastChange } from './app.js';
 import { backupAfterExport } from './backup.js';
@@ -243,7 +244,8 @@ export async function exportResults(raceNumber, options = {}) {
   // Place columns when the race is on a scored chain. Total Score +
   // Total Place are only meaningful AFTER the final round; for R1/R2
   // exports we leave them blank to avoid misleading mid-series totals.
-  let scoreCtx = null;
+  let scoreCtx = null;     // points model (unchanged path)
+  let timeStanding = null; // time methods (#1/#2) standing, when configured
   if (race.scoring_flag && race.scoring_flag !== 'N' && race.division_id) {
     const allRaces = await getAllRaces();
     const scoredRaces = allRaces.filter(r =>
@@ -252,7 +254,21 @@ export async function exportResults(raceNumber, options = {}) {
     for (const r of scoredRaces) {
       lanesByRace.set(r.race_number, await getLaneResults(r.race_number));
     }
-    scoreCtx = computeDivisionScoring(race, allRaces, lanesByRace, laneCount, timeMode);
+    const division = (await getAllDivisions()).find(d => d.id === race.division_id) || null;
+    const method = division?.standings_method || 'points';
+    if (method === 'points') {
+      // Points divisions: untouched — exactly as before.
+      scoreCtx = computeDivisionScoring(race, allRaces, lanesByRace, laneCount, timeMode);
+    } else {
+      // Time methods: the per-race Time + Place still export normally; only the
+      // Total Score / Total Place are computed here and shown as "TBC" until the
+      // round/series is complete (then filled on re-export).
+      // This very export completes the current race, so reflect that in the
+      // completion check (its DB status flips to 'exported' just below).
+      scoredRaces.forEach(r => { if (r.race_number === race.race_number) r.status = 'exported'; });
+      const rounds = await getDivisionRounds(race.division_id);
+      timeStanding = computeDivisionStanding(division, rounds, scoredRaces, lanesByRace, laneCount, timeMode);
+    }
   }
   const isRFinal = scoreCtx?.scoringFlag === 'RFinal';
 
@@ -316,9 +332,9 @@ export async function exportResults(raceNumber, options = {}) {
     });
 
     // Scoring columns (F = Score, G = Total Score, H = Total Place).
-    // F shown for any scored race; G/H only when this race is the
-    // RFinal — mid-series cumulative numbers would mislead viewers.
     if (scoreCtx) {
+      // POINTS model — unchanged. F shown for any scored race; G/H only on the
+      // RFinal sheet (mid-series cumulative numbers would mislead viewers).
       const teamCode = drawLane?.team_code || '';
       const teamEntry = teamCode ? scoreCtx.teamTotals.get(teamCode) : null;
       const thisPts = teamEntry?.perRound?.[scoreCtx.scoringFlag]?.pts;
@@ -329,6 +345,26 @@ export async function exportResults(raceNumber, options = {}) {
       if (isRFinal && teamEntry) {
         mods.push({ addr: `G${rowNum}`, value: String(Math.round(teamEntry.total_weighted)) });
         mods.push({ addr: `H${rowNum}`, value: String(teamEntry.overall_rank) });
+      } else {
+        mods.push({ addr: `G${rowNum}`, value: '' });
+        mods.push({ addr: `H${rowNum}`, value: '' });
+      }
+    } else if (timeStanding) {
+      // TIME methods (#1/#2). The boat's Time + Place (cols D/E) are already
+      // written above. There's no per-race "Score", so F is blank. Total Score
+      // (= total time for method #2; blank for combined-time) and Total Place
+      // are "TBC" until the round/series completes, then fill on re-export.
+      const teamCode = drawLane?.team_code || '';
+      const entry = teamCode ? timeStanding.teamTotals.get(teamCode) : null;
+      mods.push({ addr: `F${rowNum}`, value: '' });
+      if (timeStanding.complete && entry) {
+        mods.push({ addr: `G${rowNum}`, value: entry.total_display || '' });
+        mods.push({ addr: `H${rowNum}`, value: entry.total_place == null ? '' : String(entry.total_place) });
+      } else if (entry) {
+        // Standing not final yet — placeholder so the scoring team knows it's
+        // coming. Combined-time has no Total Score, so only its place is TBC.
+        mods.push({ addr: `G${rowNum}`, value: timeStanding.method === 'time_combined' ? '' : 'TBC' });
+        mods.push({ addr: `H${rowNum}`, value: 'TBC' });
       } else {
         mods.push({ addr: `G${rowNum}`, value: '' });
         mods.push({ addr: `H${rowNum}`, value: '' });
@@ -460,6 +496,21 @@ export async function exportResults(raceNumber, options = {}) {
   });
 
   broadcastChange('race-updated', { race_number: raceNumber });
+
+  // Two-phase reminder for time-scored divisions (soft, non-blocking):
+  //   - while the round/series is incomplete, the totals on this sheet are TBC;
+  //   - once it completes (this export being the last leg), the earlier sheets
+  //     still say TBC and need a re-export to fill the totals + overall ranks.
+  if (timeStanding) {
+    if (timeStanding.unresolvedTie) {
+      showToast('Scoring tie could not be broken automatically — resolve manually before relying on the totals.', 'warning', 7000);
+    }
+    if (timeStanding.complete) {
+      showToast('Round/series complete — re-export this division’s other sheets to fill in Total Place/Score (they currently show TBC).', 'warning', 8000);
+    } else {
+      showToast('Time-scored division: Total Place/Score show TBC until the round/series is complete, then re-export.', 'info', 5000);
+    }
+  }
 
   // Post-commit side effects are BEST-EFFORT. The export is already durably
   // committed above (file written + export_time/version + timesheet in a

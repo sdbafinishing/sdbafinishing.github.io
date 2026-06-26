@@ -31,6 +31,8 @@ import {
 } from './db.js';
 import { writeToBoth, downloadFallback } from './file-access.js';
 import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx } from './xlsx-patcher.js';
+import { parsePlaceholder } from './placeholders.js';
+import { pooledTimeStandings, sumTimeStandings } from './time-standings.js';
 import raceTemplateUrl from '../templates/race-template.xlsx?url';
 
 let _drawTemplateBytes = null;
@@ -42,16 +44,18 @@ async function loadDrawTemplate() {
   return _drawTemplateBytes;
 }
 
-// Placeholder pattern. Examples: R16P3, R5P1, R20P7. Stripped to capture
-// race-number and position. Anchored — partial matches don't count
-// ("ABC R5P1" wouldn't fire because we test against a clean cell value).
-const PLACEHOLDER_RE = /^R(\d+)P(\d+)$/i;
-
 /**
- * Scan a single race for placeholder lanes that can be resolved.
+ * Scan a single race for placeholder lanes that can be resolved. Understands
+ * all three placeholder forms (see js/placeholders.js):
+ *   - single (R{n}P{p})      — legacy single-race position (default/unscored).
+ *   - pooled (R{list}P{p})   — combined-time rank across races (method #1).
+ *   - sum    (SUMR{list}P{p})— sum-of-times rank across races (method #2).
+ *
+ * `source_race` / `source_position` are kept for backward compatibility (they
+ * reflect the single-race case); `kind` + `races` carry the full descriptor.
  *
  * @param {number} raceNumber
- * @returns {Promise<Array<{lane_number, source_race, source_position, raw}>>}
+ * @returns {Promise<Array<{lane_number, kind, races, position, source_race, source_position, raw}>>}
  */
 export async function findPlaceholdersForRace(raceNumber) {
   const lanes = await getLaneResults(raceNumber);
@@ -59,13 +63,16 @@ export async function findPlaceholdersForRace(raceNumber) {
   for (const lr of lanes) {
     const cells = [lr.team_name || '', lr.team_code || ''];
     for (const c of cells) {
-      const m = String(c).trim().match(PLACEHOLDER_RE);
-      if (m) {
+      const ph = parsePlaceholder(c);
+      if (ph) {
         out.push({
           lane_number: lr.lane_number,
-          source_race: parseInt(m[1], 10),
-          source_position: parseInt(m[2], 10),
-          raw: m[0],
+          kind: ph.kind,
+          races: ph.races,
+          position: ph.position,
+          source_race: ph.races[0],      // legacy field (single-race callers)
+          source_position: ph.position,  // legacy field
+          raw: ph.raw,
         });
         break; // one placeholder per lane is enough
       }
@@ -121,21 +128,47 @@ export async function generateNextRoundDraw(targetRaceNumber, opts = {}) {
     };
   }
 
-  // Pre-fetch every distinct source race's lane_results so we don't hit
-  // IndexedDB once per placeholder.
-  const sourceRaceNums = [...new Set(placeholders.map(p => p.source_race))];
-  const sourceLanesByRace = {};
+  // Pre-fetch every distinct source race (across ALL placeholder kinds — a
+  // pooled/sum placeholder references several races) so we don't hit IndexedDB
+  // repeatedly. batchDeltaMs per race is needed so the pooled/sum standings use
+  // the same effective time the result sheet exports.
+  const config = await getConfig();
+  const timeMode = config?.time_format_mode || 'mss00';
+  const sourceRaceNums = [...new Set(placeholders.flatMap(p => p.races))];
+  const lanesByRace = new Map();
+  const batchByRace = new Map();
   for (const rn of sourceRaceNums) {
-    sourceLanesByRace[rn] = await getLaneResults(rn);
-    // Sanity check: source race must be exported (or at minimum have
-    // computed_position values).
+    lanesByRace.set(rn, await getLaneResults(rn));
     const srcRace = await getRace(rn);
+    batchByRace.set(rn, srcRace?.batch_override_enabled ? (srcRace.batch_delta_ms || 0) : 0);
     if (!srcRace) {
       warnings.push(`Race ${rn} not found — placeholders pointing at it cannot be resolved.`);
     } else if (!['exported', 'sent'].includes(srcRace.status)) {
       warnings.push(`Race ${rn} status is "${srcRace.status}" (not exported yet) — results may not be final.`);
     }
   }
+
+  // Build the racesLanes shape the standings engine expects for a race list.
+  const racesLanesFor = (races) => races.map(rn => ({
+    race_number: rn,
+    lanes: lanesByRace.get(rn) || [],
+    batchDeltaMs: batchByRace.get(rn) || 0,
+  }));
+
+  // Cache pooled / sum standings per distinct race-list so a draw that
+  // references the same combined field many times only computes it once.
+  const pooledCache = new Map();
+  const sumCache = new Map();
+  const pooledFor = (races) => {
+    const key = races.join(',');
+    if (!pooledCache.has(key)) pooledCache.set(key, pooledTimeStandings(racesLanesFor(races), timeMode));
+    return pooledCache.get(key);
+  };
+  const sumFor = (races) => {
+    const key = races.join(',');
+    if (!sumCache.has(key)) sumCache.set(key, sumTimeStandings(racesLanesFor(races), timeMode));
+    return sumCache.get(key);
+  };
 
   // Build the resolved lane_results: take the existing rows, replace
   // placeholders with the looked-up team. Untouched columns (designation,
@@ -152,10 +185,30 @@ export async function generateNextRoundDraw(targetRaceNumber, opts = {}) {
       continue;
     }
 
-    const srcLanes = sourceLanesByRace[ph.source_race] || [];
-    const winner = srcLanes.find(l => l.computed_position === ph.source_position);
+    // Resolve the winning team for this placeholder by kind.
+    let winner = null;       // { team_name, team_code }
+    let tie = false;
+    if (ph.kind === 'single') {
+      // Legacy/default path — unchanged: position within one race.
+      const srcLanes = lanesByRace.get(ph.races[0]) || [];
+      winner = srcLanes.find(l => l.computed_position === ph.position) || null;
+    } else if (ph.kind === 'pooled') {
+      const standing = pooledFor(ph.races);
+      const e = standing.entries.find(x => x.position === ph.position);
+      if (e) winner = { team_name: e.team_name, team_code: e.team_code };
+      if (standing.unresolvedTies.some(x => x.position === ph.position)) tie = true;
+    } else if (ph.kind === 'sum') {
+      const standing = sumFor(ph.races);
+      const t = standing.teams.find(x => x.overall_rank === ph.position);
+      if (t) winner = { team_name: t.team_name, team_code: t.team_code };
+      if (standing.unresolvedTies.some(x => x.overall_rank === ph.position)) tie = true;
+    }
+
+    if (tie) {
+      warnings.push(`Lane ${lr.lane_number}: position ${ph.position} of "${ph.raw}" is an unbroken tie — resolve manually before relying on this draw.`);
+    }
     if (!winner || !winner.team_name) {
-      warnings.push(`Lane ${lr.lane_number}: Race ${ph.source_race} has no team at position ${ph.source_position} yet — left as "${ph.raw}".`);
+      warnings.push(`Lane ${lr.lane_number}: "${ph.raw}" has no team at position ${ph.position} yet — left as-is.`);
       updated.push(lr);
       skipped++;
       continue;

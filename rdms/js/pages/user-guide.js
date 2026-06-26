@@ -365,6 +365,26 @@ export function renderUserGuideTab(container) {
             <li><strong>"Recompute all scored races"</strong> button on the Scoring tab — fetches each scored race's lane_results, re-runs <code>computeRankings</code>, and persists. Idempotent. Run this when a scored column shows blank despite times being entered.</li>
             <li><strong>Race-page links</strong> — each round header on the Scoring table has a "Race N" link (suppressed when N is the current race).</li>
           </ul>
+
+          <h4 style="margin-top:18px;">9e. Time-based scoring methods (opt-in)</h4>
+          <p style="font-size:13px; color:var(--text-secondary);">
+            Besides the default <strong>points</strong> model above, a division can rank by <strong>time</strong>. Set this in Setup &rarr; Divisions:
+            per-round <em>"Rank by"</em> and per-division <em>"Final standing"</em>. Leave both at the defaults for normal (points / unscored) divisions — nothing changes for them.
+          </p>
+          <ul>
+            <li><strong>Method #1 — Combined time (within a round).</strong> Pool every team's time across all races in one round and rank by time. Use it to seed the next round, or as the final standing (<em>Final standing → "Combined time of the final round"</em>).</li>
+            <li><strong>Method #2 — Sum of times (across rounds).</strong> Sum each team's times across the rounds and rank by total time (<em>Final standing → "Total time"</em>). We sum the <strong>exported</strong> time (truncated to hundredths, incl. any manual/batch override); full milliseconds only break ties.</li>
+            <li><strong>Tiebreak:</strong> equal totals → the team's <strong>rank in the final race</strong> → full ms. If still tied, an <strong>unbroken-tie warning</strong> appears (resolve manually before relying on the totals).</li>
+            <li><strong>Draw placeholders</strong> tell the system how to slot advancing teams. In the next round's draw template type:
+              <ul>
+                <li><code>R{race}P{pos}</code> — position in one race (default).</li>
+                <li><code>R{list}P{pos}</code> — by combined time across races (method #1), e.g. <code>R1-3,5P2</code>.</li>
+                <li><code>SUMR{list}P{pos}</code> — by sum of times across races (method #2), e.g. <code>SUMR1-3,5P2</code>.</li>
+              </ul>
+            </li>
+            <li><strong>Two-phase export.</strong> When a race finishes, its sheet <em>always</em> exports the boat's <strong>Time + Place</strong>. The scoring section — <em>Total Place</em> (both methods) and <em>Total Score = total time</em> (method #2) — shows <strong>"TBC"</strong> until every race in the round/series is exported. A reminder fires on the last race ("round complete — re-export the other sheets"); <strong>re-export the round</strong> to fill the totals + overall ranks.</li>
+            <li><strong>Export overall ranks.</strong> The Scoring tab has an <em>"Export overall ranks"</em> button per division — a standalone <code>.xlsx</code> of Rank / Team / Code / per-round breakdown / Total (works for every method; marked PROVISIONAL until complete).</li>
+          </ul>
         </div>
 
         <!-- 9b. Race-page features added this season -->

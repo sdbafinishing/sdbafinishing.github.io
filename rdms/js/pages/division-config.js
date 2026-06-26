@@ -357,6 +357,17 @@ async function showDivisionModal(editId) {
         </div>
       </div>
 
+      <!-- Final standing / scoring method -->
+      <div class="form-group" style="margin-top:12px;">
+        <label class="form-label">Final standing — how the overall rank is computed</label>
+        <select class="form-select" id="divStandingsMethod" style="font-size:13px;">
+          <option value="points"${(div.standings_method || 'points') === 'points' ? ' selected' : ''}>Total points — place → points, summed (default)</option>
+          <option value="time_sum"${div.standings_method === 'time_sum' ? ' selected' : ''}>Total time — sum of each team's times across rounds (method #2)</option>
+          <option value="time_combined"${div.standings_method === 'time_combined' ? ' selected' : ''}>Combined time of the final round (method #1)</option>
+        </select>
+        <small style="color:var(--text-tertiary); font-size:11px;">Drives the scoring sheet's Total Score / Total Place columns. Leave as <strong>Total points</strong> for normal divisions. Unscored races (no scored chain) are unaffected.</small>
+      </div>
+
       <!-- Rounds -->
       <div class="section-header" style="margin-top:16px;">Rounds</div>
       <p style="font-size:12px; color:var(--text-tertiary); margin-bottom:8px;">
@@ -381,7 +392,11 @@ async function showDivisionModal(editId) {
       <!-- Progressions -->
       <div class="section-header" style="margin-top:16px;">Progressions</div>
       <p style="font-size:12px; color:var(--text-tertiary); margin-bottom:8px;">
-        Define how teams advance between rounds. "all" = scored series (1:1 mapping).
+        Define how teams advance between rounds. <code>all</code> = scored series (1:1 mapping); <code>1-3</code> = top 3; <code>rest</code> = everyone not yet taken.
+        In the <strong>next round's draw template</strong>, reference advancing teams as:
+        <code>R{race}P{pos}</code> (single race),
+        <code>R{list}P{pos}</code> (combined time across races — method #1), or
+        <code>SUMR{list}P{pos}</code> (sum of times across rounds — method #2). e.g. <code>R1-3,5P2</code>.
       </p>
       <div id="divProgsList">
         ${existingProgs.length > 0
@@ -640,6 +655,7 @@ async function showDivisionModal(editId) {
       div_main_name_tc: document.getElementById('divMainNameTc').value.trim(),
       div_code_prefix: document.getElementById('divCodePrefix').value.trim(),
       colour_hex: document.getElementById('divColourHex').value.trim() || '#3b82f6',
+      standings_method: document.getElementById('divStandingsMethod')?.value || 'points',
     };
     if (editId) divData.id = editId;
     const savedId = await saveDivision(divData);
@@ -661,6 +677,7 @@ async function showDivisionModal(editId) {
       const roundNum = parseInt(row.querySelector('.round-num')?.value, 10);
       const tierName = row.querySelector('.round-tier')?.value?.trim() || '';
       const racesStr = row.querySelector('.round-races')?.value?.trim() || '';
+      const rankMethod = row.querySelector('.round-rankmethod')?.value || 'points';
       // Range-aware parser so "1-3, 5, 7-9" expands to [1,2,3,5,7,8,9].
       const raceNumbers = parseRaceRanges(racesStr);
 
@@ -670,6 +687,7 @@ async function showDivisionModal(editId) {
           round_number: roundNum,
           tier_name: tierName,
           race_numbers: raceNumbers,
+          rank_method: rankMethod,
         });
         savedRoundIds[idx] = id;
       }
@@ -835,14 +853,19 @@ function showAuditReviewModal(audit) {
 
 function renderRoundRow(round, idx) {
   const races = formatRaceRanges(round.race_numbers || []);
+  const rm = round.rank_method || 'points';
   return `
-    <div class="div-round-row" data-idx="${idx}" style="display:grid; grid-template-columns:60px 1fr 2fr 30px; gap:8px; align-items:center; margin-bottom:6px;">
+    <div class="div-round-row" data-idx="${idx}" style="display:grid; grid-template-columns:48px 1.1fr 1.5fr 116px 28px; gap:6px; align-items:center; margin-bottom:6px;">
       <input class="form-input round-num" type="number" min="1" max="9" value="${round.round_number || ''}"
              placeholder="#" style="text-align:center; font-size:13px; padding:4px;">
       <input class="form-input round-tier" type="text" value="${round.tier_name || ''}"
              placeholder="e.g. Heats, Cup Semi, Gold Cup Final" style="font-size:13px; padding:4px 8px;">
       <input class="form-input round-races" type="text" value="${races}"
-             placeholder="Race numbers: 1-3, 5, 7-9" style="font-size:13px; padding:4px 8px; font-family:monospace;">
+             placeholder="Races: 1-3, 5, 7-9" style="font-size:13px; padding:4px 8px; font-family:monospace;">
+      <select class="form-select round-rankmethod" title="How teams in this round are ranked. Points = per-race place→points (default). Combined time = pool the round's races and rank by time (method #1)." style="font-size:11px; padding:4px 2px;">
+        <option value="points"${rm === 'points' ? ' selected' : ''}>Points</option>
+        <option value="time_combined"${rm === 'time_combined' ? ' selected' : ''}>Comb. time</option>
+      </select>
       <button class="btn-icon" onclick="window._divRemoveRound(${idx})" title="Remove" style="color:var(--danger); padding:2px;">
         <i class="material-icons" style="font-size:16px;">close</i>
       </button>
@@ -874,6 +897,7 @@ function renderProgRow(prog, idx, rounds) {
         ${blank}${buildRoundOptions(rounds, toSel)}
       </select>
       <input class="form-input prog-pos" type="text" value="${prog.position_range || ''}"
+             title="Which finishers advance. e.g. 1-3 (top 3), 4-8, rest (all not yet taken), all (whole field = 1:1 scored series)"
              placeholder="e.g. 1-3, rest, all, 5" style="font-size:12px; padding:4px 6px; text-align:center; font-family:monospace;">
       <button class="btn-icon" onclick="window._divRemoveProg(${idx})" title="Remove" style="color:var(--danger); padding:2px;">
         <i class="material-icons" style="font-size:16px;">close</i>

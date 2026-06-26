@@ -23,6 +23,7 @@ import {
   getAllRaces, getAllDivisions, getDivisionRounds, getDivisionProgressions,
   getAllRaceRelationships, getLaneResults,
 } from './db.js';
+import { parsePlaceholder } from './placeholders.js';
 
 /**
  * Run the full audit. The result is intentionally lightweight (plain
@@ -276,31 +277,53 @@ export async function runFlowchartAudit() {
     for (const lr of lanes) {
       // Placeholders appear in either the team_name OR team_code column
       // depending on which template the event uses (2025TN: team_name,
-      // 2026WU: team_code). Check both.
-      const cells = [(lr.team_name || ''), (lr.team_code || '')];
-      let m = null;
-      for (const c of cells) {
-        const mm = String(c).trim().match(/^R(\d+)P(\d+)$/i);
-        if (mm) { m = mm; break; }
-      }
-      if (!m) continue;
-      const srcRace = parseInt(m[1], 10);
-      const srcPos  = parseInt(m[2], 10);
-      // Does any progression from the source race's round point at our race's round?
-      const myRound  = findRoundContaining(allRounds, race.race_number);
-      const srcRound = findRoundContaining(allRounds, srcRace);
-      if (!myRound || !srcRound) continue; // M1/M2 will surface separately
-      const hasPath  = allProgs.some(p =>
-        p.from_round_id === srcRound.id &&
-        p.to_round_id   === myRound.id &&
-        isRangeIncludingRank(p.position_range, srcPos)
-      );
-      if (!hasPath) {
-        missing.push({
-          code: 'placeholder.no_progression',
-          message: `Race ${race.race_number} has a placeholder "R${srcRace}P${srcPos}" in lane ${lr.lane_number}, but no progression covers rank ${srcPos} from Race ${srcRace} into this race.`,
-          refs: { race_number: race.race_number, lane_number: lr.lane_number, source_race: srcRace, source_position: srcPos },
-        });
+      // 2026WU: team_code). Check both. Understands all three kinds:
+      // single (R{n}P{p}), pooled (R{list}P{p}, method #1), sum (SUMR{list}P{p},
+      // method #2).
+      const ph = parsePlaceholder(lr.team_name) || parsePlaceholder(lr.team_code);
+      if (!ph) continue;
+      const myRound = findRoundContaining(allRounds, race.race_number);
+      if (!myRound) continue; // M1/M2 will surface separately
+
+      if (ph.kind === 'single') {
+        const srcRace = ph.races[0], srcPos = ph.position;
+        const srcRound = findRoundContaining(allRounds, srcRace);
+        if (!srcRound) continue;
+        const hasPath = allProgs.some(p =>
+          p.from_round_id === srcRound.id &&
+          p.to_round_id === myRound.id &&
+          isRangeIncludingRank(p.position_range, srcPos),
+        );
+        if (!hasPath) {
+          missing.push({
+            code: 'placeholder.no_progression',
+            message: `Race ${race.race_number} has a placeholder "${ph.raw}" in lane ${lr.lane_number}, but no progression covers rank ${srcPos} from Race ${srcRace} into this race.`,
+            refs: { race_number: race.race_number, lane_number: lr.lane_number, source_race: srcRace, source_position: srcPos },
+          });
+        }
+      } else {
+        // Pooled / sum reference a combined field of several races; rank
+        // coverage per-race doesn't map, so we validate that every source race
+        // is in a round and a progression links that round into this race.
+        for (const srcRace of ph.races) {
+          const srcRound = findRoundContaining(allRounds, srcRace);
+          if (!srcRound) {
+            missing.push({
+              code: 'placeholder.missing_source',
+              message: `Race ${race.race_number} placeholder "${ph.raw}" (lane ${lr.lane_number}) references Race ${srcRace}, which isn't assigned to any round.`,
+              refs: { race_number: race.race_number, lane_number: lr.lane_number, source_race: srcRace },
+            });
+            continue;
+          }
+          const hasPath = allProgs.some(p => p.from_round_id === srcRound.id && p.to_round_id === myRound.id);
+          if (!hasPath) {
+            missing.push({
+              code: 'placeholder.no_progression',
+              message: `Race ${race.race_number} placeholder "${ph.raw}" (lane ${lr.lane_number}, ${ph.kind === 'sum' ? 'sum-of-times' : 'combined-time'}) pulls from Race ${srcRace}, but no progression links that round into this race.`,
+              refs: { race_number: race.race_number, lane_number: lr.lane_number, source_race: srcRace },
+            });
+          }
+        }
       }
     }
   }
