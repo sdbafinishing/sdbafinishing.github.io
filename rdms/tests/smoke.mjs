@@ -10,7 +10,7 @@
  */
 import { computeRankings, validateRace, computeDivisionScoring, computeVarianceWarnings, getEffectiveStartTime } from '../js/race.js';
 import { joyiTimeToMs, joyiTimeHasMsPrecision, joyiTimeToRaw, msToTime } from '../js/utils.js';
-import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx } from '../js/xlsx-patcher.js';
+import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx, setPrintLayoutXlsx, setContentFontArialXlsx } from '../js/xlsx-patcher.js';
 import { photoFinishPngFilename, autoCropRange } from '../js/photo-finish-png.js';
 import { computeChainScoringFlags } from '../js/division-scoring.js';
 import { parsePlaceholder, parseRaceList } from '../js/placeholders.js';
@@ -885,6 +885,42 @@ group('Division standing (canonical, by method)', () => {
     const s = computeDivisionStanding(div, rounds, [mkRace(1, 'R1'), mkRace(2, 'RFinal')], lanesByRace(), 6, 'mss00');
     eq(s.method, 'points');
     eq(s.teamTotals.get('A').total_place, 1); // A wins both → top points
+  });
+});
+
+group('Export template polish (print layout + Arial font)', () => {
+  const tpl = readFileSync(new URL('../templates/race-template.xlsx', import.meta.url));
+
+  test('setPrintLayoutXlsx — fitToPage + bumped top margin, still parses', () => {
+    const out = setPrintLayoutXlsx(tpl, { topMargin: 1.0 });
+    const files = fflate.unzipSync(new Uint8Array(out));
+    const xml = fflate.strFromU8(files['xl/worksheets/sheet1.xml']);
+    if (!/fitToPage="1"/.test(xml)) throw new Error('fitToPage flag missing');
+    if (!/fitToWidth="1"/.test(xml) || !/fitToHeight="1"/.test(xml)) throw new Error('fitTo width/height missing');
+    if (!/top="1"/.test(xml)) throw new Error('top margin not bumped');
+    XLSX.read(out, { type: 'array' }); // throws if corrupt
+  });
+
+  test('setContentFontArialXlsx — Latin fonts → Arial, CJK kept', () => {
+    const out = setContentFontArialXlsx(tpl);
+    const files = fflate.unzipSync(new Uint8Array(out));
+    const xml = fflate.strFromU8(files['xl/styles.xml']);
+    if (/name val="Calibri"/.test(xml)) throw new Error('Calibri not replaced');
+    if (/name val="Cambria"/.test(xml)) throw new Error('Cambria not replaced');
+    if (!/name val="Arial"/.test(xml)) throw new Error('Arial not present');
+    if (!/新細明體/.test(xml)) throw new Error('CJK font should be preserved');
+    XLSX.read(out, { type: 'array' });
+  });
+
+  test('full chain (resize → header → layout → font → patch) stays valid', () => {
+    let b = resizeLaneRowsXlsx(tpl, 12);
+    b = setPageHeaderXlsx(b, 'Official Long Name 2026', '官方長名稱 2026');
+    b = setPrintLayoutXlsx(b);
+    b = setContentFontArialXlsx(b);
+    b = patchXlsxCells(b, [{ addr: 'B4', value: 'Team X' }, { addr: 'E4', value: '1' }]);
+    const wb = XLSX.read(b, { type: 'array' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    eq(ws.B4?.v, 'Team X');
   });
 });
 

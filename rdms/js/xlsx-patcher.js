@@ -162,6 +162,76 @@ export function setPageHeaderXlsx(xlsxBytes, lineEn, lineTc) {
   return zipSync(files);
 }
 
+/**
+ * T1 + T5 — print layout. Bumps the TOP page margin so the centred two-line
+ * page header doesn't sit on top of the title box ("header sits too low"), and
+ * fits the sheet to one A4 page (paperSize 9 is already A4). Setting fitToPage
+ * needs BOTH the pageSetup attrs and the sheetPr/pageSetUpPr flag, else Excel
+ * ignores it. Idempotent; pure sheet1.xml attribute edits.
+ *
+ * @returns {Uint8Array} patched xlsx bytes
+ */
+export function setPrintLayoutXlsx(xlsxBytes, { topMargin = 1.0 } = {}) {
+  const input = xlsxBytes instanceof Uint8Array ? xlsxBytes : new Uint8Array(xlsxBytes);
+  const files = unzipSync(input);
+  if (!files[SHEET_PATH]) return xlsxBytes;
+  let xml = strFromU8(files[SHEET_PATH]);
+
+  // Top margin — pull content down so the header clears it.
+  xml = xml.replace(/<pageMargins\b([^>]*?)\/>/, (m, attrs) => {
+    const a = /\btop="[^"]*"/.test(attrs)
+      ? attrs.replace(/\btop="[^"]*"/, `top="${topMargin}"`)
+      : `${attrs} top="${topMargin}"`;
+    return `<pageMargins${a}/>`;
+  });
+
+  // fitToPage 1×1 on pageSetup.
+  xml = xml.replace(/<pageSetup\b([^>]*?)\/>/, (m, attrs) => {
+    let a = attrs;
+    a = /fitToWidth=/.test(a) ? a.replace(/fitToWidth="[^"]*"/, 'fitToWidth="1"') : `${a} fitToWidth="1"`;
+    a = /fitToHeight=/.test(a) ? a.replace(/fitToHeight="[^"]*"/, 'fitToHeight="1"') : `${a} fitToHeight="1"`;
+    return `<pageSetup${a}/>`;
+  });
+
+  // The fitToPage flag lives on sheetPr/pageSetUpPr. sheetPr must be the FIRST
+  // child of worksheet, so when absent we insert it right after the open tag.
+  if (!/<sheetPr\b/.test(xml)) {
+    xml = xml.replace(/(<worksheet\b[^>]*>)/, '$1<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>');
+  } else if (/<pageSetUpPr\b/.test(xml)) {
+    xml = xml.replace(/<pageSetUpPr\b([^>]*?)\/?>/, (m, a) =>
+      `<pageSetUpPr${/fitToPage=/.test(a) ? a.replace(/fitToPage="[^"]*"/, 'fitToPage="1"') : `${a} fitToPage="1"`}/>`);
+  } else if (/<sheetPr\b[^>]*\/>/.test(xml)) {
+    xml = xml.replace(/<sheetPr\b([^>]*)\/>/, (m, a) => `<sheetPr${a}><pageSetUpPr fitToPage="1"/></sheetPr>`);
+  } else {
+    xml = xml.replace(/<sheetPr\b([^>]*)>/, (m, a) => `<sheetPr${a}><pageSetUpPr fitToPage="1"/>`);
+  }
+
+  files[SHEET_PATH] = strToU8(xml);
+  return zipSync(files);
+}
+
+/**
+ * T3 — make Latin text Arial. Swaps the Latin font names (Calibri / Cambria /
+ * Times New Roman) in styles.xml for Arial. Deliberately LEAVES the CJK-capable
+ * fonts (新細明體 / Arial Unicode MS) so Chinese cells still render — Arial has
+ * no CJK glyphs, so forcing it there would box the Chinese out. Pure font-name
+ * string swap, no structural change.
+ *
+ * @returns {Uint8Array} patched xlsx bytes
+ */
+export function setContentFontArialXlsx(xlsxBytes) {
+  const input = xlsxBytes instanceof Uint8Array ? xlsxBytes : new Uint8Array(xlsxBytes);
+  const files = unzipSync(input);
+  const STYLES_PATH = 'xl/styles.xml';
+  if (!files[STYLES_PATH]) return xlsxBytes;
+  let xml = strFromU8(files[STYLES_PATH]);
+  for (const name of ['Calibri', 'Cambria', 'Times New Roman']) {
+    xml = xml.split(`<name val="${name}"/>`).join('<name val="Arial"/>');
+  }
+  files[STYLES_PATH] = strToU8(xml);
+  return zipSync(files);
+}
+
 function shiftMergesBy(xml, startRow, delta) {
   return xml.replace(/<mergeCell ref="([A-Z]+)(\d+):([A-Z]+)(\d+)"\s*\/>/g, (m, c1, r1, c2, r2) => {
     const n1 = parseInt(r1, 10);

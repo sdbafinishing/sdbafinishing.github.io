@@ -12,7 +12,7 @@ import { backupAfterExport } from './backup.js';
 import { writeToBoth, writeToSourceSubfolder, downloadFallback } from './file-access.js';
 import { initDriveApi, isDriveApiConnected, writeDriveFileWithLink } from './drive-api.js';
 import { queueRaceSync } from './sync.js';
-import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx } from './xlsx-patcher.js';
+import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx, setPrintLayoutXlsx, setContentFontArialXlsx } from './xlsx-patcher.js';
 import raceTemplateUrl from '../templates/race-template.xlsx?url';
 
 // Single bundled xlsx template used for ALL race exports (results + next
@@ -403,13 +403,19 @@ export async function exportResults(raceNumber, options = {}) {
   // above already targets the post-resize footnote address.
   let templateBytes = await loadRaceTemplate();
   templateBytes = resizeLaneRowsXlsx(templateBytes, laneCount);
-  // Stamp the dynamic page header (printed at the top of every page
-  // when Excel renders the sheet). Long EN on line 1, long TC on line 2.
+  // Stamp the dynamic page header (printed at the top of every page when Excel
+  // renders the sheet). Use the OFFICIAL long names (T2) — the short
+  // event_long_name_en was showing instead of the official title. Falls back to
+  // the short names for events that never set the official ones.
   templateBytes = setPageHeaderXlsx(
     templateBytes,
-    config?.event_long_name_en || '',
+    config?.event_official_name_en || config?.event_long_name_en || '',
     config?.event_official_name_tc || config?.event_long_name_tc || '',
   );
+  // T1/T5: give the header room (top margin) + fit to one A4 page.
+  templateBytes = setPrintLayoutXlsx(templateBytes);
+  // T3: Latin text → Arial (Chinese cells keep their CJK font).
+  templateBytes = setContentFontArialXlsx(templateBytes);
   const patched = patchXlsxCells(templateBytes, mods);
   const xlsBlob = new Blob([patched]);
   const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
