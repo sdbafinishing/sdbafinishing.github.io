@@ -10,7 +10,7 @@
  */
 import { computeRankings, validateRace, computeDivisionScoring, computeVarianceWarnings, getEffectiveStartTime } from '../js/race.js';
 import { joyiTimeToMs, joyiTimeHasMsPrecision, joyiTimeToRaw, msToTime } from '../js/utils.js';
-import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx, setPrintLayoutXlsx, setContentFontArialXlsx } from '../js/xlsx-patcher.js';
+import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx, setPrintLayoutXlsx, setContentFontArialXlsx, applyRaceParityHeaderStyle, setRemarksAlignmentXlsx } from '../js/xlsx-patcher.js';
 import { photoFinishPngFilename, autoCropRange } from '../js/photo-finish-png.js';
 import { computeChainScoringFlags } from '../js/division-scoring.js';
 import { parsePlaceholder, parseRaceList } from '../js/placeholders.js';
@@ -912,15 +912,38 @@ group('Export template polish (print layout + Arial font)', () => {
     XLSX.read(out, { type: 'array' });
   });
 
-  test('full chain (resize → header → layout → font → patch) stays valid', () => {
+  test('full chain (resize → header → layout → font → parity → patch) stays valid', () => {
     let b = resizeLaneRowsXlsx(tpl, 12);
     b = setPageHeaderXlsx(b, 'Official Long Name 2026', '官方長名稱 2026');
     b = setPrintLayoutXlsx(b);
     b = setContentFontArialXlsx(b);
+    b = applyRaceParityHeaderStyle(b, 15); // odd
     b = patchXlsxCells(b, [{ addr: 'B4', value: 'Team X' }, { addr: 'E4', value: '1' }]);
     const wb = XLSX.read(b, { type: 'array' });
     const ws = wb.Sheets[wb.SheetNames[0]];
     eq(ws.B4?.v, 'Team X');
+  });
+
+  test('setRemarksAlignmentXlsx — column I re-pointed to left/top, re-parses', () => {
+    const out = setRemarksAlignmentXlsx(resizeLaneRowsXlsx(tpl, 12));
+    const files = fflate.unzipSync(new Uint8Array(out));
+    const styles = fflate.strFromU8(files['xl/styles.xml']);
+    if (!/horizontal="left" vertical="top" wrapText="1"/.test(styles)) throw new Error('left/top align not added');
+    XLSX.read(out, { type: 'array' });
+  });
+
+  test('applyRaceParityHeaderStyle — odd + even both re-parse, row1 repointed', () => {
+    for (const raceNo of [15, 16]) {
+      const out = applyRaceParityHeaderStyle(tpl, raceNo);
+      const files = fflate.unzipSync(new Uint8Array(out));
+      const sheet = fflate.strFromU8(files['xl/worksheets/sheet1.xml']);
+      const styles = fflate.strFromU8(files['xl/styles.xml']);
+      // Row 1 no longer points at the originals (they were swapped to clones).
+      if (/ s="37"/.test(sheet) || / s="38"/.test(sheet)) throw new Error(`row1 not repointed for race ${raceNo}`);
+      // Yellow fill added.
+      if (!/FFFFFF00/.test(styles)) throw new Error('yellow fill missing');
+      XLSX.read(out, { type: 'array' }); // corruption guard
+    }
   });
 });
 

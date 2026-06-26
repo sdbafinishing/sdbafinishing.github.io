@@ -232,6 +232,138 @@ export function setContentFontArialXlsx(xlsxBytes) {
   return zipSync(files);
 }
 
+/**
+ * T4 — colour the title row (row 1) by race-number parity, a scoring-team
+ * convention: ODD race → yellow background; EVEN race → white background with
+ * red text. Row 1 cells use styles 37 (A1:C1) + 38 (D1:I1) in the bundled
+ * template and those style indices appear nowhere else, so we can clone those
+ * two xfs (preserving border/alignment), override fill (yellow) or font (red),
+ * and re-point row 1. Pure styles.xml + sheet1.xml edit; re-parse-guarded.
+ *
+ * @returns {Uint8Array} patched xlsx bytes
+ */
+export function applyRaceParityHeaderStyle(xlsxBytes, raceNumber) {
+  const ROW1_A = 37; // A1:C1
+  const ROW1_B = 38; // D1:I1
+  const input = xlsxBytes instanceof Uint8Array ? xlsxBytes : new Uint8Array(xlsxBytes);
+  const files = unzipSync(input);
+  const STYLES_PATH = 'xl/styles.xml';
+  if (!files[STYLES_PATH] || !files[SHEET_PATH]) return xlsxBytes;
+  let styles = strFromU8(files[STYLES_PATH]);
+  let sheet = strFromU8(files[SHEET_PATH]);
+
+  // Parse the existing xf list to clone the two row-1 xfs.
+  const xfs = [...styles.matchAll(/<xf\b[^>]*?(?:\/>|>[\s\S]*?<\/xf>)/g)].map(m => m[0]);
+  const xfA = xfs[ROW1_A], xfB = xfs[ROW1_B];
+  if (!xfA || !xfB) return xlsxBytes; // template changed — bail safely
+  const fontIdOf = (xf) => { const m = xf.match(/fontId="(\d+)"/); return m ? +m[1] : 0; };
+
+  // Set/replace an attribute on an <xf ...> element.
+  const xfSet = (xf, name, value) => (new RegExp(`\\b${name}="[^"]*"`).test(xf)
+    ? xf.replace(new RegExp(`\\b${name}="[^"]*"`), `${name}="${value}"`)
+    : xf.replace(/^<xf\b/, `<xf ${name}="${value}"`));
+
+  // Red-tint a <font> — strip any existing colour, insert one BEFORE <name>
+  // (CT_Font schema order: ... sz, color, name ... — wrong order = repair).
+  const reddenFont = (f) => {
+    const g = f.replace(/<color\b[^>]*\/>/g, '');
+    return /<name\b/.test(g)
+      ? g.replace(/<name\b/, '<color rgb="FFFF0000"/><name')
+      : g.replace('</font>', '<color rgb="FFFF0000"/></font>');
+  };
+
+  const fonts = [...styles.matchAll(/<font\b[^>]*>[\s\S]*?<\/font>|<font\s*\/>/g)].map(m => m[0]);
+  const fontCount = fonts.length;
+  const redA = reddenFont(fonts[fontIdOf(xfA)] || '<font/>');
+  const redB = reddenFont(fonts[fontIdOf(xfB)] || '<font/>');
+  const redAId = fontCount, redBId = fontCount + 1;
+
+  const fillCount = parseInt((styles.match(/<fills count="(\d+)">/) || [])[1] || '0', 10);
+  const yellowFill = '<fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/><bgColor indexed="64"/></patternFill></fill>';
+  const yellowFillId = fillCount;
+
+  const xfCount = parseInt((styles.match(/<cellXfs count="(\d+)">/) || [])[1] || '0', 10);
+  const xfA_yellow = xfSet(xfSet(xfA, 'fillId', yellowFillId), 'applyFill', '1');
+  const xfB_yellow = xfSet(xfSet(xfB, 'fillId', yellowFillId), 'applyFill', '1');
+  const xfA_red = xfSet(xfSet(xfA, 'fontId', redAId), 'applyFont', '1');
+  const xfB_red = xfSet(xfSet(xfB, 'fontId', redBId), 'applyFont', '1');
+  const idxYA = xfCount, idxYB = xfCount + 1, idxRA = xfCount + 2, idxRB = xfCount + 3;
+
+  // Splice into styles.xml (append + bump counts).
+  styles = styles
+    .replace(/<fonts count="\d+">/, `<fonts count="${fontCount + 2}">`)
+    .replace('</fonts>', `${redA}${redB}</fonts>`)
+    .replace(/<fills count="\d+">/, `<fills count="${fillCount + 1}">`)
+    .replace('</fills>', `${yellowFill}</fills>`)
+    .replace(/<cellXfs count="\d+">/, `<cellXfs count="${xfCount + 4}">`)
+    .replace('</cellXfs>', `${xfA_yellow}${xfB_yellow}${xfA_red}${xfB_red}</cellXfs>`);
+
+  // Re-point row 1 (37/38 are row-1-only, so a global s= swap is safe).
+  const odd = (Number(raceNumber) % 2) === 1;
+  const useA = odd ? idxYA : idxRA;
+  const useB = odd ? idxYB : idxRB;
+  sheet = sheet.replace(/ s="37"/g, ` s="${useA}"`).replace(/ s="38"/g, ` s="${useB}"`);
+
+  files[STYLES_PATH] = strToU8(styles);
+  files[SHEET_PATH] = strToU8(sheet);
+  return zipSync(files);
+}
+
+/**
+ * T6 — Remarks column alignment. The lane-row Remarks cells (column I) ship
+ * centred (center/center), which reads wrong for free-text notes. Re-align them
+ * to left / top / wrap (matching the Team-name column + the footnote), to match
+ * the provided sample. Clones the two xfs used by column-I lane cells (s=11 on
+ * I4, s=17 on I5+) so other columns sharing those styles are untouched, then
+ * re-points only the column-I lane cells. Run AFTER resizeLaneRowsXlsx so the
+ * cloned/added lane rows are covered. Re-parse-guarded.
+ *
+ * @returns {Uint8Array} patched xlsx bytes
+ */
+export function setRemarksAlignmentXlsx(xlsxBytes) {
+  const REMARK_FIRST = 11; // I4
+  const REMARK_REST = 17;  // I5+
+  const input = xlsxBytes instanceof Uint8Array ? xlsxBytes : new Uint8Array(xlsxBytes);
+  const files = unzipSync(input);
+  const STYLES_PATH = 'xl/styles.xml';
+  if (!files[STYLES_PATH] || !files[SHEET_PATH]) return xlsxBytes;
+  let styles = strFromU8(files[STYLES_PATH]);
+  let sheet = strFromU8(files[SHEET_PATH]);
+
+  const xfs = [...styles.matchAll(/<xf\b[^>]*?(?:\/>|>[\s\S]*?<\/xf>)/g)].map(m => m[0]);
+  const xf11 = xfs[REMARK_FIRST], xf17 = xfs[REMARK_REST];
+  if (!xf11 || !xf17) return xlsxBytes;
+
+  const leftTop = (xf) => {
+    let g = xf;
+    if (/<alignment\b[^>]*\/>/.test(g)) {
+      g = g.replace(/<alignment\b[^>]*\/>/, '<alignment horizontal="left" vertical="top" wrapText="1"/>');
+    } else if (/<\/xf>/.test(g)) {
+      g = g.replace('</xf>', '<alignment horizontal="left" vertical="top" wrapText="1"/></xf>');
+    } else {
+      g = g.replace(/\/>\s*$/, '><alignment horizontal="left" vertical="top" wrapText="1"/></xf>');
+    }
+    if (!/applyAlignment="1"/.test(g)) g = g.replace(/^<xf\b/, '<xf applyAlignment="1"');
+    return g;
+  };
+
+  const xfCount = parseInt((styles.match(/<cellXfs count="(\d+)">/) || [])[1] || '0', 10);
+  const c11 = leftTop(xf11), c17 = leftTop(xf17);
+  const idx11 = xfCount, idx17 = xfCount + 1;
+
+  styles = styles
+    .replace(/<cellXfs count="\d+">/, `<cellXfs count="${xfCount + 2}">`)
+    .replace('</cellXfs>', `${c11}${c17}</cellXfs>`);
+
+  sheet = sheet
+    .replace(/<c r="I4" s="11"/g, `<c r="I4" s="${idx11}"`)
+    .replace(/(<c r="I\d+") s="17"/g, `$1 s="${idx17}"`);
+
+  files[STYLES_PATH] = strToU8(styles);
+  files[SHEET_PATH] = strToU8(sheet);
+  return zipSync(files);
+}
+
 function shiftMergesBy(xml, startRow, delta) {
   return xml.replace(/<mergeCell ref="([A-Z]+)(\d+):([A-Z]+)(\d+)"\s*\/>/g, (m, c1, r1, c2, r2) => {
     const n1 = parseInt(r1, 10);
