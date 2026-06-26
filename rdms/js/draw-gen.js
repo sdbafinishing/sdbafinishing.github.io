@@ -30,7 +30,7 @@ import {
   getConfig, getRace, getLaneResults, bulkSaveLaneResults, saveRace,
 } from './db.js';
 import { writeToBoth, downloadFallback } from './file-access.js';
-import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx, setPrintLayoutXlsx, setContentFontArialXlsx } from './xlsx-patcher.js';
+import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx, setPrintLayoutXlsx, setContentFontArialXlsx, applyRaceParityHeaderStyle, setRemarksAlignmentXlsx } from './xlsx-patcher.js';
 import { parsePlaceholder } from './placeholders.js';
 import { pooledTimeStandings, sumTimeStandings } from './time-standings.js';
 import raceTemplateUrl from '../templates/race-template.xlsx?url';
@@ -347,6 +347,9 @@ async function renderDrawBlob(race, laneRows) {
   );
   templateBytes = setPrintLayoutXlsx(templateBytes);
   templateBytes = setContentFontArialXlsx(templateBytes);
+  // T4/T6: title-row parity colour + remarks alignment, same as the result sheet.
+  templateBytes = applyRaceParityHeaderStyle(templateBytes, raceNumber);
+  templateBytes = setRemarksAlignmentXlsx(templateBytes);
   const patched = patchXlsxCells(templateBytes, mods);
   return new Blob([patched]);
 }
@@ -390,6 +393,9 @@ async function writeDrawFile(race, laneRows) {
   );
   templateBytes = setPrintLayoutXlsx(templateBytes);
   templateBytes = setContentFontArialXlsx(templateBytes);
+  // T4/T6: title-row parity colour + remarks alignment, same as the result sheet.
+  templateBytes = applyRaceParityHeaderStyle(templateBytes, raceNumber);
+  templateBytes = setRemarksAlignmentXlsx(templateBytes);
   const patched = patchXlsxCells(templateBytes, mods);
   const blob = new Blob([patched]);
 
