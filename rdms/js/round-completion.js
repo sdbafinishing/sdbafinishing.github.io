@@ -189,9 +189,19 @@ export async function checkRoundCompletionAfterExport(exportedRaceNumber) {
     const targets = [];
     for (const rn of nextRaceNumbers) {
       const ph = await findPlaceholdersForRace(rn);
-      if (ph.length > 0) targets.push({ race_number: rn, placeholder_count: ph.length });
+      if (ph.length === 0) continue;
+      // Only prompt when EVERY source race this draw depends on is complete.
+      // A pooled/sum placeholder (R1-4 / SUMR1-4) references several rounds — so
+      // finishing just THIS round isn't enough; e.g. the finals seeded by
+      // SUMR1-4 must wait for both Heats Rnd 1 (1-2) AND Heats Rnd 2 (3-4).
+      const sourceRaces = [...new Set(ph.flatMap(p => p.races || [p.source_race]))];
+      const ready = sourceRaces.every(srcNum => {
+        const sr = raceMap.get(srcNum);
+        return sr && (STATUS_COMPLETE_VALUES.has(sr.status) || STATUS_SKIP_VALUES.has(sr.status));
+      });
+      if (ready) targets.push({ race_number: rn, placeholder_count: ph.length });
     }
-    if (targets.length === 0) return; // nothing to do — silently skip
+    if (targets.length === 0) return; // nothing ready yet — silently skip
 
     // Mark prompted now (idempotent guard).
     sessionStorage.setItem(key, '1');

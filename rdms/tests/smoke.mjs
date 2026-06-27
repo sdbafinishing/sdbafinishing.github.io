@@ -972,14 +972,14 @@ group('Export template polish (print layout + Arial font)', () => {
     XLSX.read(out, { type: 'array' }); // throws if corrupt
   });
 
-  test('setContentFontArialXlsx — Latin fonts → Arial, CJK kept', () => {
+  test('setContentFontArialXlsx — every font name → Arial', () => {
     const out = setContentFontArialXlsx(tpl);
     const files = fflate.unzipSync(new Uint8Array(out));
     const xml = fflate.strFromU8(files['xl/styles.xml']);
-    if (/name val="Calibri"/.test(xml)) throw new Error('Calibri not replaced');
-    if (/name val="Cambria"/.test(xml)) throw new Error('Cambria not replaced');
-    if (!/name val="Arial"/.test(xml)) throw new Error('Arial not present');
-    if (!/新細明體/.test(xml)) throw new Error('CJK font should be preserved');
+    // Every <name val="…"/> must now be Arial (CJK shows via Excel fallback).
+    const names = [...xml.matchAll(/<name val="([^"]*)"\/>/g)].map(m => m[1]);
+    if (names.length === 0) throw new Error('no font names found');
+    if (names.some(n => n !== 'Arial')) throw new Error('non-Arial font left: ' + names.find(n => n !== 'Arial'));
     XLSX.read(out, { type: 'array' });
   });
 
@@ -1011,8 +1011,8 @@ group('Export template polish (print layout + Arial font)', () => {
       const styles = fflate.strFromU8(files['xl/styles.xml']);
       // Row 1 no longer points at the originals (they were swapped to clones).
       if (/ s="37"/.test(sheet) || / s="38"/.test(sheet)) throw new Error(`row1 not repointed for race ${raceNo}`);
-      // Yellow fill added.
-      if (!/FFFFFF00/.test(styles)) throw new Error('yellow fill missing');
+      // Amber (FFC000) fill added for the odd-race title.
+      if (!/FFFFC000/.test(styles)) throw new Error('amber fill missing');
       XLSX.read(out, { type: 'array' }); // corruption guard
     }
   });

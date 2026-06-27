@@ -211,11 +211,11 @@ export function setPrintLayoutXlsx(xlsxBytes, { topMargin = 1.0 } = {}) {
 }
 
 /**
- * T3 — make Latin text Arial. Swaps the Latin font names (Calibri / Cambria /
- * Times New Roman) in styles.xml for Arial. Deliberately LEAVES the CJK-capable
- * fonts (新細明體 / Arial Unicode MS) so Chinese cells still render — Arial has
- * no CJK glyphs, so forcing it there would box the Chinese out. Pure font-name
- * string swap, no structural change.
+ * T3 — make ALL text Arial. Rewrites every font name in styles.xml to Arial,
+ * including the CJK fonts (新細明體 / Arial Unicode MS) that were rendering Latin
+ * as a serif. Chinese glyphs still show via Excel's font fallback (Arial has no
+ * CJK glyphs, so the OS substitutes a CJK font for those characters only). Pure
+ * font-name string swap, no structural change.
  *
  * @returns {Uint8Array} patched xlsx bytes
  */
@@ -225,9 +225,8 @@ export function setContentFontArialXlsx(xlsxBytes) {
   const STYLES_PATH = 'xl/styles.xml';
   if (!files[STYLES_PATH]) return xlsxBytes;
   let xml = strFromU8(files[STYLES_PATH]);
-  for (const name of ['Calibri', 'Cambria', 'Times New Roman']) {
-    xml = xml.split(`<name val="${name}"/>`).join('<name val="Arial"/>');
-  }
+  // Every <name val="…"/> in <fonts> → Arial.
+  xml = xml.replace(/<name val="[^"]*"\/>/g, '<name val="Arial"/>');
   files[STYLES_PATH] = strToU8(xml);
   return zipSync(files);
 }
@@ -279,29 +278,42 @@ export function applyRaceParityHeaderStyle(xlsxBytes, raceNumber) {
   const redAId = fontCount, redBId = fontCount + 1;
 
   const fillCount = parseInt((styles.match(/<fills count="(\d+)">/) || [])[1] || '0', 10);
-  const yellowFill = '<fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/><bgColor indexed="64"/></patternFill></fill>';
-  const yellowFillId = fillCount;
+  // ODD race title row = amber (FFC000) background + black (original) text.
+  const amberFill = '<fill><patternFill patternType="solid"><fgColor rgb="FFFFC000"/><bgColor indexed="64"/></patternFill></fill>';
+  const amberFillId = fillCount;
+
+  // Centre all row-1 content (the title cell is left-aligned in the base style).
+  const centre = (xf) => {
+    let g = xf;
+    if (/<alignment\b[^>]*\/>/.test(g)) g = g.replace(/<alignment\b[^>]*\/>/, '<alignment horizontal="center" vertical="center" wrapText="1"/>');
+    else if (/<\/xf>/.test(g)) g = g.replace('</xf>', '<alignment horizontal="center" vertical="center" wrapText="1"/></xf>');
+    else g = g.replace(/\/>\s*$/, '><alignment horizontal="center" vertical="center" wrapText="1"/></xf>');
+    if (!/applyAlignment="1"/.test(g)) g = g.replace(/^<xf\b/, '<xf applyAlignment="1"');
+    return g;
+  };
 
   const xfCount = parseInt((styles.match(/<cellXfs count="(\d+)">/) || [])[1] || '0', 10);
-  const xfA_yellow = xfSet(xfSet(xfA, 'fillId', yellowFillId), 'applyFill', '1');
-  const xfB_yellow = xfSet(xfSet(xfB, 'fillId', yellowFillId), 'applyFill', '1');
-  const xfA_red = xfSet(xfSet(xfA, 'fontId', redAId), 'applyFont', '1');
-  const xfB_red = xfSet(xfSet(xfB, 'fontId', redBId), 'applyFont', '1');
-  const idxYA = xfCount, idxYB = xfCount + 1, idxRA = xfCount + 2, idxRB = xfCount + 3;
+  // Odd: amber fill + original (black) font + centred.
+  const xfA_odd = centre(xfSet(xfSet(xfA, 'fillId', amberFillId), 'applyFill', '1'));
+  const xfB_odd = centre(xfSet(xfSet(xfB, 'fillId', amberFillId), 'applyFill', '1'));
+  // Even: forced white (fillId 0) + red font + centred.
+  const xfA_even = centre(xfSet(xfSet(xfSet(xfA, 'fontId', redAId), 'applyFont', '1'), 'fillId', '0'));
+  const xfB_even = centre(xfSet(xfSet(xfSet(xfB, 'fontId', redBId), 'applyFont', '1'), 'fillId', '0'));
+  const idxOA = xfCount, idxOB = xfCount + 1, idxEA = xfCount + 2, idxEB = xfCount + 3;
 
   // Splice into styles.xml (append + bump counts).
   styles = styles
     .replace(/<fonts count="\d+">/, `<fonts count="${fontCount + 2}">`)
     .replace('</fonts>', `${redA}${redB}</fonts>`)
     .replace(/<fills count="\d+">/, `<fills count="${fillCount + 1}">`)
-    .replace('</fills>', `${yellowFill}</fills>`)
+    .replace('</fills>', `${amberFill}</fills>`)
     .replace(/<cellXfs count="\d+">/, `<cellXfs count="${xfCount + 4}">`)
-    .replace('</cellXfs>', `${xfA_yellow}${xfB_yellow}${xfA_red}${xfB_red}</cellXfs>`);
+    .replace('</cellXfs>', `${xfA_odd}${xfB_odd}${xfA_even}${xfB_even}</cellXfs>`);
 
   // Re-point row 1 (37/38 are row-1-only, so a global s= swap is safe).
   const odd = (Number(raceNumber) % 2) === 1;
-  const useA = odd ? idxYA : idxRA;
-  const useB = odd ? idxYB : idxRB;
+  const useA = odd ? idxOA : idxEA;
+  const useB = odd ? idxOB : idxEB;
   sheet = sheet.replace(/ s="37"/g, ` s="${useA}"`).replace(/ s="38"/g, ` s="${useB}"`);
 
   files[STYLES_PATH] = strToU8(styles);
