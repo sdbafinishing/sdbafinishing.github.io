@@ -932,9 +932,9 @@ group('Tiered standing (Gold/Silver/Bronze + Bowl)', () => {
 
   test('seeding standing = summed non-tier (heats) rounds', () => {
     const rounds = [
-      { tier_name: 'Heats Rnd 1', race_numbers: [1, 2] }, // no tier_order → seeding
-      { tier_name: 'Heats Rnd 2', race_numbers: [3, 4] },
-      { tier_name: 'Gold Cup Final', tier_order: 1, rank_method: 'time_combined', race_numbers: [6] },
+      { id: 11, round_number: 1, tier_name: 'Heats Rnd 1', race_numbers: [1, 2] }, // no tier_order → seeding
+      { id: 12, round_number: 2, tier_name: 'Heats Rnd 2', race_numbers: [3, 4] },
+      { id: 13, round_number: 3, tier_name: 'Gold Cup Final', tier_order: 1, rank_method: 'time_combined', race_numbers: [6] },
     ];
     const races = [1, 2, 3, 4, 6].map(mkRace);
     const heatsLanes = new Map([
