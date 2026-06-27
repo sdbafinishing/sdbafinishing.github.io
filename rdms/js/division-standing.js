@@ -217,5 +217,39 @@ export function computeTieredStanding(division, rounds, scoredRaces, lanesByRace
     result.tiers.push({ tier_name: tier.tier_name || `Tier ${tier.tier_order}`, tier_order: tier.tier_order, method, complete: tierComplete, rows });
   }
 
+  // Seeding standing — the summed-time ranking across the NON-tier rounds (the
+  // heats), which is what decides who's seeded into each tier. Round-aware (one
+  // leg per round), so split heats sum correctly. Shown above the tiers.
+  const nonTierRounds = (rounds || []).filter(r =>
+    !(r.tier_order != null && r.tier_order > 0) && (r.race_numbers || []).some(n => byNum.has(n)));
+  if (nonTierRounds.length) {
+    const roundByRace = {};
+    const seedRacesLanes = [];
+    for (const rd of nonTierRounds) {
+      for (const n of (rd.race_numbers || [])) {
+        if (!byNum.has(n)) continue;
+        roundByRace[n] = rd.id ?? rd.round_number;
+        const r = byNum.get(n);
+        seedRacesLanes.push({
+          race_number: n,
+          lanes: correctedLanesFor(r, lanesByRace),
+          batchDeltaMs: r.batch_override_enabled ? (r.batch_delta_ms || 0) : 0,
+        });
+      }
+    }
+    const { teams, unresolvedTies } = sumTimeStandings(seedRacesLanes, timeMode, null, roundByRace);
+    if (unresolvedTies.length) result.unresolvedTie = true;
+    const seedComplete = nonTierRounds.every(rd =>
+      (rd.race_numbers || []).filter(n => byNum.has(n)).every(n => DONE.has(byNum.get(n).status)));
+    result.seeding = {
+      label: nonTierRounds.map(r => r.tier_name || `Round ${r.round_number}`).join(' + '),
+      complete: seedComplete,
+      rows: teams.map(t => ({
+        team_code: t.team_code, team_name: t.team_name,
+        section_rank: t.overall_rank, value_display: formatTotalTime(t.sum_exported),
+      })),
+    };
+  }
+
   return result;
 }

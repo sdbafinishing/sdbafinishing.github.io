@@ -930,6 +930,26 @@ group('Tiered standing (Gold/Silver/Bronze + Bowl)', () => {
     eq(s.teamByCode.get('F').overall_rank, 6);
   });
 
+  test('seeding standing = summed non-tier (heats) rounds', () => {
+    const rounds = [
+      { tier_name: 'Heats Rnd 1', race_numbers: [1, 2] }, // no tier_order → seeding
+      { tier_name: 'Heats Rnd 2', race_numbers: [3, 4] },
+      { tier_name: 'Gold Cup Final', tier_order: 1, rank_method: 'time_combined', race_numbers: [6] },
+    ];
+    const races = [1, 2, 3, 4, 6].map(mkRace);
+    const heatsLanes = new Map([
+      [1, [_lane(1, 'A', '12000'), _lane(2, 'B', '12500')]],
+      [2, [_lane(1, 'C', '11800'), _lane(2, 'D', '12200')]],
+      [3, [_lane(1, 'A', '11500'), _lane(2, 'C', '11000')]],
+      [4, [_lane(1, 'B', '12000'), _lane(2, 'D', '11700')]],
+      [6, [_lane(1, 'A', '11000')]],
+    ]);
+    const s = computeTieredStanding({ id: 1 }, rounds, races, heatsLanes, 6, 'mss00');
+    // Heats sum: C=148000 (fastest), A=155000, D=159000, B=165000
+    eq(s.seeding.rows[0].team_code, 'C');
+    eq(s.seeding.rows[0].section_rank, 1);
+  });
+
   test('incomplete tier → overall_rank TBC (null)', () => {
     const races = [5, 6, 7, 8].map(mkRace);
     races.find(r => r.race_number === 6).status = 'pending'; // Silver not done

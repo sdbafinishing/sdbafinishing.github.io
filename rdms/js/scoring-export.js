@@ -37,8 +37,17 @@ export async function exportOverallRanks(divId) {
     if (!tiered) return { success: false, error: 'Nothing to rank yet.' };
     const aoa = [
       [division.division_name || 'Division', '', '', '', tiered.complete ? '' : 'PROVISIONAL'],
-      ['Tier', 'Section rank', 'Team', 'Code', 'Time', 'Overall rank'],
     ];
+    // Seeding (summed heats) standing first, if present.
+    if (tiered.seeding) {
+      aoa.push([`Summed standings — ${tiered.seeding.label} (seeding)`, '', '', '', '']);
+      aoa.push(['Rank', 'Team', 'Code', 'Total time', '']);
+      for (const row of tiered.seeding.rows.slice().sort((a, b) => (a.section_rank ?? 9999) - (b.section_rank ?? 9999))) {
+        aoa.push([row.section_rank ?? '', row.team_name || '', row.team_code || '', row.value_display || '', '']);
+      }
+      aoa.push(['', '', '', '', '']);
+    }
+    aoa.push(['Tier', 'Section rank', 'Team', 'Code', 'Time', 'Overall rank']);
     for (const tier of tiered.tiers) {
       const rows = tier.rows.slice().sort((a, b) => (a.section_rank ?? 9999) - (b.section_rank ?? 9999));
       for (const row of rows) {
