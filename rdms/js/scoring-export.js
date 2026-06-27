@@ -22,14 +22,27 @@ export async function exportOverallRanks(divId) {
   const division = (await getAllDivisions()).find(d => d.id === parseInt(divId, 10)) || null;
   if (!division) return { success: false, error: 'Division not found.' };
 
-  const scoredRaces = (await getAllRaces())
-    .filter(r => r.division_id === division.id && r.scoring_flag && r.scoring_flag !== 'N')
-    .sort((a, b) => (FLAG_ORDER[a.scoring_flag] || 9) - (FLAG_ORDER[b.scoring_flag] || 9));
-  if (!scoredRaces.length) return { success: false, error: 'No scored races in this division.' };
+  const allRaces = await getAllRaces();
+  const rounds = await getDivisionRounds(division.id);
+  const isTiered = (rounds || []).some(r => r.tier_order != null && r.tier_order > 0);
+  const isTime = division.standings_method === 'time_sum' || division.standings_method === 'time_combined';
+
+  // Time/tiered divisions key off the division's rounds (their races carry
+  // scoring_flag = N); points divisions key off scoring_flag.
+  let scoredRaces;
+  if (isTiered || isTime) {
+    const roundRaceNums = new Set((rounds || []).flatMap(r => r.race_numbers || []));
+    scoredRaces = allRaces.filter(r => roundRaceNums.has(r.race_number)).sort((a, b) => a.race_number - b.race_number);
+    if (!scoredRaces.length) return { success: false, error: 'No races configured in this division’s rounds.' };
+  } else {
+    scoredRaces = allRaces
+      .filter(r => r.division_id === division.id && r.scoring_flag && r.scoring_flag !== 'N')
+      .sort((a, b) => (FLAG_ORDER[a.scoring_flag] || 9) - (FLAG_ORDER[b.scoring_flag] || 9));
+    if (!scoredRaces.length) return { success: false, error: 'No scored races in this division.' };
+  }
 
   const lanesByRace = new Map();
   for (const r of scoredRaces) lanesByRace.set(r.race_number, await getLaneResults(r.race_number));
-  const rounds = await getDivisionRounds(division.id);
 
   // Tiered division (Gold/Silver/Bronze + Bowl): export Tier · Section · Overall.
   if ((rounds || []).some(r => r.tier_order != null && r.tier_order > 0)) {
