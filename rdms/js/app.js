@@ -233,6 +233,13 @@ export function broadcastChange(type, data = {}) {
   if (type === 'race-updated' && data?.race_number) {
     import('./sync.js').then(m => m.queueRaceSync(data.race_number)).catch(() => {});
   }
+  // A draw import (or next-round resolve) can add/replace MANY races at once and
+  // carries no single race number — push everything so the online viewer sees
+  // the full schedule. Without this, imported-but-not-yet-exported races never
+  // reach Supabase (the online dashboard showed only the exported ones).
+  if (type === 'draw-imported') {
+    import('./sync.js').then(m => m.forceFullSync()).catch(() => {});
+  }
 }
 
 // ──── Folder Connection ────
