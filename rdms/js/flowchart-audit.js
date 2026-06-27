@@ -232,15 +232,20 @@ export async function runFlowchartAudit() {
     }
   }
 
-  // (M4) Round at round_number > 1 with no progression flowing into it.
-  // This is almost always an error — a later round should be reachable
-  // from somewhere earlier in the same division.
+  // (M4) Round at round_number > 1 that is neither fed BY a progression nor
+  // feeds INTO one — i.e. genuinely orphaned. A round that FEEDS a later round
+  // (a source) is a legitimate parallel ENTRY round even if nothing flows into
+  // it — e.g. summed-heats formats where Heats Rnd 1 + Heats Rnd 2 are both
+  // entry rounds (teams race both, seeded directly) and each feeds the finals.
+  // A round that should be fed but isn't will still be caught by the
+  // placeholder check (M6) via its unresolved R…/SUMR… seeds.
   const targetedRoundIds = new Set(allProgs.map(p => p.to_round_id));
+  const sourceRoundIds = new Set(allProgs.map(p => p.from_round_id));
   for (const r of allRounds) {
-    if ((r.round_number || 1) > 1 && !targetedRoundIds.has(r.id)) {
+    if ((r.round_number || 1) > 1 && !targetedRoundIds.has(r.id) && !sourceRoundIds.has(r.id)) {
       missing.push({
         code: 'round.unreachable',
-        message: `Round "${nameOfRound(roundMap, r.id)}" (round ${r.round_number}) has no progression feeding into it from an earlier round.`,
+        message: `Round "${nameOfRound(roundMap, r.id)}" (round ${r.round_number}) isn't connected to any other round (nothing feeds into it and it feeds nothing).`,
         refs: { round_id: r.id, division_id: r.division_id },
       });
     }

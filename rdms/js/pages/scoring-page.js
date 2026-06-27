@@ -21,23 +21,35 @@ export async function mountScoringPage(container) {
   // flags set. The "no scored races" empty-state below handles the case
   // where no flags have been set.
 
-  // Find scored race pairs/groups
-  // Scored races have scoring_flag = R1, R2, or RFinal
-  const scoredRaces = races.filter(r => r.scoring_flag && r.scoring_flag !== 'N');
-
-  // Group by division
+  // A division appears on the Scoring tab if EITHER:
+  //   • it has points-scored races (scoring_flag R1/R2/RFinal), OR
+  //   • it's configured for a time method (standings_method) or tiered scoring
+  //     (a round with tier_order) — these don't use scoring_flag, so we key off
+  //     the division config + its rounds' race lists instead.
   const divGroups = {};
-  for (const r of scoredRaces) {
+  // Points races, grouped by division (incl. an "unassigned" bucket).
+  for (const r of races.filter(r => r.scoring_flag && r.scoring_flag !== 'N')) {
     const divId = r.division_id || 'unassigned';
     if (!divGroups[divId]) divGroups[divId] = [];
     divGroups[divId].push(r);
+  }
+  // Time / tiered divisions — include the races listed in their rounds.
+  for (const d of divisions) {
+    const rounds = await getDivisionRounds(d.id).catch(() => []);
+    const isTiered = (rounds || []).some(rr => rr.tier_order != null && rr.tier_order > 0);
+    const isTime = d.standings_method === 'time_sum' || d.standings_method === 'time_combined';
+    if (!isTiered && !isTime) continue;
+    const roundRaceNums = new Set((rounds || []).flatMap(rr => rr.race_numbers || []));
+    const divRaces = races.filter(r => roundRaceNums.has(r.race_number));
+    if (divRaces.length) divGroups[d.id] = divRaces;
   }
 
   if (Object.keys(divGroups).length === 0) {
     container.innerHTML = `
       <h4 style="font-size:18px; font-weight:600; margin-bottom:16px;">Scoring</h4>
       <div class="card" style="text-align:center; padding:32px; color:var(--text-tertiary);">
-        No scored races found. Set scoring flags (R1/R2/RFinal) in Setup → Race Schedule.
+        No scored divisions yet. Set scoring flags (R1/R2/RFinal) in Setup → Race Schedule,
+        or configure a time/tiered method (Final standing / Tier order) in Setup → Divisions.
       </div>`;
     return;
   }
@@ -132,12 +144,34 @@ export async function mountScoringPage(container) {
 
   // Render first division
   await renderScoringDiv(divIds[0], divGroups[divIds[0]], laneCount, timeMode, divisions);
+
+  // Auto-refresh: re-mount when draws are imported or a race updates (results
+  // entered / exported), so the scoring tables aren't stale. Debounced so a
+  // burst of broadcasts (e.g. bulk draw import) only re-renders once.
+  if (scoringRefreshHandler) {
+    window.removeEventListener('rdms-draw-imported', scoringRefreshHandler);
+    window.removeEventListener('rdms-race-updated', scoringRefreshHandler);
+  }
+  let pending = null;
+  scoringRefreshHandler = () => {
+    clearTimeout(pending);
+    pending = setTimeout(() => { mountScoringPage(container).catch(() => {}); }, 250);
+  };
+  window.addEventListener('rdms-draw-imported', scoringRefreshHandler);
+  window.addEventListener('rdms-race-updated', scoringRefreshHandler);
 }
+
+let scoringRefreshHandler = null;
 
 export function unmountScoringPage() {
   delete window._scoringTab;
   delete window._recomputeAllScoring;
   delete window._exportOverallRanks;
+  if (scoringRefreshHandler) {
+    window.removeEventListener('rdms-draw-imported', scoringRefreshHandler);
+    window.removeEventListener('rdms-race-updated', scoringRefreshHandler);
+    scoringRefreshHandler = null;
+  }
 }
 
 async function renderScoringDiv(divId, scoredRaces, laneCount, timeMode, divisions) {
