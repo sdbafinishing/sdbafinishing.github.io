@@ -383,7 +383,18 @@ export function renderUserGuideTab(container) {
               </ul>
             </li>
             <li><strong>Two-phase export.</strong> When a race finishes, its sheet <em>always</em> exports the boat's <strong>Time + Place</strong>. The scoring section — <em>Total Place</em> (both methods) and <em>Total Score = total time</em> (method #2) — shows <strong>"TBC"</strong> until every race in the round/series is exported. A reminder fires on the last race ("round complete — re-export the other sheets"); <strong>re-export the round</strong> to fill the totals + overall ranks.</li>
-            <li><strong>Export overall ranks.</strong> The Scoring tab has an <em>"Export overall ranks"</em> button per division — a standalone <code>.xlsx</code> of Rank / Team / Code / per-round breakdown / Total (works for every method; marked PROVISIONAL until complete).</li>
+            <li><strong>Export overall ranks.</strong> The Scoring tab has an <em>"Export table"</em> button per division — a standalone <code>.xlsx</code> of the standing shown (works for every method; marked PROVISIONAL until complete).</li>
+          </ul>
+
+          <h4 style="margin-top:18px;">9f. Tiered standings (Gold/Silver/Bronze cups + Bowl)</h4>
+          <p style="font-size:13px; color:var(--text-secondary);">
+            For a bracket where tiers stack — Gold above Silver above Bronze, then a summed-time Bowl — give each final tier a <strong>Tier order</strong> in Setup → Divisions (Gold = 1, Silver = 2, Bronze = 3, Bowl = 4…). Blank = not in the combined overall.
+          </p>
+          <ul>
+            <li><strong>Per-tier "Rank by"</strong>: <em>Combined time</em> for a cup final (single race → place order), <em>Sum time</em> for the Bowl (sums the tier's races).</li>
+            <li><strong>Two ranks per team</strong>: a <strong>Section rank</strong> (place within their own tier) and a <strong>stacked Overall rank</strong> — Gold 1–n become overall 1–n, Silver continues, then Bronze, then Bowl. A tier whose races aren't all exported shows <strong>TBC</strong> for the overall until done.</li>
+            <li><strong>Seeding stays separate</strong>: who goes into Gold vs Silver is decided by the summed-heats rank via the <code>SUMR…</code> placeholders (resolve the finals' draws after the heats). The Tier order only governs the final combined standing.</li>
+            <li><strong>Scoring tab + Export table</strong>: the Scoring tab shows each tier's section table + the overall rank, and <em>"Export table"</em> writes the whole thing (Tier · Section · Team · Time · Overall) to <code>.xlsx</code>.</li>
           </ul>
         </div>
 

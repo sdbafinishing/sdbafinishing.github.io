@@ -8,7 +8,7 @@
  */
 import * as XLSX from 'xlsx';
 import { getConfig, getAllRaces, getAllDivisions, getDivisionRounds, getLaneResults } from './db.js';
-import { computeDivisionStanding, formatTotalTime } from './division-standing.js';
+import { computeDivisionStanding, computeTieredStanding, formatTotalTime } from './division-standing.js';
 import { writeToBoth, downloadFallback } from './file-access.js';
 
 const FLAG_ORDER = { R1: 1, R2: 2, RFinal: 3 };
@@ -30,6 +30,31 @@ export async function exportOverallRanks(divId) {
   const lanesByRace = new Map();
   for (const r of scoredRaces) lanesByRace.set(r.race_number, await getLaneResults(r.race_number));
   const rounds = await getDivisionRounds(division.id);
+
+  // Tiered division (Gold/Silver/Bronze + Bowl): export Tier · Section · Overall.
+  if ((rounds || []).some(r => r.tier_order != null && r.tier_order > 0)) {
+    const tiered = computeTieredStanding(division, rounds, scoredRaces, lanesByRace, laneCount, timeMode);
+    if (!tiered) return { success: false, error: 'Nothing to rank yet.' };
+    const aoa = [
+      [division.division_name || 'Division', '', '', '', tiered.complete ? '' : 'PROVISIONAL'],
+      ['Tier', 'Section rank', 'Team', 'Code', 'Time', 'Overall rank'],
+    ];
+    for (const tier of tiered.tiers) {
+      const rows = tier.rows.slice().sort((a, b) => (a.section_rank ?? 9999) - (b.section_rank ?? 9999));
+      for (const row of rows) {
+        aoa.push([
+          tier.tier_name,
+          row.section_rank ?? '',
+          row.team_name || '',
+          row.team_code || '',
+          row.value_display || '',
+          row.overall_rank == null ? 'TBC' : row.overall_rank,
+        ]);
+      }
+    }
+    return await writeStandingsXlsx(division, ref, aoa, tiered.complete);
+  }
+
   const standing = computeDivisionStanding(division, rounds, scoredRaces, lanesByRace, laneCount, timeMode);
   if (!standing) return { success: false, error: 'Nothing to rank yet.' };
 
@@ -63,6 +88,11 @@ export async function exportOverallRanks(divId) {
     ]),
   ];
 
+  return await writeStandingsXlsx(division, ref, aoa, standing.complete);
+}
+
+/** Build the standings .xlsx from an array-of-arrays + write it (or download). */
+async function writeStandingsXlsx(division, ref, aoa, complete) {
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Overall');
@@ -74,5 +104,5 @@ export async function exportOverallRanks(divId) {
   const { local, shared } = await writeToBoth('14 Output_Scoring', filename, blob, `80 Shared/${ref}_Scoring`);
   if (!local && !shared) downloadFallback(filename, blob);
 
-  return { success: true, filename, complete: standing.complete, teams: teams.length };
+  return { success: true, filename, complete };
 }

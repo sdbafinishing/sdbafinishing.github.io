@@ -147,3 +147,75 @@ export function computeDivisionStanding(division, rounds, scoredRaces, lanesByRa
 
   return { method, complete, unresolvedTie, finalRaceNums, teamTotals };
 }
+
+/**
+ * Tiered standing — stacks ordered tiers (rounds with a `tier_order`) into a
+ * single overall ranking while keeping each tier's own (section) rank. Used for
+ * Gold/Silver/Bronze cups + Bowl, where Gold ranks above Silver above Bronze,
+ * each tier ranked by its own method, and the Bowl by summed time.
+ *
+ *   - tier.rank_method 'time_sum'  → sum of the tier's races (e.g. Bowl).
+ *   - otherwise (time_combined / points / unset) → pooled time of the tier's
+ *     races (a single-race cup final = place order).
+ *
+ * Overall rank = cumulative: tier 1 takes ranks 1..n, tier 2 continues, etc.
+ * A tier whose races aren't all exported yet has overall_rank = null (TBC).
+ *
+ * @returns {null | {complete, unresolvedTie, tiers: Array<{tier_name, tier_order, method, complete, rows}>, teamByCode: Map}}
+ */
+export function computeTieredStanding(division, rounds, scoredRaces, lanesByRace, laneCount, timeMode = 'mss00') {
+  const tiers = (rounds || [])
+    .filter(r => r.tier_order != null && r.tier_order > 0)
+    .sort((a, b) => a.tier_order - b.tier_order);
+  if (!tiers.length) return null;
+
+  const byNum = new Map(scoredRaces.map(r => [r.race_number, r]));
+  const result = { tiers: [], teamByCode: new Map(), complete: true, unresolvedTie: false };
+  let overallOffset = 0;
+
+  for (const tier of tiers) {
+    const tierRaceNums = (tier.race_numbers || []).filter(n => byNum.has(n));
+    const racesLanes = tierRaceNums.map(n => {
+      const r = byNum.get(n);
+      return {
+        race_number: n,
+        lanes: correctedLanesFor(r, lanesByRace),
+        batchDeltaMs: r.batch_override_enabled ? (r.batch_delta_ms || 0) : 0,
+      };
+    });
+    const tierComplete = tierRaceNums.length > 0 && tierRaceNums.every(n => DONE.has(byNum.get(n).status));
+    const method = tier.rank_method === 'time_sum' ? 'time_sum' : 'time_combined';
+
+    let rows = [];
+    if (method === 'time_sum') {
+      // Each of the tier's races is a leg (sum them all — e.g. the Bowl).
+      const { teams, unresolvedTies } = sumTimeStandings(racesLanes, timeMode);
+      if (unresolvedTies.length) result.unresolvedTie = true;
+      rows = teams.map(t => ({
+        team_code: t.team_code, team_name: t.team_name,
+        section_rank: t.overall_rank, value_ms: t.sum_exported,
+        value_display: formatTotalTime(t.sum_exported),
+      }));
+    } else {
+      const { entries, unresolvedTies } = pooledTimeStandings(racesLanes, timeMode);
+      if (unresolvedTies.length) result.unresolvedTie = true;
+      rows = entries.map(e => ({
+        team_code: e.team_code, team_name: e.team_name,
+        section_rank: e.position, value_ms: e.exported_ms,
+        value_display: formatTotalTime(e.exported_ms),
+      }));
+    }
+
+    for (const row of rows) {
+      row.tier_name = tier.tier_name || `Tier ${tier.tier_order}`;
+      row.tier_order = tier.tier_order;
+      row.overall_rank = tierComplete ? (overallOffset + row.section_rank) : null;
+      result.teamByCode.set(row.team_code, row);
+    }
+    overallOffset += rows.length;
+    if (!tierComplete) result.complete = false;
+    result.tiers.push({ tier_name: tier.tier_name || `Tier ${tier.tier_order}`, tier_order: tier.tier_order, method, complete: tierComplete, rows });
+  }
+
+  return result;
+}

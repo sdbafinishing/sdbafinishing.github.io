@@ -15,7 +15,7 @@ import { photoFinishPngFilename, autoCropRange } from '../js/photo-finish-png.js
 import { computeChainScoringFlags } from '../js/division-scoring.js';
 import { parsePlaceholder, parseRaceList } from '../js/placeholders.js';
 import { pooledTimeStandings, sumTimeStandings } from '../js/time-standings.js';
-import { computeDivisionStanding, formatTotalTime } from '../js/division-standing.js';
+import { computeDivisionStanding, computeTieredStanding, formatTotalTime } from '../js/division-standing.js';
 import { readFileSync } from 'fs';
 import * as XLSX from 'xlsx';
 import * as fflate from 'fflate';
@@ -898,6 +898,44 @@ group('Division standing (canonical, by method)', () => {
     const s = computeDivisionStanding(div, rounds, [mkRace(1, 'R1'), mkRace(2, 'RFinal')], lanesByRace(), 6, 'mss00');
     eq(s.method, 'points');
     eq(s.teamTotals.get('A').total_place, 1); // A wins both → top points
+  });
+});
+
+group('Tiered standing (Gold/Silver/Bronze + Bowl)', () => {
+  const tierRounds = [
+    { tier_name: 'Gold Cup Final', tier_order: 1, rank_method: 'time_combined', race_numbers: [5] },
+    { tier_name: 'Silver Cup Final', tier_order: 2, rank_method: 'time_combined', race_numbers: [6] },
+    { tier_name: 'Bowl', tier_order: 3, rank_method: 'time_sum', race_numbers: [7, 8] },
+  ];
+  const mkRace = (n) => ({ race_number: n, division_id: 1, scoring_flag: 'N', status: 'exported' });
+  const lanes = () => new Map([
+    [5, [_lane(1, 'A', '11500'), _lane(2, 'B', '11800')]], // Gold: A 1st, B 2nd
+    [6, [_lane(1, 'C', '12000'), _lane(2, 'D', '12500')]], // Silver: C 1st, D 2nd
+    [7, [_lane(1, 'E', '12000'), _lane(2, 'F', '12500')]], // Bowl leg 1
+    [8, [_lane(1, 'E', '11500'), _lane(2, 'F', '12000')]], // Bowl leg 2
+  ]);
+
+  test('stacks tiers: section rank + cumulative overall rank', () => {
+    const s = computeTieredStanding({ id: 1 }, tierRounds, [5, 6, 7, 8].map(mkRace), lanes(), 6, 'mss00');
+    eq(s.complete, true);
+    // Gold tier
+    eq(s.teamByCode.get('A').section_rank, 1); eq(s.teamByCode.get('A').overall_rank, 1);
+    eq(s.teamByCode.get('B').overall_rank, 2);
+    // Silver continues the overall numbering
+    eq(s.teamByCode.get('C').section_rank, 1); eq(s.teamByCode.get('C').overall_rank, 3);
+    eq(s.teamByCode.get('D').overall_rank, 4);
+    // Bowl (summed): E=155000 < F=165000
+    eq(s.teamByCode.get('E').section_rank, 1); eq(s.teamByCode.get('E').overall_rank, 5);
+    eq(s.teamByCode.get('E').value_display, '2:35.00');
+    eq(s.teamByCode.get('F').overall_rank, 6);
+  });
+
+  test('incomplete tier → overall_rank TBC (null)', () => {
+    const races = [5, 6, 7, 8].map(mkRace);
+    races.find(r => r.race_number === 6).status = 'pending'; // Silver not done
+    const s = computeTieredStanding({ id: 1 }, tierRounds, races, lanes(), 6, 'mss00');
+    eq(s.complete, false);
+    eq(s.teamByCode.get('C').overall_rank, null);
   });
 });
 

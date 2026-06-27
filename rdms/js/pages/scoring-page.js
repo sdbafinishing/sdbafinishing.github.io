@@ -6,7 +6,7 @@
  */
 import { getAllRaces, getAllDivisions, getLaneResults, getConfig, getRace, getDivisionRounds, bulkSaveLaneResults } from '../db.js';
 import { positionToPoints, computeRankings } from '../race.js';
-import { computeDivisionStanding, formatTotalTime } from '../division-standing.js';
+import { computeDivisionStanding, computeTieredStanding, formatTotalTime } from '../division-standing.js';
 import { timeToDisplay, showToast } from '../utils.js';
 import { broadcastChange } from '../app.js';
 
@@ -150,7 +150,14 @@ async function renderScoringDiv(divId, scoredRaces, laneCount, timeMode, divisio
   const flagOrder = { 'R1': 1, 'R2': 2, 'RFinal': 3 };
   scoredRaces.sort((a, b) => (flagOrder[a.scoring_flag] || 0) - (flagOrder[b.scoring_flag] || 0));
 
-  const exportBtn = `<button class="btn btn-outline btn-sm" onclick="window._exportOverallRanks('${divId}')" title="Export just the overall standings (Rank / Team / per-round / Total) as an .xlsx for the scoring team."><i class="material-icons" style="font-size:15px;">file_download</i> Export overall ranks</button>`;
+  const exportBtn = `<button class="btn btn-outline btn-sm" onclick="window._exportOverallRanks('${divId}')" title="Export the standings table (sections + overall) as an .xlsx for the scoring team."><i class="material-icons" style="font-size:15px;">file_download</i> Export table</button>`;
+
+  // ── Tiered division (Gold/Silver/Bronze + Bowl) — any round has tier_order ──
+  const rounds = await getDivisionRounds(parseInt(divId, 10)).catch(() => []);
+  if ((rounds || []).some(r => r.tier_order != null && r.tier_order > 0)) {
+    await renderTieredScoringDiv(content, div, rounds, scoredRaces, laneCount, timeMode, exportBtn);
+    return;
+  }
 
   // ── Time-scored divisions (methods #1/#2) render their own table ──
   const method = div?.standings_method || 'points';
@@ -377,6 +384,65 @@ async function renderTimeScoringDiv(content, div, scoredRaces, laneCount, timeMo
             Times are the exported (hundredth) times; full ms breaks ties.
           </p>`
       }
+    </div>
+  `;
+}
+
+/**
+ * Tiered division (Gold/Silver/Bronze cups + Bowl). Renders one section per
+ * tier (in tier order) showing each team's section rank + time, plus the
+ * stacked overall rank. Exportable via the same "Export table" button.
+ */
+async function renderTieredScoringDiv(content, div, rounds, scoredRaces, laneCount, timeMode, exportBtn) {
+  const lanesByRace = new Map();
+  await Promise.all(scoredRaces.map(async r => lanesByRace.set(r.race_number, await getLaneResults(r.race_number))));
+  const standing = computeTieredStanding(div, rounds, scoredRaces, lanesByRace, laneCount, timeMode);
+
+  if (!standing || standing.tiers.length === 0) {
+    content.innerHTML = `<div class="card" style="margin-top:16px;"><p style="color:var(--text-tertiary); font-size:13px;">No tiers configured (set a Tier order on the final rounds in Setup → Divisions).</p></div>`;
+    return;
+  }
+
+  const tierBlock = (tier) => {
+    const methodLabel = tier.method === 'time_sum' ? 'summed time' : 'time';
+    const rows = tier.rows.slice().sort((a, b) => (a.section_rank ?? 9999) - (b.section_rank ?? 9999));
+    return `
+      <div style="margin-top:14px;">
+        <div style="font-weight:600; font-size:13px; margin-bottom:4px;">
+          ${tier.tier_name}
+          <span style="font-size:11px; color:var(--text-tertiary); font-weight:400;">— ranked by ${methodLabel}${tier.complete ? '' : ' · <span style="color:var(--warning-text,#b45309); font-weight:600;">TBC</span>'}</span>
+        </div>
+        <div style="overflow:auto;">
+          <table class="output-table">
+            <thead><tr>
+              <th>Section</th><th style="text-align:left;">Team</th><th>Code</th><th>Time</th><th>Overall</th>
+            </tr></thead>
+            <tbody>
+              ${rows.length === 0 ? '<tr><td colspan="5" style="color:var(--text-tertiary); font-size:12px;">No results yet.</td></tr>' : rows.map(row => `
+                <tr>
+                  <td class="cell-position ${row.section_rank === 1 ? 'first' : row.section_rank === 2 ? 'second' : row.section_rank === 3 ? 'third' : ''}">${row.section_rank ?? '—'}</td>
+                  <td class="team-name">${row.team_name || ''}</td>
+                  <td>${row.team_code || ''}</td>
+                  <td>${row.value_display || '—'}</td>
+                  <td style="font-weight:700;">${row.overall_rank == null ? 'TBC' : row.overall_rank}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>`;
+  };
+
+  content.innerHTML = `
+    <div class="card" style="margin-top:16px;">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:6px;">
+        <div>
+          <strong style="font-size:14px;">${div?.division_name || 'Division'}</strong>
+          <span style="font-size:12px; color:var(--text-tertiary); margin-left:10px;">Tiered standing — Overall stacks the tiers in order; each tier keeps its own Section rank.</span>
+        </div>
+        ${exportBtn}
+      </div>
+      ${standing.unresolvedTie ? '<p style="font-size:11px; color:var(--danger);"><strong>⚠ An unbroken tie needs manual resolution.</strong></p>' : ''}
+      ${standing.tiers.map(tierBlock).join('')}
     </div>
   `;
 }

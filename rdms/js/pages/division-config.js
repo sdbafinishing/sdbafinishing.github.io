@@ -375,6 +375,10 @@ async function showDivisionModal(editId) {
         the same Round # (parallel brackets — e.g. Cup Semi + Plate Semi both
         run on the same day). Race numbers accept ranges and lists:
         <code>1-3, 5, 7-9</code>.
+        Columns: <strong>#</strong> round, <strong>tier name</strong>, <strong>races</strong>,
+        <strong>Rank by</strong> (Points / Combined time / Sum time), and
+        <strong>ord</strong> = tier order in the <em>combined overall</em> standing
+        (Gold=1, Silver=2, Bronze=3, Bowl=4…; blank = not in the overall).
       </p>
       <div id="divRoundsList">
         ${existingRounds.length > 0
@@ -678,6 +682,8 @@ async function showDivisionModal(editId) {
       const tierName = row.querySelector('.round-tier')?.value?.trim() || '';
       const racesStr = row.querySelector('.round-races')?.value?.trim() || '';
       const rankMethod = row.querySelector('.round-rankmethod')?.value || 'points';
+      const tierOrderRaw = parseInt(row.querySelector('.round-tierorder')?.value, 10);
+      const tierOrder = Number.isFinite(tierOrderRaw) && tierOrderRaw > 0 ? tierOrderRaw : null;
       // Range-aware parser so "1-3, 5, 7-9" expands to [1,2,3,5,7,8,9].
       const raceNumbers = parseRaceRanges(racesStr);
 
@@ -688,6 +694,7 @@ async function showDivisionModal(editId) {
           tier_name: tierName,
           race_numbers: raceNumbers,
           rank_method: rankMethod,
+          tier_order: tierOrder,
         });
         savedRoundIds[idx] = id;
       }
@@ -855,17 +862,20 @@ function renderRoundRow(round, idx) {
   const races = formatRaceRanges(round.race_numbers || []);
   const rm = round.rank_method || 'points';
   return `
-    <div class="div-round-row" data-idx="${idx}" style="display:grid; grid-template-columns:48px 1.1fr 1.5fr 116px 28px; gap:6px; align-items:center; margin-bottom:6px;">
+    <div class="div-round-row" data-idx="${idx}" style="display:grid; grid-template-columns:42px 1fr 1.3fr 104px 56px 26px; gap:5px; align-items:center; margin-bottom:6px;">
       <input class="form-input round-num" type="number" min="1" max="9" value="${round.round_number || ''}"
              placeholder="#" style="text-align:center; font-size:13px; padding:4px;">
       <input class="form-input round-tier" type="text" value="${round.tier_name || ''}"
-             placeholder="e.g. Heats, Cup Semi, Gold Cup Final" style="font-size:13px; padding:4px 8px;">
+             placeholder="e.g. Heats, Gold Cup Final" style="font-size:13px; padding:4px 8px;">
       <input class="form-input round-races" type="text" value="${races}"
-             placeholder="Races: 1-3, 5, 7-9" style="font-size:13px; padding:4px 8px; font-family:monospace;">
-      <select class="form-select round-rankmethod" title="How teams in this round are ranked. Points = per-race place→points (default). Combined time = pool the round's races and rank by time (method #1)." style="font-size:11px; padding:4px 2px;">
+             placeholder="Races: 1-3, 5" style="font-size:13px; padding:4px 8px; font-family:monospace;">
+      <select class="form-select round-rankmethod" title="How teams in this round are ranked. Points = per-race place→points. Combined time = pool the round's races and rank by time (single final → place order). Sum of times = sum each team's times across the round's races (e.g. Bowl)." style="font-size:11px; padding:4px 2px;">
         <option value="points"${rm === 'points' ? ' selected' : ''}>Points</option>
         <option value="time_combined"${rm === 'time_combined' ? ' selected' : ''}>Comb. time</option>
+        <option value="time_sum"${rm === 'time_sum' ? ' selected' : ''}>Sum time</option>
       </select>
+      <input class="form-input round-tierorder" type="number" min="1" max="20" value="${round.tier_order || ''}"
+             title="Tier order in the OVERALL standing — Gold=1, Silver=2, Bronze=3, Bowl=4… Blank = not part of the combined overall standing." placeholder="ord" style="text-align:center; font-size:12px; padding:4px 2px;">
       <button class="btn-icon" onclick="window._divRemoveRound(${idx})" title="Remove" style="color:var(--danger); padding:2px;">
         <i class="material-icons" style="font-size:16px;">close</i>
       </button>
