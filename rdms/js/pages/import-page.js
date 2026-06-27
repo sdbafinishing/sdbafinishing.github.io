@@ -5,7 +5,7 @@
 import { importMultipleDrawFiles, parseDrawFile, parseJoyiFile, importJoyiToDb } from '../import.js';
 import { getRace } from '../db.js';
 import { extractRaceNumber } from '../utils.js';
-import { generateJoyiStartList, generateSprintTimerStartList } from '../startlist.js';
+import { generateJoyiStartList, generateSprintTimerStartList, maybeAutoSprintTimerStartList } from '../startlist.js';
 import { backupAfterSetup } from '../backup.js';
 import { showToast } from '../utils.js';
 import { broadcastChange } from '../app.js';
@@ -38,14 +38,38 @@ export async function mountImportPage(container) {
     renderImportTab(tab);
   };
 
+  // Auto-refresh the "Generate Next Round Draws" grid when draws are imported or
+  // a race updates — but only while that tab is the active one (debounced, so a
+  // bulk import re-renders once). Wired once here, not per tab-render.
+  if (importRefreshHandler) {
+    window.removeEventListener('rdms-draw-imported', importRefreshHandler);
+    window.removeEventListener('rdms-race-updated', importRefreshHandler);
+  }
+  let pending = null;
+  importRefreshHandler = () => {
+    const active = document.querySelector('.tab.active')?.dataset.tab;
+    if (active !== 'nextround') return;
+    clearTimeout(pending);
+    pending = setTimeout(() => renderImportTab('nextround'), 250);
+  };
+  window.addEventListener('rdms-draw-imported', importRefreshHandler);
+  window.addEventListener('rdms-race-updated', importRefreshHandler);
+
   renderImportTab('draws');
 }
+
+let importRefreshHandler = null;
 
 export function unmountImportPage() {
   delete window._importTab;
   delete window._importFromSourceFolder;
   delete window._genJoyiStartList;
   delete window._genSprintTimerStartList;
+  if (importRefreshHandler) {
+    window.removeEventListener('rdms-draw-imported', importRefreshHandler);
+    window.removeEventListener('rdms-race-updated', importRefreshHandler);
+    importRefreshHandler = null;
+  }
 }
 
 function renderImportTab(tab) {
@@ -380,8 +404,11 @@ async function handleDrawFiles(files) {
         await generateJoyiStartList();
         showToast('Joyi start list regenerated.', 'info', 3000);
       }
+      // SprintTimer list — only on the INITIAL import for this event (one-shot).
+      const madeSprint = await maybeAutoSprintTimerStartList();
+      if (madeSprint) showToast('SprintTimer start list generated (initial draw load).', 'info', 4000);
     } catch (err) {
-      console.warn('Auto-generate Joyi start list failed:', err);
+      console.warn('Auto-generate start lists failed:', err);
     }
   }
 }
@@ -486,16 +513,8 @@ async function renderNextRoundDrawsTab(container) {
     attachDivButtonHandlers(refresh);
   };
 
-  // Listen for draw-imported broadcasts (other tabs or our own generator
-  // finishing) so the grid refreshes without manual reload.
-  const onDrawImported = () => refresh();
-  window.addEventListener('rdms-draw-imported', onDrawImported);
-  window.addEventListener('rdms-race-updated', onDrawImported);
-  // Best-effort cleanup. Import page's unmount deletes window._importTab
-  // which is enough to invalidate stale closures; these listeners are
-  // idempotent if re-attached on re-mount.
-  container.dataset.nrdAttached = '1';
-
+  // Auto-refresh on draw-imported / race-updated is wired once at the page
+  // level (see mountImportPage) so it doesn't leak a listener per re-render.
   refresh();
 }
 

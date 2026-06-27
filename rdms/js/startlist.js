@@ -5,7 +5,7 @@
  */
 import * as XLSX from 'xlsx';
 import * as CFBmod from 'cfb';
-import { getConfig, getAllRaces, getLaneResults, getRace } from './db.js';
+import { getConfig, getAllRaces, getLaneResults, getRace, saveConfig } from './db.js';
 import { showToast, rowsToCsvBlob } from './utils.js';
 import { writeToBoth, downloadFallback } from './file-access.js';
 
@@ -291,4 +291,30 @@ export async function generateSprintTimerStartList() {
 
   showToast(`SprintTimer Start List saved: ${filename}`, 'success');
   return filename;
+}
+
+/**
+ * One-shot auto-export of the SprintTimer start list, for the INITIAL draw
+ * import of an event. The SprintTimer list depends only on race + lane count
+ * (not the actual draw teams), so re-importing updated draws for the same races
+ * needs no regen — we generate it once and set `sprinttimer_startlist_done` so
+ * subsequent imports skip it. Follows the same opt-in as the Joyi auto start
+ * list (`auto_start_list_on_import`, default ON). A New Event clears the config,
+ * so the flag resets and the next event regenerates on its first import.
+ *
+ * @returns {Promise<boolean>} true if it generated this time.
+ */
+export async function maybeAutoSprintTimerStartList() {
+  const cfg = await getConfig();
+  if (!cfg) return false;
+  if (cfg.auto_start_list_on_import === false) return false; // start-list automation off
+  if (cfg.sprinttimer_startlist_done) return false;          // already done (initial-load only)
+  try {
+    await generateSprintTimerStartList();
+    await saveConfig({ ...cfg, sprinttimer_startlist_done: true });
+    return true;
+  } catch (err) {
+    console.warn('Auto SprintTimer start list failed:', err);
+    return false;
+  }
 }

@@ -25,7 +25,7 @@ import { parseDrawFile, importDrawToDb } from './import.js';
 import { getConfig } from './db.js';
 import { showToast } from './utils.js';
 import { broadcastChange } from './app.js';
-import { generateJoyiStartList } from './startlist.js';
+import { generateJoyiStartList, maybeAutoSprintTimerStartList } from './startlist.js';
 
 const STORAGE_KEY = 'rdms-draw-watch-enabled';
 const DEFAULT_INTERVAL_MS = 8000; // slightly slower than Joyi — draws don't change as often
@@ -185,6 +185,8 @@ async function scanOnce() {
         if (cfg?.auto_start_list_on_import !== false) {
           await generateJoyiStartList();
         }
+        // SprintTimer list — only on the INITIAL import for this event.
+        await maybeAutoSprintTimerStartList();
       } catch (err) {
         console.warn('Draw watch: start list regen failed', err);
       }
