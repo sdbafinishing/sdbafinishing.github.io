@@ -248,6 +248,7 @@ export async function exportResults(raceNumber, options = {}) {
   let timeStanding = null;   // time methods (#1/#2) standing, when configured
   let tieredStanding = null; // tiered cups (seeding heats + tier finals)
   let raceIsFinal = false;   // this race sits in a tier (final) round
+  let finalShowTotals = false; // final round is itself time-ranked → fill totals
   if (race.division_id) {
     const division = (await getAllDivisions()).find(d => d.id === race.division_id) || null;
     const method = division?.standings_method || 'points';
@@ -284,6 +285,11 @@ export async function exportResults(raceNumber, options = {}) {
         tieredStanding = computeTieredStanding(division, rounds, scoredRaces, lanesByRace, laneCount, timeMode);
         const myRound = (rounds || []).find(r => (r.race_numbers || []).includes(raceNumber));
         raceIsFinal = !!(myRound && myRound.tier_order != null && myRound.tier_order > 0);
+        // Only fill Total Score / Total Place on a FINAL sheet when that final
+        // is itself ranked by combined/sum time. A normal-finish final (default
+        // / points) is decided by the boat's own Place (col E) — no cumulative
+        // total to show, so leave G/H blank.
+        finalShowTotals = !!(myRound && (myRound.rank_method === 'time_combined' || myRound.rank_method === 'time_sum'));
       } else if (method === 'points') {
         // Points divisions: untouched — exactly as before.
         scoreCtx = computeDivisionScoring(race, allRaces, lanesByRace, laneCount, timeMode);
@@ -399,7 +405,11 @@ export async function exportResults(raceNumber, options = {}) {
       // Total Time (G) + OVERALL rank (H). "TBC" until that phase completes.
       const teamCode = drawLane?.team_code || '';
       mods.push({ addr: `F${rowNum}`, value: '' });
-      if (raceIsFinal) {
+      if (raceIsFinal && !finalShowTotals) {
+        // Normal-finish final — the boat's Place (col E) is the result.
+        mods.push({ addr: `G${rowNum}`, value: '' });
+        mods.push({ addr: `H${rowNum}`, value: '' });
+      } else if (raceIsFinal) {
         const entry = teamCode ? tieredStanding.teamByCode?.get(teamCode) : null;
         if (entry && entry.overall_rank != null) {
           mods.push({ addr: `G${rowNum}`, value: entry.value_display || '' });
