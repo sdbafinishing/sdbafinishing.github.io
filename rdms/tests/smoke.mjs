@@ -1003,16 +1003,20 @@ group('Export template polish (print layout + Arial font)', () => {
     XLSX.read(out, { type: 'array' });
   });
 
-  test('applyRaceParityHeaderStyle — odd + even both re-parse, row1 repointed', () => {
+  test('applyRaceParityHeaderStyle — row 1 re-pointed by address, re-parses', () => {
+    // Address-based (robust to template re-saves that renumber styles): assert
+    // A1 is re-pointed to an APPENDED clone (index >= original cellXfs count),
+    // amber fill present for odd, and no corruption.
+    const origStyles = fflate.strFromU8(fflate.unzipSync(new Uint8Array(tpl))['xl/styles.xml']);
+    const origCount = parseInt((origStyles.match(/<cellXfs count="(\d+)">/) || [])[1] || '0', 10);
     for (const raceNo of [15, 16]) {
       const out = applyRaceParityHeaderStyle(tpl, raceNo);
       const files = fflate.unzipSync(new Uint8Array(out));
       const sheet = fflate.strFromU8(files['xl/worksheets/sheet1.xml']);
       const styles = fflate.strFromU8(files['xl/styles.xml']);
-      // Row 1 no longer points at the originals (they were swapped to clones).
-      if (/ s="37"/.test(sheet) || / s="38"/.test(sheet)) throw new Error(`row1 not repointed for race ${raceNo}`);
-      // Amber (FFC000) fill added for the odd-race title.
-      if (!/FFFFC000/.test(styles)) throw new Error('amber fill missing');
+      const a1s = parseInt((sheet.match(/<c r="A1"[^>]*\bs="(\d+)"/) || [])[1] || '-1', 10);
+      if (!(a1s >= origCount)) throw new Error(`A1 not re-pointed to a clone for race ${raceNo} (s=${a1s}, origCount=${origCount})`);
+      if (raceNo % 2 === 1 && !/FFFFC000/.test(styles)) throw new Error('amber fill missing (odd)');
       XLSX.read(out, { type: 'array' }); // corruption guard
     }
   });

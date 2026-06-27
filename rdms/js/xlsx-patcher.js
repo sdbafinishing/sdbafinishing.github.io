@@ -242,8 +242,6 @@ export function setContentFontArialXlsx(xlsxBytes) {
  * @returns {Uint8Array} patched xlsx bytes
  */
 export function applyRaceParityHeaderStyle(xlsxBytes, raceNumber) {
-  const ROW1_A = 37; // A1:C1
-  const ROW1_B = 38; // D1:I1
   const input = xlsxBytes instanceof Uint8Array ? xlsxBytes : new Uint8Array(xlsxBytes);
   const files = unzipSync(input);
   const STYLES_PATH = 'xl/styles.xml';
@@ -251,10 +249,16 @@ export function applyRaceParityHeaderStyle(xlsxBytes, raceNumber) {
   let styles = strFromU8(files[STYLES_PATH]);
   let sheet = strFromU8(files[SHEET_PATH]);
 
-  // Parse the existing xf list to clone the two row-1 xfs.
+  // Resolve the row-1 styles BY ADDRESS (A1 = title block, D1 = result/time
+  // block), not by hardcoded index — Excel renumbers style indices whenever the
+  // template is re-saved, which previously sent the amber fill to the wrong
+  // (bottom) cells. Then we re-point ONLY row-1 cells.
+  const sA = (sheet.match(/<c r="A1"[^>]*\bs="(\d+)"/) || [])[1];
+  const sB = (sheet.match(/<c r="D1"[^>]*\bs="(\d+)"/) || [])[1];
+  if (sA == null || sB == null) return xlsxBytes; // can't locate row 1 — bail
   const xfs = [...styles.matchAll(/<xf\b[^>]*?(?:\/>|>[\s\S]*?<\/xf>)/g)].map(m => m[0]);
-  const xfA = xfs[ROW1_A], xfB = xfs[ROW1_B];
-  if (!xfA || !xfB) return xlsxBytes; // template changed — bail safely
+  const xfA = xfs[+sA], xfB = xfs[+sB];
+  if (!xfA || !xfB) return xlsxBytes;
   const fontIdOf = (xf) => { const m = xf.match(/fontId="(\d+)"/); return m ? +m[1] : 0; };
 
   // Set/replace an attribute on an <xf ...> element.
@@ -310,11 +314,17 @@ export function applyRaceParityHeaderStyle(xlsxBytes, raceNumber) {
     .replace(/<cellXfs count="\d+">/, `<cellXfs count="${xfCount + 4}">`)
     .replace('</cellXfs>', `${xfA_odd}${xfB_odd}${xfA_even}${xfB_even}</cellXfs>`);
 
-  // Re-point row 1 (37/38 are row-1-only, so a global s= swap is safe).
+  // Re-point ONLY row-1 cells (r="X1"): the title block (sA) → useA, the
+  // result/time block (sB) → useB. Scoped to row 1 so cells elsewhere that
+  // happen to share the style index are never touched (the bottom-amber bug).
   const odd = (Number(raceNumber) % 2) === 1;
   const useA = odd ? idxOA : idxEA;
   const useB = odd ? idxOB : idxEB;
-  sheet = sheet.replace(/ s="37"/g, ` s="${useA}"`).replace(/ s="38"/g, ` s="${useB}"`);
+  sheet = sheet.replace(/<c r="([A-Z]+)1"([^>]*?)\bs="(\d+)"/g, (m, col, mid, s) => {
+    if (s === sA) return `<c r="${col}1"${mid}s="${useA}"`;
+    if (s === sB) return `<c r="${col}1"${mid}s="${useB}"`;
+    return m;
+  });
 
   files[STYLES_PATH] = strToU8(styles);
   files[SHEET_PATH] = strToU8(sheet);

@@ -12,7 +12,7 @@ import { backupAfterExport } from './backup.js';
 import { writeToBoth, writeToSourceSubfolder, downloadFallback } from './file-access.js';
 import { initDriveApi, isDriveApiConnected, writeDriveFileWithLink } from './drive-api.js';
 import { queueRaceSync } from './sync.js';
-import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx, setPrintLayoutXlsx, setContentFontArialXlsx, applyRaceParityHeaderStyle, setRemarksAlignmentXlsx } from './xlsx-patcher.js';
+import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx, setPrintLayoutXlsx, setContentFontArialXlsx, applyRaceParityHeaderStyle } from './xlsx-patcher.js';
 import raceTemplateUrl from '../templates/race-template.xlsx?url';
 
 // Single bundled xlsx template used for ALL race exports (results + next
@@ -416,10 +416,8 @@ export async function exportResults(raceNumber, options = {}) {
   templateBytes = setPrintLayoutXlsx(templateBytes);
   // T3: Latin text → Arial (Chinese cells keep their CJK font).
   templateBytes = setContentFontArialXlsx(templateBytes);
-  // T4: title row coloured by race parity (odd = yellow bg, even = red text).
+  // T4: title row coloured by race parity (odd = FFC000 bg/black, even = white/red).
   templateBytes = applyRaceParityHeaderStyle(templateBytes, raceNumber);
-  // T6: Remarks column left/top/wrap (notes read better than centred).
-  templateBytes = setRemarksAlignmentXlsx(templateBytes);
   const patched = patchXlsxCells(templateBytes, mods);
   const xlsBlob = new Blob([patched]);
   const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
