@@ -108,7 +108,13 @@ export async function mountScoringPage(container) {
     if (btn) { btn.disabled = true; btn.textContent = 'Recomputing…'; }
     try {
       let touchedRaces = 0;
-      for (const r of scoredRaces) {
+      // Every race shown across all division tabs (deduped).
+      const seen = new Set();
+      const racesToRecompute = Object.values(divGroups).flat().filter(r => {
+        if (seen.has(r.race_number)) return false;
+        seen.add(r.race_number); return true;
+      });
+      for (const r of racesToRecompute) {
         const lanes = await getLaneResults(r.race_number);
         if (!lanes.length) continue;
         computeRankings(lanes, timeMode, 0);
@@ -489,7 +495,7 @@ function seedingBlock(seeding) {
     <div style="margin-top:14px; padding:8px 10px; border:1px dashed var(--border); border-radius:var(--radius-sm);">
       <div style="font-weight:600; font-size:13px; margin-bottom:4px;">
         Summed standings — ${seeding.label}
-        <span style="font-size:11px; color:var(--text-tertiary); font-weight:400;">— seeding basis (sum of heat times)${seeding.complete ? '' : ' · <span style="color:var(--warning-text,#b45309); font-weight:600;">in progress</span>'}</span>
+        <span style="font-size:11px; color:var(--text-tertiary); font-weight:400;">— seeding basis (sum of heat times)${seeding.complete ? '' : ' · <span style="color:var(--warning-text,#b45309); font-weight:600;">so far</span>'}</span>
       </div>
       <div style="overflow:auto;">
         <table class="output-table">

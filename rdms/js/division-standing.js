@@ -237,7 +237,10 @@ export function computeTieredStanding(division, rounds, scoredRaces, lanesByRace
         });
       }
     }
-    const { teams, unresolvedTies } = sumTimeStandings(seedRacesLanes, timeMode, null, roundByRace);
+    // partial=true → show the so-far ranking (e.g. after Heats Rnd 1 only),
+    // like the points model's "(so far)" totals. Full seeding for the draws
+    // still requires every round (the draw-gen resolver uses partial=false).
+    const { teams, unresolvedTies } = sumTimeStandings(seedRacesLanes, timeMode, null, roundByRace, true);
     if (unresolvedTies.length) result.unresolvedTie = true;
     const seedComplete = nonTierRounds.every(rd =>
       (rd.race_numbers || []).filter(n => byNum.has(n)).every(n => DONE.has(byNum.get(n).status)));

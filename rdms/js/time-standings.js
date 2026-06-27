@@ -97,7 +97,7 @@ export function pooledTimeStandings(racesLanes, timeMode = 'mss00') {
  *   map each race is treated as its own round (back-compat).
  * @returns {{teams: object[], incomplete: object[], unresolvedTies: object[]}}
  */
-export function sumTimeStandings(racesLanes, timeMode = 'mss00', finalRaceNumbers = null, roundByRace = null) {
+export function sumTimeStandings(racesLanes, timeMode = 'mss00', finalRaceNumbers = null, roundByRace = null, partial = false) {
   rankAll(racesLanes, timeMode);
 
   const finalSet = new Set(
@@ -150,10 +150,13 @@ export function sumTimeStandings(racesLanes, timeMode = 'mss00', finalRaceNumber
   }
 
   const all = [...byTeam.values()];
-  // A team must have a usable time in EVERY round to get a sum rank; otherwise
-  // its total is incomplete and it sinks below the ranked teams.
-  const ranked = all.filter(t => t.roundsCovered.size >= expectedRounds && t.sum_exported > 0);
-  const incomplete = all.filter(t => !(t.roundsCovered.size >= expectedRounds && t.sum_exported > 0));
+  // For a FINAL sum rank a team must have a time in every round. For a `partial`
+  // (so-far) display we rank everyone with any time by their current sum — in
+  // split heats every team has the same number of completed legs at any point,
+  // so the partial order is meaningful (e.g. after Heats Rnd 1 only).
+  const isRanked = (t) => t.sum_exported > 0 && (partial || t.roundsCovered.size >= expectedRounds);
+  const ranked = all.filter(isRanked);
+  const incomplete = all.filter(t => !isRanked(t));
 
   ranked.sort((a, b) =>
     a.sum_exported - b.sum_exported
