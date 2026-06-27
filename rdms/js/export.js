@@ -12,7 +12,7 @@ import { backupAfterExport } from './backup.js';
 import { writeToBoth, writeToSourceSubfolder, downloadFallback } from './file-access.js';
 import { initDriveApi, isDriveApiConnected, writeDriveFileWithLink } from './drive-api.js';
 import { queueRaceSync } from './sync.js';
-import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx, setPrintLayoutXlsx, setContentFontArialXlsx, applyRaceParityHeaderStyle } from './xlsx-patcher.js';
+import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx, setPrintLayoutXlsx, setContentFontArialXlsx, applyRaceParityHeaderStyle, applyHeaderBordersXlsx } from './xlsx-patcher.js';
 import raceTemplateUrl from '../templates/race-template.xlsx?url';
 
 // Single bundled xlsx template used for ALL race exports (results + next
@@ -474,6 +474,9 @@ export async function exportResults(raceNumber, options = {}) {
   templateBytes = setContentFontArialXlsx(templateBytes);
   // T4: title row coloured by race parity (odd = FFC000 bg/black, even = white/red).
   templateBytes = applyRaceParityHeaderStyle(templateBytes, raceNumber);
+  // Bold box borders on the header blocks (A1:C1, D1:I1, D2:H3). MUST run after
+  // parity (clones the parity-coloured row-1 styles, adding borders).
+  templateBytes = applyHeaderBordersXlsx(templateBytes);
   const patched = patchXlsxCells(templateBytes, mods);
   const xlsBlob = new Blob([patched]);
   const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';

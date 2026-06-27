@@ -10,7 +10,7 @@
  */
 import { computeRankings, validateRace, computeDivisionScoring, computeVarianceWarnings, getEffectiveStartTime } from '../js/race.js';
 import { joyiTimeToMs, joyiTimeHasMsPrecision, joyiTimeToRaw, msToTime } from '../js/utils.js';
-import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx, setPrintLayoutXlsx, setContentFontArialXlsx, applyRaceParityHeaderStyle, setRemarksAlignmentXlsx } from '../js/xlsx-patcher.js';
+import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx, setPrintLayoutXlsx, setContentFontArialXlsx, applyRaceParityHeaderStyle, applyHeaderBordersXlsx, setRemarksAlignmentXlsx } from '../js/xlsx-patcher.js';
 import { photoFinishPngFilename, autoCropRange } from '../js/photo-finish-png.js';
 import { computeChainScoringFlags } from '../js/division-scoring.js';
 import { parsePlaceholder, parseRaceList } from '../js/placeholders.js';
@@ -983,16 +983,42 @@ group('Export template polish (print layout + Arial font)', () => {
     XLSX.read(out, { type: 'array' });
   });
 
-  test('full chain (resize → header → layout → font → parity → patch) stays valid', () => {
+  test('full chain (resize → header → layout → font → parity → borders → patch) stays valid', () => {
     let b = resizeLaneRowsXlsx(tpl, 12);
     b = setPageHeaderXlsx(b, 'Official Long Name 2026', '官方長名稱 2026');
     b = setPrintLayoutXlsx(b);
     b = setContentFontArialXlsx(b);
     b = applyRaceParityHeaderStyle(b, 15); // odd
+    b = applyHeaderBordersXlsx(b);
     b = patchXlsxCells(b, [{ addr: 'B4', value: 'Team X' }, { addr: 'E4', value: '1' }]);
     const wb = XLSX.read(b, { type: 'array' });
     const ws = wb.Sheets[wb.SheetNames[0]];
     eq(ws.B4?.v, 'Team X');
+  });
+
+  test('applyHeaderBordersXlsx — header boxes get medium borders, counts consistent, re-parses', () => {
+    // Run after parity (mirrors the export chain) so it must preserve the
+    // parity-coloured row-1 styles while adding borders.
+    const b = applyHeaderBordersXlsx(applyRaceParityHeaderStyle(tpl, 15));
+    const files = fflate.unzipSync(new Uint8Array(b));
+    const styles = fflate.strFromU8(files['xl/styles.xml']);
+    const sheet = fflate.strFromU8(files['xl/worksheets/sheet1.xml']);
+    // Counts must equal actual element counts (else Excel "repair").
+    const bAttr = parseInt((styles.match(/<borders count="(\d+)">/) || [])[1], 10);
+    const bActual = (styles.match(/<border\b/g) || []).length;
+    if (bAttr !== bActual) throw new Error(`borders count ${bAttr} != ${bActual}`);
+    const cellXfsBlock = styles.match(/<cellXfs[\s\S]*?<\/cellXfs>/)[0];
+    const xAttr = parseInt((cellXfsBlock.match(/<cellXfs count="(\d+)">/) || [])[1], 10);
+    const xActual = (cellXfsBlock.match(/<xf\b/g) || []).length;
+    if (xAttr !== xActual) throw new Error(`cellXfs count ${xAttr} != ${xActual}`);
+    if (!/style="medium"/.test(styles)) throw new Error('no medium border added');
+    // A1 (left edge of A1:C1) must point to an xf whose border has a medium left.
+    const xfs = [...cellXfsBlock.matchAll(/<xf\b[^>]*?(?:\/>|>[\s\S]*?<\/xf>)/g)].map(m => m[0]);
+    const borders = [...styles.matchAll(/<border\b[^>]*?(?:\/>|>[\s\S]*?<\/border>)/g)].map(m => m[0]);
+    const a1s = parseInt((sheet.match(/<c r="A1"[^>]*?\bs="(\d+)"/) || [])[1], 10);
+    const a1b = parseInt((xfs[a1s].match(/borderId="(\d+)"/) || [])[1], 10);
+    if (!/<left style="medium"/.test(borders[a1b])) throw new Error('A1 missing medium left border');
+    XLSX.read(b, { type: 'array' }); // corruption guard
   });
 
   test('setRemarksAlignmentXlsx — column I re-pointed to left/top, re-parses', () => {

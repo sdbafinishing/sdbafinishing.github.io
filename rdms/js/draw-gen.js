@@ -29,8 +29,8 @@
 import {
   getConfig, getRace, getLaneResults, bulkSaveLaneResults, saveRace, getDivisionRounds,
 } from './db.js';
-import { writeToBoth, downloadFallback } from './file-access.js';
-import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx, setPrintLayoutXlsx, setContentFontArialXlsx, applyRaceParityHeaderStyle } from './xlsx-patcher.js';
+import { writeToBoth, writeToSourceSubfolder, downloadFallback } from './file-access.js';
+import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx, setPrintLayoutXlsx, setContentFontArialXlsx, applyRaceParityHeaderStyle, applyHeaderBordersXlsx } from './xlsx-patcher.js';
 import { parsePlaceholder } from './placeholders.js';
 import { pooledTimeStandings, sumTimeStandings } from './time-standings.js';
 import raceTemplateUrl from '../templates/race-template.xlsx?url';
@@ -147,8 +147,28 @@ export async function generateNextRoundDraw(targetRaceNumber, opts = {}) {
   const lanesByRace = new Map();
   const batchByRace = new Map();
   for (const rn of sourceRaceNums) {
-    lanesByRace.set(rn, await getLaneResults(rn));
     const srcRace = await getRace(rn);
+    let lanes = await getLaneResults(rn);
+    // Correct team identity from the draw snapshot before the standings run.
+    // Joyi imports can clobber (or blank) team_name/team_code on lane rows, and
+    // the pooled/sum standings GROUP teams by team_code — a blank/wrong code
+    // mis-seeds (or collapses) the field. draw_lanes (by boat lane) is
+    // authoritative; this mirrors the scoring engine's correctedLanesFor so the
+    // generated draw matches what the result sheet ranks.
+    const draw = Array.isArray(srcRace?.draw_lanes) ? srcRace.draw_lanes : [];
+    if (draw.length) {
+      lanes = lanes.map(lr => {
+        const boat = parseInt(lr.lane_input, 10) || lr.lane_number;
+        const dt = draw.find(d => d.lane_number === boat);
+        if (!dt) return lr;
+        return {
+          ...lr,
+          team_name: dt.team_name || lr.team_name,
+          team_code: dt.team_code || lr.team_code || lr.team_name,
+        };
+      });
+    }
+    lanesByRace.set(rn, lanes);
     batchByRace.set(rn, srcRace?.batch_override_enabled ? (srcRace.batch_delta_ms || 0) : 0);
     if (!srcRace) {
       warnings.push(`Race ${rn} not found — placeholders pointing at it cannot be resolved.`);
@@ -358,6 +378,8 @@ async function renderDrawBlob(race, laneRows) {
   templateBytes = setContentFontArialXlsx(templateBytes);
   // T4: title-row parity colour, same as the result sheet.
   templateBytes = applyRaceParityHeaderStyle(templateBytes, raceNumber);
+  // Bold box borders (A1:C1, D1:I1, D2:H3) — after parity, before patch.
+  templateBytes = applyHeaderBordersXlsx(templateBytes);
   const patched = patchXlsxCells(templateBytes, mods);
   return new Blob([patched]);
 }
@@ -403,6 +425,8 @@ async function writeDrawFile(race, laneRows) {
   templateBytes = setContentFontArialXlsx(templateBytes);
   // T4: title-row parity colour, same as the result sheet.
   templateBytes = applyRaceParityHeaderStyle(templateBytes, raceNumber);
+  // Bold box borders (A1:C1, D1:I1, D2:H3) — after parity, before patch.
+  templateBytes = applyHeaderBordersXlsx(templateBytes);
   const patched = patchXlsxCells(templateBytes, mods);
   const blob = new Blob([patched]);
 
@@ -414,7 +438,11 @@ async function writeDrawFile(race, laneRows) {
     '13 Output_Next Round Draws', filename, blob,
     `80 Shared/${ref}_Next_Round_Draws`,
   );
-  if (!local && !shared) downloadFallback(filename, blob);
+  // Also drop a copy into 01 Input_Draw/ so RDMS's draw importer (and the
+  // auto-poller) can consume the generated next-round draw exactly like an
+  // operator-supplied draw file — same filename convention ({race}.xls).
+  const inputDraw = await writeToSourceSubfolder('01 Input_Draw', filename, blob);
+  if (!local && !shared && !inputDraw) downloadFallback(filename, blob);
 
   return filename;
 }

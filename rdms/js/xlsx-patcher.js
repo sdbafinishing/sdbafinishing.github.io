@@ -332,6 +332,101 @@ export function applyRaceParityHeaderStyle(xlsxBytes, raceNumber) {
 }
 
 /**
+ * Draw medium ("bold") box borders around the three header blocks the bundled
+ * template ships WITHOUT any border: A1:C1 (title), D1:I1 (time) and D2:H3 (the
+ * "成績 Result" header block). Excel stores borders per-cell, so each box edge
+ * is applied to its constituent cells. We clone each target cell's CURRENT
+ * style — preserving its fill / font / alignment, including the parity colours,
+ * since this MUST run AFTER applyRaceParityHeaderStyle — and only swap in a
+ * borderId carrying the needed medium edges. Pure styles.xml + sheet1.xml edit;
+ * re-parse-guarded. Apply BEFORE patchXlsxCells (which preserves s=).
+ *
+ * @returns {Uint8Array} patched xlsx bytes
+ */
+export function applyHeaderBordersXlsx(xlsxBytes) {
+  const input = xlsxBytes instanceof Uint8Array ? xlsxBytes : new Uint8Array(xlsxBytes);
+  const files = unzipSync(input);
+  const STYLES_PATH = 'xl/styles.xml';
+  if (!files[STYLES_PATH] || !files[SHEET_PATH]) return xlsxBytes;
+  let styles = strFromU8(files[STYLES_PATH]);
+  let sheet = strFromU8(files[SHEET_PATH]);
+
+  // Per-cell edge sets for each box (outer perimeter only).
+  const COLS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L'];
+  const edgeMap = new Map(); // addr -> Set<'left'|'right'|'top'|'bottom'>
+  const addEdge = (addr, side) => {
+    if (!edgeMap.has(addr)) edgeMap.set(addr, new Set());
+    edgeMap.get(addr).add(side);
+  };
+  const box = (cStart, cEnd, rStart, rEnd) => {
+    const c0 = COLS.indexOf(cStart), c1 = COLS.indexOf(cEnd);
+    for (let r = rStart; r <= rEnd; r++) {
+      for (let ci = c0; ci <= c1; ci++) {
+        const addr = `${COLS[ci]}${r}`;
+        if (r === rStart) addEdge(addr, 'top');
+        if (r === rEnd) addEdge(addr, 'bottom');
+        if (ci === c0) addEdge(addr, 'left');
+        if (ci === c1) addEdge(addr, 'right');
+      }
+    }
+  };
+  box('A', 'C', 1, 1);
+  box('D', 'I', 1, 1);
+  box('D', 'H', 2, 3);
+
+  const xfs = [...styles.matchAll(/<xf\b[^>]*?(?:\/>|>[\s\S]*?<\/xf>)/g)].map(m => m[0]);
+  const borderCount = parseInt((styles.match(/<borders count="(\d+)">/) || [])[1] || '0', 10);
+  const xfCount = parseInt((styles.match(/<cellXfs count="(\d+)">/) || [])[1] || '0', 10);
+  if (!xfs.length) return xlsxBytes;
+
+  const med = (side, on) => on
+    ? `<${side} style="medium"><color indexed="64"/></${side}>`
+    : `<${side}/>`;
+  const borderEl = (edges) =>
+    `<border>${med('left', edges.has('left'))}${med('right', edges.has('right'))}` +
+    `${med('top', edges.has('top'))}${med('bottom', edges.has('bottom'))}<diagonal/></border>`;
+  const xfSet = (xf, name, value) => (new RegExp(`\\b${name}="[^"]*"`).test(xf)
+    ? xf.replace(new RegExp(`\\b${name}="[^"]*"`), `${name}="${value}"`)
+    : xf.replace(/^<xf\b/, `<xf ${name}="${value}"`));
+  const styleOf = (addr) => {
+    const m = sheet.match(new RegExp(`<c r="${addr}"[^>]*?\\bs="(\\d+)"`));
+    return m ? +m[1] : null;
+  };
+
+  const newBorders = [], newXfs = [], repoint = [];
+  const dedupe = new Map(); // `${origStyle}|${edgeKey}` -> new xf index
+  for (const [addr, edges] of edgeMap) {
+    const s = styleOf(addr);
+    if (s == null || !xfs[s]) continue;
+    const edgeKey = ['left', 'right', 'top', 'bottom'].filter(e => edges.has(e)).join(',');
+    const key = `${s}|${edgeKey}`;
+    let idx = dedupe.get(key);
+    if (idx == null) {
+      const bId = borderCount + newBorders.length;
+      newBorders.push(borderEl(edges));
+      idx = xfCount + newXfs.length;
+      newXfs.push(xfSet(xfSet(xfs[s], 'borderId', bId), 'applyBorder', '1'));
+      dedupe.set(key, idx);
+    }
+    repoint.push({ addr, newIdx: idx });
+  }
+  if (!newXfs.length) return xlsxBytes;
+
+  styles = styles
+    .replace(/<borders count="\d+">/, `<borders count="${borderCount + newBorders.length}">`)
+    .replace('</borders>', `${newBorders.join('')}</borders>`)
+    .replace(/<cellXfs count="\d+">/, `<cellXfs count="${xfCount + newXfs.length}">`)
+    .replace('</cellXfs>', `${newXfs.join('')}</cellXfs>`);
+  for (const { addr, newIdx } of repoint) {
+    sheet = sheet.replace(new RegExp(`(<c r="${addr}"[^>]*?\\b)s="\\d+"`), `$1s="${newIdx}"`);
+  }
+
+  files[STYLES_PATH] = strToU8(styles);
+  files[SHEET_PATH] = strToU8(sheet);
+  return zipSync(files);
+}
+
+/**
  * T6 — Remarks column alignment. The lane-row Remarks cells (column I) ship
  * centred (center/center), which reads wrong for free-text notes. Re-align them
  * to left / top / wrap (matching the Team-name column + the footnote), to match
