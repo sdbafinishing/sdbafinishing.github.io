@@ -834,6 +834,19 @@ group('Sum time standings (method #2)', () => {
     eq(teams.map(t => t.team_code), ['A', 'B']);
     eq(teams.find(t => t.team_code === 'A').overall_rank, 1);
   });
+  test('sum across SPLIT HEATS (one race per round) — round-aware', () => {
+    const races = [
+      { race_number: 1, lanes: [_lane(1, 'A', '12000'), _lane(2, 'B', '12500')] }, // round R1
+      { race_number: 2, lanes: [_lane(1, 'C', '11800'), _lane(2, 'D', '12200')] }, // round R1
+      { race_number: 3, lanes: [_lane(1, 'A', '11500'), _lane(2, 'C', '11000')] }, // round R2
+      { race_number: 4, lanes: [_lane(1, 'B', '12000'), _lane(2, 'D', '11700')] }, // round R2
+    ];
+    const roundByRace = { 1: 'R1', 2: 'R1', 3: 'R2', 4: 'R2' };
+    const { teams, incomplete } = sumTimeStandings(races, 'mss00', null, roundByRace);
+    // C=148000, A=155000, D=159000, B=165000
+    eq(teams.map(t => t.team_code), ['C', 'A', 'D', 'B']);
+    eq(incomplete.length, 0);
+  });
   test('team missing a leg is excluded from the ranked total', () => {
     const races = [
       { race_number: 1, lanes: [_lane(1, 'A', '12000'), _lane(2, 'B', '12500')] },

@@ -90,9 +90,14 @@ export function pooledTimeStandings(racesLanes, timeMode = 'mss00') {
  * @param {number[]} finalRaceNumbers - races that make up the FINAL round; a
  *   team's rank there is the first tiebreaker. Defaults to the highest race
  *   number present.
+ * @param {Object<number,(string|number)>} [roundByRace] - race_number → round
+ *   id. Sum is one leg PER ROUND, not per race — for SPLIT HEATS (a team races
+ *   once per round across different races, e.g. round 1 = races 1-2, round 2 =
+ *   races 3-4) a team must complete every ROUND, not every race. Without this
+ *   map each race is treated as its own round (back-compat).
  * @returns {{teams: object[], incomplete: object[], unresolvedTies: object[]}}
  */
-export function sumTimeStandings(racesLanes, timeMode = 'mss00', finalRaceNumbers = null) {
+export function sumTimeStandings(racesLanes, timeMode = 'mss00', finalRaceNumbers = null, roundByRace = null) {
   rankAll(racesLanes, timeMode);
 
   const finalSet = new Set(
@@ -100,9 +105,12 @@ export function sumTimeStandings(racesLanes, timeMode = 'mss00', finalRaceNumber
       ? finalRaceNumbers
       : [Math.max(...racesLanes.map(r => r.race_number))],
   );
+  const roundOf = (rn) => (roundByRace && roundByRace[rn] != null) ? roundByRace[rn] : rn;
+  const expectedRounds = new Set(racesLanes.map(r => roundOf(r.race_number))).size;
 
   const byTeam = new Map();
   for (const r of racesLanes) {
+    const roundId = roundOf(r.race_number);
     for (const lr of r.lanes) {
       const code = lr.team_code || '';
       if (!code) continue;
@@ -114,7 +122,7 @@ export function sumTimeStandings(racesLanes, timeMode = 'mss00', finalRaceNumber
           sum_exported: 0,
           sum_full: 0,
           perRace: {},
-          racesCounted: 0,
+          roundsCovered: new Set(),
           final_rank: null,
         };
         byTeam.set(code, t);
@@ -122,10 +130,14 @@ export function sumTimeStandings(racesLanes, timeMode = 'mss00', finalRaceNumber
       if (lr.team_name) t.team_name = lr.team_name; // keep freshest real name
       const ms = laneExportedMs(lr);
       if (ms) {
-        t.sum_exported += ms.trunc;
-        t.sum_full += ms.full;
+        // Count one leg per round (dedup) so a team can't double-count if a
+        // round somehow has them in two races; per-race detail still recorded.
+        if (!t.roundsCovered.has(roundId)) {
+          t.sum_exported += ms.trunc;
+          t.sum_full += ms.full;
+          t.roundsCovered.add(roundId);
+        }
         t.perRace[r.race_number] = { exported_ms: ms.trunc, full_ms: ms.full, position: lr.computed_position };
-        t.racesCounted += 1;
       } else {
         // Present in the draw but no usable time (DNS/DSQ) — record it so the
         // caller can see the team didn't complete every leg.
@@ -137,12 +149,11 @@ export function sumTimeStandings(racesLanes, timeMode = 'mss00', finalRaceNumber
     }
   }
 
-  const expectedRaces = racesLanes.length;
   const all = [...byTeam.values()];
-  // A team must have a usable time in EVERY race to get a sum rank; otherwise
+  // A team must have a usable time in EVERY round to get a sum rank; otherwise
   // its total is incomplete and it sinks below the ranked teams.
-  const ranked = all.filter(t => t.racesCounted >= expectedRaces && t.sum_exported > 0);
-  const incomplete = all.filter(t => !(t.racesCounted >= expectedRaces && t.sum_exported > 0));
+  const ranked = all.filter(t => t.roundsCovered.size >= expectedRounds && t.sum_exported > 0);
+  const incomplete = all.filter(t => !(t.roundsCovered.size >= expectedRounds && t.sum_exported > 0));
 
   ranked.sort((a, b) =>
     a.sum_exported - b.sum_exported

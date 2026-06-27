@@ -27,7 +27,7 @@
  * first one encountered wins and a warning surfaces in the return value.
  */
 import {
-  getConfig, getRace, getLaneResults, bulkSaveLaneResults, saveRace,
+  getConfig, getRace, getLaneResults, bulkSaveLaneResults, saveRace, getDivisionRounds,
 } from './db.js';
 import { writeToBoth, downloadFallback } from './file-access.js';
 import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx, setPrintLayoutXlsx, setContentFontArialXlsx, applyRaceParityHeaderStyle, setRemarksAlignmentXlsx } from './xlsx-patcher.js';
@@ -134,6 +134,15 @@ export async function generateNextRoundDraw(targetRaceNumber, opts = {}) {
   // the same effective time the result sheet exports.
   const config = await getConfig();
   const timeMode = config?.time_format_mode || 'mss00';
+  // race → round map so SUM placeholders count one leg per round (split heats).
+  const roundByRace = {};
+  if (race.division_id != null) {
+    try {
+      for (const rd of (await getDivisionRounds(race.division_id))) {
+        for (const rn of (rd.race_numbers || [])) roundByRace[rn] = rd.id ?? rd.round_number;
+      }
+    } catch { /* no rounds → each race is its own round (back-compat) */ }
+  }
   const sourceRaceNums = [...new Set(placeholders.flatMap(p => p.races))];
   const lanesByRace = new Map();
   const batchByRace = new Map();
@@ -166,7 +175,7 @@ export async function generateNextRoundDraw(targetRaceNumber, opts = {}) {
   };
   const sumFor = (races) => {
     const key = races.join(',');
-    if (!sumCache.has(key)) sumCache.set(key, sumTimeStandings(racesLanesFor(races), timeMode));
+    if (!sumCache.has(key)) sumCache.set(key, sumTimeStandings(racesLanesFor(races), timeMode, null, roundByRace));
     return sumCache.get(key);
   };
 

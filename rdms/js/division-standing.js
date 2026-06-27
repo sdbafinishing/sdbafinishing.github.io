@@ -123,7 +123,13 @@ export function computeDivisionStanding(division, rounds, scoredRaces, lanesByRa
     }
     complete = scoredRaces.filter(r => finalRaceNums.includes(r.race_number)).every(r => DONE.has(r.status));
   } else { // time_sum
-    const { teams, unresolvedTies } = sumTimeStandings(racesLanes, timeMode, finalRaceNums);
+    // Map race → round so the sum counts one leg PER ROUND (split heats: a team
+    // races once per round across different races).
+    const roundByRace = {};
+    for (const rd of (rounds || [])) {
+      for (const rn of (rd.race_numbers || [])) roundByRace[rn] = rd.id ?? rd.round_number;
+    }
+    const { teams, unresolvedTies } = sumTimeStandings(racesLanes, timeMode, finalRaceNums, roundByRace);
     unresolvedTie = unresolvedTies.length > 0;
     for (const t of teams) {
       teamTotals.set(t.team_code || t.team_name, {
