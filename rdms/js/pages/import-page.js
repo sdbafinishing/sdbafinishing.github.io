@@ -72,6 +72,13 @@ export function unmountImportPage() {
   }
 }
 
+// Push the full schedule (config + all race snapshots) to Supabase so the
+// online viewer reflects the current state. Fire-and-forget; forceFullSync
+// swallows its own errors.
+function pushAllRacesToSupabase() {
+  import('../sync.js').then(m => m.forceFullSync()).catch(() => {});
+}
+
 function renderImportTab(tab) {
   const content = document.getElementById('importTabContent');
   if (!content) return;
@@ -106,6 +113,7 @@ function renderImportTab(tab) {
       try {
         await generateJoyiStartList();
         showToast('Copy the Joyi Start List to the Joyi camera system.', 'warning', 6000);
+        pushAllRacesToSupabase();
       } catch (err) {
         showToast('Start list error: ' + err.message, 'error');
       }
@@ -114,6 +122,7 @@ function renderImportTab(tab) {
       try {
         await generateSprintTimerStartList();
         showToast('Copy the SprintTimer Start List to the SprintTimer system.', 'warning', 6000);
+        pushAllRacesToSupabase();
       } catch (err) {
         showToast('Start list error: ' + err.message, 'error');
       }
