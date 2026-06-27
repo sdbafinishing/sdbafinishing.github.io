@@ -5,7 +5,7 @@
  */
 import { getConfig, getRace, saveRace, getLaneResults, bulkSaveLaneResults, getAllRaces, getAllDivisions, getDivisionRounds, saveTimesheet, getTimesheet } from './db.js';
 import { computeRankings, computeDivisionScoring } from './race.js';
-import { computeDivisionStanding } from './division-standing.js';
+import { computeDivisionStanding, computeTieredStanding } from './division-standing.js';
 import { timeToDisplay, msToTime, nowISO, isoToTime, showToast } from './utils.js';
 import { broadcastChange } from './app.js';
 import { backupAfterExport } from './backup.js';
@@ -244,30 +244,54 @@ export async function exportResults(raceNumber, options = {}) {
   // Place columns when the race is on a scored chain. Total Score +
   // Total Place are only meaningful AFTER the final round; for R1/R2
   // exports we leave them blank to avoid misleading mid-series totals.
-  let scoreCtx = null;     // points model (unchanged path)
-  let timeStanding = null; // time methods (#1/#2) standing, when configured
-  if (race.scoring_flag && race.scoring_flag !== 'N' && race.division_id) {
-    const allRaces = await getAllRaces();
-    const scoredRaces = allRaces.filter(r =>
-      r.division_id === race.division_id && r.scoring_flag && r.scoring_flag !== 'N');
-    const lanesByRace = new Map();
-    for (const r of scoredRaces) {
-      lanesByRace.set(r.race_number, await getLaneResults(r.race_number));
-    }
+  let scoreCtx = null;       // points model (unchanged path)
+  let timeStanding = null;   // time methods (#1/#2) standing, when configured
+  let tieredStanding = null; // tiered cups (seeding heats + tier finals)
+  let raceIsFinal = false;   // this race sits in a tier (final) round
+  if (race.division_id) {
     const division = (await getAllDivisions()).find(d => d.id === race.division_id) || null;
     const method = division?.standings_method || 'points';
-    if (method === 'points') {
-      // Points divisions: untouched — exactly as before.
-      scoreCtx = computeDivisionScoring(race, allRaces, lanesByRace, laneCount, timeMode);
-    } else {
-      // Time methods: the per-race Time + Place still export normally; only the
-      // Total Score / Total Place are computed here and shown as "TBC" until the
-      // round/series is complete (then filled on re-export).
+    const rounds = await getDivisionRounds(race.division_id);
+    const isTiered = (rounds || []).some(r => r.tier_order != null && r.tier_order > 0);
+    const isTime = method === 'time_sum' || method === 'time_combined';
+    const pointsScored = race.scoring_flag && race.scoring_flag !== 'N';
+    // Engage scoring when: a points race on a scored chain, OR the division is
+    // tiered / time-based. Tiered + time heats carry scoring_flag = N but still
+    // feed the Total Time / Total Place columns — shown as "TBC" until the
+    // series completes, then filled on re-export.
+    if (pointsScored || isTiered || isTime) {
+      const allRaces = await getAllRaces();
+      let scoredRaces;
+      if (isTiered || isTime) {
+        // Standing keys off ALL races in the division's rounds (heats included).
+        const roundNums = new Set((rounds || []).flatMap(r => r.race_numbers || []));
+        scoredRaces = allRaces.filter(r => roundNums.has(r.race_number));
+      } else {
+        scoredRaces = allRaces.filter(r =>
+          r.division_id === race.division_id && r.scoring_flag && r.scoring_flag !== 'N');
+      }
+      const lanesByRace = new Map();
+      for (const r of scoredRaces) {
+        lanesByRace.set(r.race_number, await getLaneResults(r.race_number));
+      }
       // This very export completes the current race, so reflect that in the
-      // completion check (its DB status flips to 'exported' just below).
+      // completion checks (its DB status flips to 'exported' just below).
       scoredRaces.forEach(r => { if (r.race_number === race.race_number) r.status = 'exported'; });
-      const rounds = await getDivisionRounds(race.division_id);
-      timeStanding = computeDivisionStanding(division, rounds, scoredRaces, lanesByRace, laneCount, timeMode);
+
+      if (isTiered) {
+        // Gold/Silver/Bronze + Bowl: heats → seeding sum (Total Time / section
+        // rank), finals → overall rank. Resolved per-lane in the write block.
+        tieredStanding = computeTieredStanding(division, rounds, scoredRaces, lanesByRace, laneCount, timeMode);
+        const myRound = (rounds || []).find(r => (r.race_numbers || []).includes(raceNumber));
+        raceIsFinal = !!(myRound && myRound.tier_order != null && myRound.tier_order > 0);
+      } else if (method === 'points') {
+        // Points divisions: untouched — exactly as before.
+        scoreCtx = computeDivisionScoring(race, allRaces, lanesByRace, laneCount, timeMode);
+      } else {
+        // Time methods: per-race Time + Place export normally; Total Score /
+        // Total Place are "TBC" until the round/series is complete.
+        timeStanding = computeDivisionStanding(division, rounds, scoredRaces, lanesByRace, laneCount, timeMode);
+      }
     }
   }
   const isRFinal = scoreCtx?.scoringFlag === 'RFinal';
@@ -368,6 +392,38 @@ export async function exportResults(raceNumber, options = {}) {
       } else {
         mods.push({ addr: `G${rowNum}`, value: '' });
         mods.push({ addr: `H${rowNum}`, value: '' });
+      }
+    } else if (tieredStanding) {
+      // TIERED cups. F (per-race score) is blank. Heat sheets show the seeding
+      // SUM as Total Time (G) + section rank (H); final sheets show the tier's
+      // Total Time (G) + OVERALL rank (H). "TBC" until that phase completes.
+      const teamCode = drawLane?.team_code || '';
+      mods.push({ addr: `F${rowNum}`, value: '' });
+      if (raceIsFinal) {
+        const entry = teamCode ? tieredStanding.teamByCode?.get(teamCode) : null;
+        if (entry && entry.overall_rank != null) {
+          mods.push({ addr: `G${rowNum}`, value: entry.value_display || '' });
+          mods.push({ addr: `H${rowNum}`, value: String(entry.overall_rank) });
+        } else if (entry) {
+          mods.push({ addr: `G${rowNum}`, value: entry.value_display || 'TBC' });
+          mods.push({ addr: `H${rowNum}`, value: 'TBC' });
+        } else {
+          mods.push({ addr: `G${rowNum}`, value: '' });
+          mods.push({ addr: `H${rowNum}`, value: '' });
+        }
+      } else {
+        const seed = tieredStanding.seeding;
+        const entry = seed && teamCode ? seed.rows.find(r => r.team_code === teamCode) : null;
+        if (entry && seed.complete) {
+          mods.push({ addr: `G${rowNum}`, value: entry.value_display || '' });
+          mods.push({ addr: `H${rowNum}`, value: entry.section_rank == null ? '' : String(entry.section_rank) });
+        } else if (entry) {
+          mods.push({ addr: `G${rowNum}`, value: 'TBC' });
+          mods.push({ addr: `H${rowNum}`, value: 'TBC' });
+        } else {
+          mods.push({ addr: `G${rowNum}`, value: '' });
+          mods.push({ addr: `H${rowNum}`, value: '' });
+        }
       }
     }
 

@@ -237,20 +237,38 @@ export function computeTieredStanding(division, rounds, scoredRaces, lanesByRace
         });
       }
     }
-    // partial=true → show the so-far ranking (e.g. after Heats Rnd 1 only),
-    // like the points model's "(so far)" totals. Full seeding for the draws
-    // still requires every round (the draw-gen resolver uses partial=false).
+    // partial=true → include teams that have only raced some rounds so far, so
+    // each round's time shows as it comes in (provisional order by sum-so-far).
+    // BUT the TOTAL + RANK stay null ("TBC") until EVERY heat round is complete
+    // — a partial sum isn't a meaningful total to rank on.
     const { teams, unresolvedTies } = sumTimeStandings(seedRacesLanes, timeMode, null, roundByRace, true);
     if (unresolvedTies.length) result.unresolvedTie = true;
     const seedComplete = nonTierRounds.every(rd =>
       (rd.race_numbers || []).filter(n => byNum.has(n)).every(n => DONE.has(byNum.get(n).status)));
+    const seedRounds = nonTierRounds.map(rd => ({ id: rd.id ?? rd.round_number, name: rd.tier_name || `Round ${rd.round_number}` }));
     result.seeding = {
       label: nonTierRounds.map(r => r.tier_name || `Round ${r.round_number}`).join(' + '),
       complete: seedComplete,
-      rows: teams.map(t => ({
-        team_code: t.team_code, team_name: t.team_name,
-        section_rank: t.overall_rank, value_display: formatTotalTime(t.sum_exported),
-      })),
+      rounds: seedRounds,
+      rows: teams.map(t => {
+        // Each team's time per round (they race once per round → one time each).
+        const perRound = {};
+        for (const rd of nonTierRounds) {
+          const rid = rd.id ?? rd.round_number;
+          for (const rn of (rd.race_numbers || [])) {
+            const pr = t.perRace?.[rn];
+            if (pr && pr.exported_ms != null) { perRound[rid] = formatTotalTime(pr.exported_ms); break; }
+          }
+        }
+        return {
+          team_code: t.team_code,
+          team_name: t.team_name,
+          perRound,
+          // Total + rank only once all heat rounds are in.
+          section_rank: seedComplete ? t.overall_rank : null,
+          value_display: seedComplete ? formatTotalTime(t.sum_exported) : null,
+        };
+      }),
     };
   }
 

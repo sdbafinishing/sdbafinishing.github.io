@@ -51,12 +51,20 @@ export async function exportOverallRanks(divId) {
     const aoa = [
       [division.division_name || 'Division', '', '', '', tiered.complete ? '' : 'PROVISIONAL'],
     ];
-    // Seeding (summed heats) standing first, if present.
+    // Seeding (summed heats) standing first, if present — with per-round columns.
     if (tiered.seeding) {
+      const seedRounds = tiered.seeding.rounds || [];
+      const tbc = !tiered.seeding.complete;
       aoa.push([`Summed standings — ${tiered.seeding.label} (seeding)`, '', '', '', '']);
-      aoa.push(['Rank', 'Team', 'Code', 'Total time', '']);
+      aoa.push(['Rank', 'Team', 'Code', ...seedRounds.map(rc => rc.name), 'Total time']);
       for (const row of tiered.seeding.rows.slice().sort((a, b) => (a.section_rank ?? 9999) - (b.section_rank ?? 9999))) {
-        aoa.push([row.section_rank ?? '', row.team_name || '', row.team_code || '', row.value_display || '', '']);
+        aoa.push([
+          row.section_rank ?? (tbc ? 'TBC' : ''),
+          row.team_name || '',
+          row.team_code || '',
+          ...seedRounds.map(rc => (row.perRound && row.perRound[rc.id]) || ''),
+          row.value_display || (tbc ? 'TBC' : ''),
+        ]);
       }
       aoa.push(['', '', '', '', '']);
     }

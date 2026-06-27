@@ -491,22 +491,31 @@ async function renderTieredScoringDiv(content, div, rounds, scoredRaces, laneCou
 /** Render the summed-heats "seeding" standing block (who's seeded into tiers). */
 function seedingBlock(seeding) {
   const rows = seeding.rows.slice().sort((a, b) => (a.section_rank ?? 9999) - (b.section_rank ?? 9999));
+  const roundCols = seeding.rounds || [];
+  // Total + rank are "TBC" until every heat round is in (a partial sum can't be ranked).
+  const tbc = !seeding.complete;
+  const colspan = 4 + roundCols.length;
   return `
     <div style="margin-top:14px; padding:8px 10px; border:1px dashed var(--border); border-radius:var(--radius-sm);">
       <div style="font-weight:600; font-size:13px; margin-bottom:4px;">
         Summed standings — ${seeding.label}
-        <span style="font-size:11px; color:var(--text-tertiary); font-weight:400;">— seeding basis (sum of heat times)${seeding.complete ? '' : ' · <span style="color:var(--warning-text,#b45309); font-weight:600;">so far</span>'}</span>
+        <span style="font-size:11px; color:var(--text-tertiary); font-weight:400;">— seeding basis (sum of heat times)${seeding.complete ? '' : ' · <span style="color:var(--warning-text,#b45309); font-weight:600;">in progress — total/rank shown once all rounds complete</span>'}</span>
       </div>
       <div style="overflow:auto;">
         <table class="output-table">
-          <thead><tr><th>Rank</th><th style="text-align:left;">Team</th><th>Code</th><th>Total time</th></tr></thead>
+          <thead><tr>
+            <th>Rank</th><th style="text-align:left;">Team</th><th>Code</th>
+            ${roundCols.map(rc => `<th>${rc.name}</th>`).join('')}
+            <th>Total time</th>
+          </tr></thead>
           <tbody>
-            ${rows.length === 0 ? '<tr><td colspan="4" style="color:var(--text-tertiary); font-size:12px;">No heat results yet.</td></tr>' : rows.map(row => `
+            ${rows.length === 0 ? `<tr><td colspan="${colspan}" style="color:var(--text-tertiary); font-size:12px;">No heat results yet.</td></tr>` : rows.map(row => `
               <tr>
-                <td class="cell-position ${row.section_rank === 1 ? 'first' : row.section_rank === 2 ? 'second' : row.section_rank === 3 ? 'third' : ''}">${row.section_rank ?? '—'}</td>
+                <td class="cell-position ${row.section_rank === 1 ? 'first' : row.section_rank === 2 ? 'second' : row.section_rank === 3 ? 'third' : ''}">${row.section_rank ?? (tbc ? 'TBC' : '—')}</td>
                 <td class="team-name">${row.team_name || ''}</td>
                 <td>${row.team_code || ''}</td>
-                <td style="font-weight:600;">${row.value_display || '—'}</td>
+                ${roundCols.map(rc => `<td>${(row.perRound && row.perRound[rc.id]) || '—'}</td>`).join('')}
+                <td style="font-weight:600;">${row.value_display || (tbc ? 'TBC' : '—')}</td>
               </tr>`).join('')}
           </tbody>
         </table>
