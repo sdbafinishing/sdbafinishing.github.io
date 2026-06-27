@@ -87,6 +87,64 @@ export function unmountSetup() {
   cleanupUsersTab();
 }
 
+/**
+ * New-event modal — confirms the wipe + lets the operator carry over the
+ * settings that usually stay constant between events (live sync, the next-race
+ * API integration, the Google OAuth client ID). Folder paths, the Drive folder
+ * ID and the race-name param are event-specific and always cleared.
+ *
+ * @returns {Promise<null | {retainSync:boolean, retainApi:boolean, retainOauth:boolean}>}
+ *   null when cancelled.
+ */
+function showNewEventModal(config) {
+  return new Promise((resolve) => {
+    const has = (v) => (v && String(v).trim() ? '✓ set' : '— not set');
+    document.getElementById('newEventModal')?.remove();
+    const modal = document.createElement('div');
+    modal.id = 'newEventModal';
+    modal.style.cssText = 'position:fixed; inset:0; background:var(--bg-overlay); z-index:9998; display:flex; align-items:center; justify-content:center; padding:20px; overflow-y:auto;';
+    modal.innerHTML = `
+      <div style="background:var(--bg-card); border-radius:var(--radius-lg); padding:24px; max-width:520px; width:95%; box-shadow:var(--shadow-lg); margin:auto;">
+        <h5 style="font-size:16px; font-weight:600; margin-bottom:6px;">Start a new event</h5>
+        <p style="font-size:13px; color:var(--text-secondary); margin-bottom:14px;">
+          Clears <strong>ALL</strong> current event data from this browser. Make sure you've backed up first
+          (<code>20 Database Backup/</code>). These settings usually stay constant between events — keep them?
+        </p>
+        <label style="display:flex; gap:8px; align-items:flex-start; margin-bottom:10px; cursor:pointer;">
+          <input type="checkbox" id="neRetainSync" checked style="margin-top:3px;">
+          <span style="font-size:13px;"><strong>Live sync (Supabase)</strong><br>
+            <span style="color:var(--text-tertiary); font-size:11px;">URL ${has(config.supabase_url)}, anon key ${has(config.supabase_anon_key)}, service key ${has(config.supabase_service_key)}</span></span>
+        </label>
+        <label style="display:flex; gap:8px; align-items:flex-start; margin-bottom:10px; cursor:pointer;">
+          <input type="checkbox" id="neRetainApi" checked style="margin-top:3px;">
+          <span style="font-size:13px;"><strong>Next-race API integration</strong><br>
+            <span style="color:var(--text-tertiary); font-size:11px;">API ${has(config.next_race_signal_api)} — the race-name parameter is NOT kept (event-specific)</span></span>
+        </label>
+        <label style="display:flex; gap:8px; align-items:flex-start; margin-bottom:14px; cursor:pointer;">
+          <input type="checkbox" id="neRetainOauth" checked style="margin-top:3px;">
+          <span style="font-size:13px;"><strong>Google OAuth Client ID + Drive polling</strong><br>
+            <span style="color:var(--text-tertiary); font-size:11px;">Client ID ${has(config.google_client_id)} — the Drive folder ID + folder paths are NOT kept</span></span>
+        </label>
+        <p style="font-size:11px; color:var(--text-tertiary); margin-bottom:16px;">
+          Always cleared: event name / ref / date, folder paths, Drive folder ID, race-name param, and all races + results.
+        </p>
+        <div style="display:flex; gap:8px; justify-content:flex-end;">
+          <button class="btn btn-ghost" id="neCancel">Cancel</button>
+          <button class="btn btn-primary" id="neConfirm" style="background:var(--danger); border-color:var(--danger);">Clear &amp; start new event</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    const close = (result) => { modal.remove(); resolve(result); };
+    modal.querySelector('#neCancel').addEventListener('click', () => close(null));
+    modal.addEventListener('click', (e) => { if (e.target === modal) close(null); });
+    modal.querySelector('#neConfirm').addEventListener('click', () => close({
+      retainSync: modal.querySelector('#neRetainSync').checked,
+      retainApi: modal.querySelector('#neRetainApi').checked,
+      retainOauth: modal.querySelector('#neRetainOauth').checked,
+    }));
+  });
+}
+
 async function renderTab(tabName) {
   const content = document.getElementById('setupTabContent');
   if (!content) return;
@@ -877,11 +935,33 @@ async function renderConfigTab(container) {
   };
 
   window._resetEvent = async () => {
-    if (!confirm('Start a new event? This will clear ALL current data from the browser.')) return;
-    if (!confirm('Have you backed up the current event? (Check 20 Database Backup/ folder)')) return;
+    const prevConfig = (await getConfig()) || {};
+    // Ask which constant settings to carry over. Live sync, the next-race API
+    // and the Google OAuth client ID usually stay the same across events;
+    // folder paths, the Drive folder ID and the race-name param are
+    // event-specific and always cleared.
+    const choice = await showNewEventModal(prevConfig);
+    if (!choice) return;
 
-    const { clearAllData } = await import('../db.js');
+    const { clearAllData, saveConfig } = await import('../db.js');
     await clearAllData();
+
+    // Re-seed the fresh config with the retained constants (folder paths +
+    // race-name param intentionally omitted).
+    const retained = {};
+    if (choice.retainSync) {
+      retained.supabase_url = prevConfig.supabase_url || '';
+      retained.supabase_anon_key = prevConfig.supabase_anon_key || '';
+      retained.supabase_service_key = prevConfig.supabase_service_key || '';
+    }
+    if (choice.retainApi) {
+      retained.next_race_signal_api = prevConfig.next_race_signal_api || '';
+    }
+    if (choice.retainOauth) {
+      retained.google_client_id = prevConfig.google_client_id || '';
+      retained.drive_polling_enabled = !!prevConfig.drive_polling_enabled;
+    }
+    if (Object.keys(retained).length) await saveConfig(retained);
     // clearAllData wipes the config singleton, so the event_locked flag is
     // gone — but explicitly bring the lock banner + body offset down now so
     // a new event never starts under a stale "locked" UI, independent of

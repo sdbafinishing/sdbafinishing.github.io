@@ -557,7 +557,7 @@ export function renderUserGuideTab(container) {
             <tr><td>No Send button</td><td>WhatsApp group not configured in Setup &rarr; Event.</td></tr>
             <tr><td>No Import Joyi button</td><td>Shared Joyi folder not configured in Setup &rarr; Event.</td></tr>
             <tr><td>No alert sound</td><td>Tap "Enter" splash on first visit to unlock audio.</td></tr>
-            <tr><td>Switch to new event</td><td>Setup &rarr; Event &rarr; "New Event". Backs up, then clears DB.</td></tr>
+            <tr><td>Switch to new event</td><td>Setup &rarr; Event &rarr; "New Event". A prompt lets you <strong>retain the constant settings</strong> — Live sync (Supabase), the Next-race API, and the Google OAuth Client ID — while clearing everything event-specific (event name/ref/date, folder paths, Drive folder ID, the race-name param, and all races/results). Back up first.</td></tr>
             <tr><td>Cancel race by mistake</td><td>DB Admin &rarr; races &rarr; change status to "pending".</td></tr>
             <tr><td>Pressed START by mistake</td><td>Click ${ic('undo')} <strong>Reset start</strong> next to FINISH (visible only before any export).</td></tr>
             <tr><td>Need to fully redo a race (re-race on the water)</td><td>${ic('delete_forever')} <strong>Reset race</strong> next to Reset start. Type-the-race-number confirmation. Wipes start times + all lane results; preserves the team draw + export-history audit trail.</td></tr>
