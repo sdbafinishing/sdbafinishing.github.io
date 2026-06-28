@@ -157,6 +157,7 @@ export async function mountScoringPage(container) {
   if (scoringRefreshHandler) {
     window.removeEventListener('rdms-draw-imported', scoringRefreshHandler);
     window.removeEventListener('rdms-race-updated', scoringRefreshHandler);
+    window.removeEventListener('rdms-config-updated', scoringRefreshHandler);
   }
   let pending = null;
   scoringRefreshHandler = () => {
@@ -165,6 +166,9 @@ export async function mountScoringPage(container) {
   };
   window.addEventListener('rdms-draw-imported', scoringRefreshHandler);
   window.addEventListener('rdms-race-updated', scoringRefreshHandler);
+  // Also refresh when the division config changes (scoring method / rounds /
+  // tier order edited mid-event) — the standings recompute live from config.
+  window.addEventListener('rdms-config-updated', scoringRefreshHandler);
 }
 
 let scoringRefreshHandler = null;
@@ -176,6 +180,7 @@ export function unmountScoringPage() {
   if (scoringRefreshHandler) {
     window.removeEventListener('rdms-draw-imported', scoringRefreshHandler);
     window.removeEventListener('rdms-race-updated', scoringRefreshHandler);
+    window.removeEventListener('rdms-config-updated', scoringRefreshHandler);
     scoringRefreshHandler = null;
   }
 }

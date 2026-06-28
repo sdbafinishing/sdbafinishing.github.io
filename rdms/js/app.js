@@ -182,7 +182,7 @@ function syncThemeIcon() {
 const channel = new BroadcastChannel('rdms-sync');
 
 channel.onmessage = (event) => {
-  const { type } = event.data;
+  const { type, ...detail } = event.data;
   if (type === 'config-updated') {
     updateNavEventName();
     // Lock state lives on config — refresh the banner so lock / unlock /
@@ -190,11 +190,15 @@ channel.onmessage = (event) => {
     // clears the config, so a stale locked banner must come down).
     refreshLockBanner().catch(() => {});
   }
-  if (type === 'draw-imported' || type === 'race-updated') {
-    // Re-mount current page if it cares about race data
-    if (currentPage === 'dashboard') {
-      navigate(); // re-render
-    }
+  // Re-dispatch as a same-tab-style window event so each page's OWN listeners
+  // (scoring, im/export, flowchart, dashboard) react in OTHER tabs too —
+  // identical to the tab that made the change. Without this, a config / draw /
+  // race change in one tab left the scoring + next-round tables stale in
+  // another open tab.
+  try { window.dispatchEvent(new CustomEvent(`rdms-${type}`, { detail })); } catch { /* no-op */ }
+  // Dashboard has no window listener for race-data events — re-render it here.
+  if ((type === 'draw-imported' || type === 'race-updated') && currentPage === 'dashboard') {
+    navigate(); // re-render
   }
 };
 

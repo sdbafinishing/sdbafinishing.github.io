@@ -23,6 +23,7 @@ export function renderUserGuideTab(container) {
             <li><a href="javascript:void(0)" onclick="document.getElementById('g-config').scrollIntoView({behavior:'smooth'})" style="color:var(--accent);">Config Reference</a></li>
             <li><a href="javascript:void(0)" onclick="document.getElementById('g-dns').scrollIntoView({behavior:'smooth'})" style="color:var(--accent);">DNS / DSQ / DNF Handling</a></li>
             <li><a href="javascript:void(0)" onclick="document.getElementById('g-scoring').scrollIntoView({behavior:'smooth'})" style="color:var(--accent);">Scoring</a></li>
+            <li><a href="javascript:void(0)" onclick="document.getElementById('g-modes').scrollIntoView({behavior:'smooth'})" style="color:var(--accent);">Config &amp; draw recipes by mode</a></li>
             <li><a href="javascript:void(0)" onclick="document.getElementById('g-racepage-extras').scrollIntoView({behavior:'smooth'})" style="color:var(--accent);">Race-page extras (start toggle, ms precision, batch adj.)</a></li>
             <li><a href="javascript:void(0)" onclick="document.getElementById('g-div-audit').scrollIntoView({behavior:'smooth'})" style="color:var(--accent);">Division audit on save</a></li>
             <li><a href="javascript:void(0)" onclick="document.getElementById('g-sync').scrollIntoView({behavior:'smooth'})" style="color:var(--accent);">Supabase sync</a></li>
@@ -398,6 +399,77 @@ export function renderUserGuideTab(container) {
           </ul>
         </div>
 
+        <!-- 9g. Config & draw recipes by mode -->
+        <div id="g-modes" class="gs">
+          <h4>9g. Config &amp; draw recipes by mode</h4>
+          <p style="font-size:13px; color:var(--text-secondary);">
+            Pick the mode <strong>per division</strong>. Two things decide a division's behaviour:
+            <strong>Setup &rarr; Divisions</strong> (the <em>Final standing</em> dropdown + each round's <em>Rank by</em> + optional <em>Tier order</em>),
+            and what you type into the <strong>team-name column of the draw <code>.xls</code></strong> — either a real team name or a
+            placeholder that pulls a team from earlier results. Leave everything at its default for normal racing.
+          </p>
+
+          <table class="gt">
+            <tr>
+              <th style="width:130px;">Mode</th>
+              <th>Setup &rarr; Divisions</th>
+              <th style="width:150px;">Seed round draw cells</th>
+              <th style="width:170px;">Finals / next-round draw cells</th>
+            </tr>
+            <tr>
+              <td><strong>Normal — non-scored</strong><br><span style="color:var(--text-tertiary); font-size:11px;">one-offs, knockout brackets</span></td>
+              <td><em>Final standing</em> = <strong>Total points</strong> (default); <em>Rank by</em> = <strong>Points</strong>; no Tier order. Races that aren't on a 1:1 progression chain auto-flag <code>N</code> = unscored — nothing to fill in.</td>
+              <td>Type the <strong>team names</strong>.</td>
+              <td><code>R{race}P{pos}</code> — "the team that finished <em>pos</em> in race <em>race</em>". e.g. <code>R3P1</code> = winner of race 3.</td>
+            </tr>
+            <tr>
+              <td><strong>Tally scored</strong><br><span style="color:var(--text-tertiary); font-size:11px;">points series, multi-round</span></td>
+              <td><em>Final standing</em> = <strong>Total points</strong> (default). Lay the series rounds on a <strong>1:1 chain</strong> (Heat &rarr; … &rarr; Final) so they auto-flag <code>R1 / R2 / RFinal</code>; <em>Rank by</em> = <strong>Points</strong> on each.</td>
+              <td>Type the <strong>team names</strong>.</td>
+              <td><code>R{race}P{pos}</code> per qualifying lane (the same teams carry down the chain).</td>
+            </tr>
+            <tr>
+              <td><strong>Timed — sum across rounds</strong><br><span style="color:var(--text-tertiary); font-size:11px;">method #2</span></td>
+              <td><em>Final standing</em> = <strong>Total time</strong>; <em>Rank by</em> = <strong>Sum time</strong> on the rounds being summed.</td>
+              <td>Type the <strong>team names</strong>.</td>
+              <td><code>SUMR{list}P{pos}</code> — by summed time across the listed races. e.g. <code>SUMR1-4P1</code> = lowest total across races 1-4.</td>
+            </tr>
+            <tr>
+              <td><strong>Combined timed — within a round</strong><br><span style="color:var(--text-tertiary); font-size:11px;">method #1</span></td>
+              <td><em>Final standing</em> = <strong>Combined time of the final round</strong>; <em>Rank by</em> = <strong>Comb. time</strong> on the combined round.</td>
+              <td>Type the <strong>team names</strong>.</td>
+              <td><code>R{list}P{pos}</code> — by combined (pooled) time across the listed races. e.g. <code>R1-2P1</code> = fastest combined time over races 1 &amp; 2.</td>
+            </tr>
+          </table>
+
+          <div class="gtip"><strong>List syntax</strong> in a placeholder accepts ranges + commas: <code>R1-3,5P2</code> and <code>SUMR1-3,5P2</code> both mean "races 1, 2, 3 and 5". <code>P</code> is the position you want (1 = best).</div>
+
+          <p style="margin-top:14px;"><strong>Seed vs finals — where each piece lives</strong></p>
+          <ul>
+            <li><strong>Seeding rounds (heats):</strong> you type the <strong>real team names</strong> into the heat draws. The heat round's <em>Rank by</em> is what decides how those heats order the teams for the next draw — it doesn't change the heat sheet itself.</li>
+            <li><strong>Finals / next round:</strong> the finals draw cells hold the <strong>placeholders</strong> that pull from the seeding rounds. Resolve them from <strong>Im/Export &rarr; Generate Next Round Draws</strong> (or the auto-prompt) once every source race is exported — RDMS substitutes the team names and writes the finished draw to <code>13 Output_Next Round Draws/</code> (+ shared Drive). <strong><code>01 Input_Draw/</code> is left untouched</strong> so its placeholder copy survives for a later re-generation.</li>
+            <li><strong>On the result sheet:</strong> a seeding (combined/sum) round shows the running <em>Total Time / Total Place</em> as <strong>TBC</strong> until that round is complete. A <strong>single-race final</strong> (a normal finish) leaves <em>Total Score / Total Place</em> blank — the boat's own Place is the result; totals only appear on a final that genuinely aggregates more than one race by time.</li>
+          </ul>
+
+          <p style="margin-top:14px;"><strong>Worked example — Gold/Silver cups, seeded by combined heats, normal-finish finals</strong></p>
+          <p style="font-size:13px; color:var(--text-secondary);">The common SDBA shape (e.g. division LPC): two heat rounds seed two cup finals, and each final is a plain finish.</p>
+          <table class="gt">
+            <tr><th style="width:160px;">Round (Setup → Divisions)</th><th style="width:120px;">Races</th><th>Rank by / Tier order</th></tr>
+            <tr><td>Heats Rnd 1</td><td>1, 2</td><td><em>Rank by</em> = <strong>Comb. time</strong> (the seeding basis) · no Tier order</td></tr>
+            <tr><td>Heats Rnd 2</td><td>3, 4</td><td><em>Rank by</em> = <strong>Comb. time</strong> · no Tier order</td></tr>
+            <tr><td>Gold Cup Final</td><td>6</td><td><em>Rank by</em> = <strong>Points</strong> (normal finish) · <strong>Tier order = 1</strong></td></tr>
+            <tr><td>Silver Cup Final</td><td>5</td><td><em>Rank by</em> = <strong>Points</strong> · <strong>Tier order = 2</strong></td></tr>
+          </table>
+          <p style="font-size:13px; margin-top:8px;">Draw cells:</p>
+          <table class="gt">
+            <tr><th style="width:160px;">Draw file</th><th>Team-name column</th></tr>
+            <tr><td>Races 1-4 (heats)</td><td>Type the <strong>team names</strong>.</td></tr>
+            <tr><td>Race 6 (Gold)</td><td>Top seeds across the heats: <code>R1-4P1</code>, <code>R1-4P2</code>, <code>R1-4P3</code>, … (use <code>SUMR1-4Pn</code> instead if you seed by summed time).</td></tr>
+            <tr><td>Race 5 (Silver)</td><td>The next seeds: <code>R1-4P7</code>, <code>R1-4P8</code>, … (continue the combined-time order after Gold's lanes).</td></tr>
+          </table>
+          <div class="gtip">After races 1-4 are exported, the auto-prompt (or Generate Next Round Draws) fills races 5 &amp; 6 from the combined-heats order. The heat result sheets carry the combined seeding time (TBC until both heat rounds are in); the Gold/Silver final sheets show just Time + Place.</div>
+        </div>
+
         <!-- 9b. Race-page features added this season -->
         <div id="g-racepage-extras" class="gs">
           <h4>9b. Race page — recent additions</h4>
@@ -457,10 +529,19 @@ export function renderUserGuideTab(container) {
           <p><strong>File output</strong></p>
           <ul>
             <li><strong>IndexedDB</strong> — the resolved <code>lane_results</code> are written immediately; the dashboard reflects the change without re-import.</li>
-            <li><strong>Local .xls</strong> — patched from the bundled xlsx template (preserves all original visual formatting — borders, fonts, fills, alignment, merges) and written to <code>13 Output_Next Round Draws/</code> as <code>{race_number}.xls</code>. The file is xlsx content under an .xls filename; downstream tools (and Excel itself) sniff content, not extension, so it opens cleanly.</li>
+            <li><strong>Local .xlsx</strong> — patched from the bundled xlsx template (preserves all original visual formatting — borders, fonts, fills, alignment, merges) and written to <code>13 Output_Next Round Draws/</code> as <code>{race_number}.xlsx</code>. Real xlsx content with a matching <code>.xlsx</code> extension, so Excel opens it without the format/extension-mismatch warning. (These are for humans/scoring; the draw importer reads <code>01 Input_Draw/</code>, so the extension here doesn't affect re-import.)</li>
             <li><strong>Shared .xls</strong> — also mirrored to <code>80 Shared/{ref}_Next_Round_Draws/</code> for the scoring team's paper backup.</li>
           </ul>
           <div class="gtip"><strong>Edge cases:</strong> Cancelled source races resolve to their last known team but warn. Source races still in <code>pending</code> / <code>started</code> are skipped with a warning toast — the placeholder stays as-is and the lane shows in the audit until you export.</div>
+
+          <p style="margin-top:14px;"><strong>Re-generating after a source changes (re-race / corrected result / weather re-schedule)</strong></p>
+          <p>Once a draw is resolved, its placeholders are gone (replaced by real teams), so re-running generate does nothing. To rebuild a downstream draw from <em>new</em> source results:</p>
+          <ol>
+            <li><strong>Drop the placeholder draw back into <code>01 Input_Draw/</code></strong> (the un-resolved file that still has <code>R…P…</code> / <code>SUMR…</code>) and import it — drag-drop, "Import all from 01", or leave the draw watcher running. <code>01 Input_Draw/</code> is the permanent input; RDMS never overwrites it on generation, so your placeholder copy is still there.</li>
+            <li>The race <strong>flips back to "needs draws"</strong> in the Generate Next Round Draws grid (and everywhere else — the change broadcasts to all open pages/tabs).</li>
+            <li>Re-resolve: click the round's <em>Resolve</em> button, or use <strong>"Re-generate specific races"</strong> at the top of the tab — type a race list (ranges + commas, e.g. <code>21-25,27,30-32</code>) and click Re-generate. It re-reads the latest source results and <strong>overwrites</strong> the draw in <code>13 Output_Next Round Draws/</code>.</li>
+          </ol>
+          <div class="gtip"><strong>Live across pages.</strong> Importing draws, generating next-round draws, and editing a division's config (rounds / progressions / scoring method / tier order in Setup &rarr; Divisions) all broadcast to every open page and browser tab — the Dashboard, Scoring, Flowchart, the Generate Next Round Draws grid, and any open race sheet refresh automatically. (A race sheet skips its auto-refresh while you're actively editing a result cell, so it never wipes an in-progress entry.)</div>
         </div>
 
         <!-- 10b. Result Export -->

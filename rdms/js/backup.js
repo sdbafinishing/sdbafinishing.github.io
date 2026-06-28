@@ -133,6 +133,16 @@ export async function backupAfterExport(raceNumber) {
 }
 
 /**
+ * Backup after next-round draws are (re)generated — the resolved teams are a
+ * material DB change worth a restore point, same as a draw import.
+ * @param {number[]} [raceNumbers]
+ */
+export async function backupAfterNextRoundDraws(raceNumbers = []) {
+  const tag = raceNumbers.length ? `nrd_${raceNumbers.join('-')}` : 'nrd';
+  return autoBackup(tag, { silent: true });
+}
+
+/**
  * Backup after a race is SENT. Without this, the only backups are taken right
  * after export — before send_time is written — so the send is captured only by
  * the NEXT race's export-backup. The LAST race of an event has no next export,

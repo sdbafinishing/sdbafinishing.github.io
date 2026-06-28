@@ -5,7 +5,7 @@
 // Bump this when changing SW logic so the activate handler evicts the
 // previous cache wholesale. The cache-first read path keys on this name,
 // so a new value = a guaranteed-clean cache on next load.
-const CACHE_NAME = 'rdms-v2';
+const CACHE_NAME = 'rdms-v3';
 
 // Install: skip precache (Vite hashes filenames), cache on first fetch instead
 self.addEventListener('install', (event) => {

@@ -14,6 +14,7 @@ import { startJoyiWatch, stopJoyiWatch, getJoyiWatchStatus, isJoyiWatchEnabled }
 import { startDrawWatch, stopDrawWatch, getDrawWatchStatus, isDrawWatchEnabled } from '../draw-watch.js';
 import { summariseDivisions } from '../round-completion.js';
 import { generateNextRoundDraws } from '../draw-gen.js';
+import { parseRaceList } from '../placeholders.js';
 
 export async function mountImportPage(container) {
   container.innerHTML = `
@@ -44,6 +45,7 @@ export async function mountImportPage(container) {
   if (importRefreshHandler) {
     window.removeEventListener('rdms-draw-imported', importRefreshHandler);
     window.removeEventListener('rdms-race-updated', importRefreshHandler);
+    window.removeEventListener('rdms-config-updated', importRefreshHandler);
   }
   let pending = null;
   importRefreshHandler = () => {
@@ -54,6 +56,9 @@ export async function mountImportPage(container) {
   };
   window.addEventListener('rdms-draw-imported', importRefreshHandler);
   window.addEventListener('rdms-race-updated', importRefreshHandler);
+  // Division config edited mid-event (rounds / progressions / scoring method /
+  // tier order) changes which next-round races need draws — refresh the grid.
+  window.addEventListener('rdms-config-updated', importRefreshHandler);
 
   renderImportTab('draws');
 }
@@ -68,6 +73,7 @@ export function unmountImportPage() {
   if (importRefreshHandler) {
     window.removeEventListener('rdms-draw-imported', importRefreshHandler);
     window.removeEventListener('rdms-race-updated', importRefreshHandler);
+    window.removeEventListener('rdms-config-updated', importRefreshHandler);
     importRefreshHandler = null;
   }
 }
@@ -483,6 +489,34 @@ async function renderNextRoundDrawsTab(container) {
         files are written to <code>13 Output_Next Round Draws/</code> and the shared
         Drive folder. The in-app race state updates immediately regardless of file write.
       </p>
+
+      <!-- Manual re-generate (e.g. a source race was re-raced / re-scheduled) -->
+      <div style="background:var(--bg-input); border-radius:var(--radius-md); padding:12px 14px; margin-bottom:14px;">
+        <div style="font-weight:600; font-size:13px; margin-bottom:6px;">Re-generate specific races</div>
+        <p style="font-size:12px; color:var(--text-secondary); margin:0 0 8px;">
+          Use this when a <strong>source race changed</strong> (re-race, corrected result, or a weather
+          re-schedule where you also changed the division's scoring method) and you need to rebuild
+          downstream draws that were already generated. Workflow:
+        </p>
+        <ol style="font-size:12px; color:var(--text-secondary); margin:0 0 8px 18px; line-height:1.7;">
+          <li><strong>Drop the updated <em>placeholder</em> draw(s)</strong> (the un-resolved files that still
+            contain <code>R…P…</code> / <code>SUMR…</code>) back into <code>01 Input_Draw/</code> and import them
+            (drag-drop, “Import all from 01”, or leave the draw watcher running). Those races flip back to
+            <em>needs draws</em> in the table below.</li>
+          <li>Enter the race numbers to re-resolve — ranges + commas OK, e.g. <code>21-25,27,30-32</code>.</li>
+          <li>Click <strong>Re-generate</strong>: it re-resolves from the latest source results and
+            <strong>overwrites</strong> the draw in <code>13 Output_Next Round Draws/</code> (+ shared).</li>
+        </ol>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+          <input id="nrdManualRaces" type="text" class="form-input" placeholder="e.g. 21-25,27,30-32"
+                 style="flex:1; min-width:200px; max-width:300px; font-size:13px;">
+          <button id="nrdManualBtn" class="btn btn-primary btn-sm">
+            <i class="material-icons" style="font-size:14px;">auto_fix_high</i> Re-generate
+          </button>
+        </div>
+        <div id="nrdManualMsg" style="font-size:12px; margin-top:6px;"></div>
+      </div>
+
       <div id="nrdGrid">
         <div style="padding:24px; text-align:center; color:var(--text-tertiary);">
           <i class="material-icons" style="font-size:24px;">hourglass_top</i>
@@ -521,6 +555,47 @@ async function renderNextRoundDrawsTab(container) {
     grid.innerHTML = renderDivisionTable(divisions);
     attachDivButtonHandlers(refresh);
   };
+
+  // Manual re-generate handler (bound once — the form lives outside #nrdGrid).
+  const manualBtn = document.getElementById('nrdManualBtn');
+  const manualInput = document.getElementById('nrdManualRaces');
+  const manualMsg = document.getElementById('nrdManualMsg');
+  if (manualBtn && manualInput) {
+    const runManual = async () => {
+      const races = parseRaceList((manualInput.value || '').trim());
+      if (!races.length) {
+        manualMsg.style.color = 'var(--danger)';
+        manualMsg.textContent = 'Enter race numbers, e.g. 21-25,27,30-32';
+        return;
+      }
+      manualBtn.disabled = true;
+      manualMsg.style.color = 'var(--text-secondary)';
+      manualMsg.textContent = `Re-generating ${races.length} race${races.length === 1 ? '' : 's'}…`;
+      try {
+        const { summaries, totalResolved } = await generateNextRoundDraws(races);
+        const resolved = summaries.filter(s => s.resolved > 0).map(s => s.raceNumber);
+        const noPh = summaries.filter(s => s.success && s.resolved === 0).map(s => s.raceNumber);
+        const failed = summaries.filter(s => !s.success).map(s => s.raceNumber);
+        const parts = [];
+        if (resolved.length) parts.push(`re-generated races ${resolved.join(', ')} (${totalResolved} placeholder${totalResolved === 1 ? '' : 's'})`);
+        if (noPh.length) parts.push(`no placeholders in ${noPh.join(', ')} — re-import the placeholder draw into 01 Input_Draw first`);
+        if (failed.length) parts.push(`failed: ${failed.join(', ')}`);
+        manualMsg.style.color = failed.length ? 'var(--danger)' : (noPh.length ? 'var(--warning-text,#b45309)' : 'var(--success)');
+        manualMsg.textContent = parts.join(' · ') || 'Nothing to do.';
+        showToast(`Re-generate: ${totalResolved} placeholder${totalResolved === 1 ? '' : 's'} across ${resolved.length} race${resolved.length === 1 ? '' : 's'}`,
+          failed.length ? 'error' : (noPh.length ? 'warning' : 'success'), 5000);
+        broadcastChange('draw-imported');
+        await refresh();
+      } catch (err) {
+        manualMsg.style.color = 'var(--danger)';
+        manualMsg.textContent = `Failed: ${err.message || err}`;
+      } finally {
+        manualBtn.disabled = false;
+      }
+    };
+    manualBtn.addEventListener('click', runManual);
+    manualInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); runManual(); } });
+  }
 
   // Auto-refresh on draw-imported / race-updated is wired once at the page
   // level (see mountImportPage) so it doesn't leak a listener per re-render.

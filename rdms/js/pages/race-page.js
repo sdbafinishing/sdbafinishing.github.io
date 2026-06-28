@@ -15,6 +15,7 @@ import { parseJoyiFile, importJoyiToDb } from '../import.js';
 import { printResult, printDraw, openFileFromFolder } from '../print.js';
 import { renderMiniSignalPanel, cleanupMiniSignalPanel } from './signal-panel.js';
 import { generateNextRoundDraw } from '../draw-gen.js';
+import { backupAfterNextRoundDraws } from '../backup.js';
 import { hasPermission } from '../rbac.js';
 
 let grid = null;
@@ -539,6 +540,11 @@ export async function mountRacePage(container, params) {
   // Refresh start-time display + chip when our race is updated from
   // another tab (e.g. the joyi-watch loop finished its LCD fetch).
   window.addEventListener('rdms-race-updated', _onRaceUpdateRefresh);
+  // Also refresh teams + scoring preview when a draw is (re)imported or the
+  // division config changes mid-event (scoring method / lanes). Guarded to skip
+  // while a grid cell is being edited so it never clobbers in-progress input.
+  window.addEventListener('rdms-draw-imported', _onConfigOrDrawRefresh);
+  window.addEventListener('rdms-config-updated', _onConfigOrDrawRefresh);
 
   // Mount the mini digital flag in the race header. Fire-and-forget — the
   // panel handles its own Firebase init failure gracefully.
@@ -600,6 +606,32 @@ async function _onRaceUpdateRefresh(ev) {
   // auto-open Export & Send so the operator just pastes the WhatsApp message.
   if (detail.joyi_results) {
     maybeAutoExportOnCleanJoyi().catch(() => {});
+  }
+}
+
+// Refresh teams + scoring preview when a draw is (re)imported or the division
+// config changes (scoring method / lanes / rounds) — keeps the open race sheet
+// consistent with a mid-event schedule/scoring change. SKIPPED while a grid cell
+// is focused so it never wipes an in-progress keystroke (input is debounce-saved
+// to the DB, so a refresh between edits reads the latest values safely).
+async function _onConfigOrDrawRefresh() {
+  if (!raceNumber || !grid) return;
+  const gridWrap = document.getElementById('inputGridContainer');
+  if (gridWrap && document.activeElement && gridWrap.contains(document.activeElement)) return;
+  try {
+    const fresh = await getRace(raceNumber);
+    if (!fresh) return;
+    raceData = fresh;
+    configData = await getConfig();
+    const freshLanes = await getLaneResults(raceNumber);
+    const newGridData = buildGridData(freshLanes, configData?.lane_count || 6);
+    for (let i = 0; i < newGridData.length; i++) grid.setRowData(i, newGridData[i]);
+    rebuildDrawsByLane(raceData, freshLanes);
+    scoringCtx = await buildScoringContext(raceData, configData);
+    buildVarianceCtx().catch(() => {});
+    recalculate();
+  } catch (err) {
+    console.warn('Race-page config/draw refresh failed:', err);
   }
 }
 
@@ -671,6 +703,8 @@ export function unmountRacePage() {
     unsubLcdPending = null;
   }
   window.removeEventListener('rdms-race-updated', _onRaceUpdateRefresh);
+  window.removeEventListener('rdms-draw-imported', _onConfigOrDrawRefresh);
+  window.removeEventListener('rdms-config-updated', _onConfigOrDrawRefresh);
 
   // Tear down the mini-flag Firebase listener so it doesn't leak across mounts.
   try { cleanupMiniSignalPanel(); } catch {}
@@ -1701,6 +1735,9 @@ function attachHandlers() {
         (result.skipped > 0 ? ` (${result.skipped} skipped — see console)` : '') +
         (result.filename ? ` · ${result.filename}` : ''),
         result.skipped > 0 ? 'warning' : 'success', 5500);
+      // Snapshot the DB — resolved teams are a material change (this path calls
+      // the singular generator directly, so it isn't covered by the batch backup).
+      backupAfterNextRoundDraws([raceNumber]).catch(() => {});
       broadcastChange('draw-imported', { race_number: raceNumber });
       // Reload lane_results + re-render the grid in place.
       const fresh = await getLaneResults(raceNumber);

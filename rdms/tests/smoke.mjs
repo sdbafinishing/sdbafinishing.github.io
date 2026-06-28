@@ -10,7 +10,7 @@
  */
 import { computeRankings, validateRace, computeDivisionScoring, computeVarianceWarnings, getEffectiveStartTime } from '../js/race.js';
 import { joyiTimeToMs, joyiTimeHasMsPrecision, joyiTimeToRaw, msToTime } from '../js/utils.js';
-import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx, setPrintLayoutXlsx, setContentFontArialXlsx, applyRaceParityHeaderStyle, applyHeaderBordersXlsx, setRemarksAlignmentXlsx } from '../js/xlsx-patcher.js';
+import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx, setPrintLayoutXlsx, setContentFontArialXlsx, applyRaceParityHeaderStyle, applyHeaderBordersXlsx, applyTextFormatXlsx, setRemarksAlignmentXlsx } from '../js/xlsx-patcher.js';
 import { photoFinishPngFilename, autoCropRange } from '../js/photo-finish-png.js';
 import { computeChainScoringFlags } from '../js/division-scoring.js';
 import { parsePlaceholder, parseRaceList } from '../js/placeholders.js';
@@ -990,10 +990,41 @@ group('Export template polish (print layout + Arial font)', () => {
     b = setContentFontArialXlsx(b);
     b = applyRaceParityHeaderStyle(b, 15); // odd
     b = applyHeaderBordersXlsx(b);
+    b = applyTextFormatXlsx(b, 12);
     b = patchXlsxCells(b, [{ addr: 'B4', value: 'Team X' }, { addr: 'E4', value: '1' }]);
     const wb = XLSX.read(b, { type: 'array' });
     const ws = wb.Sheets[wb.SheetNames[0]];
     eq(ws.B4?.v, 'Team X');
+  });
+
+  test('applyTextFormatXlsx — header sizes/alignment, team-name+footnote left, re-parses', () => {
+    const lc = 6;
+    let b = resizeLaneRowsXlsx(tpl, lc);
+    b = setContentFontArialXlsx(b);
+    b = applyRaceParityHeaderStyle(b, 5);
+    b = applyHeaderBordersXlsx(b);
+    b = applyTextFormatXlsx(b, lc);
+    const files = fflate.unzipSync(new Uint8Array(b));
+    const styles = fflate.strFromU8(files['xl/styles.xml']);
+    const sheet = fflate.strFromU8(files['xl/worksheets/sheet1.xml']);
+    const cb = styles.match(/<cellXfs[\s\S]*?<\/cellXfs>/)[0];
+    const xfs = [...cb.matchAll(/<xf\b[^>]*?(?:\/>|>[\s\S]*?<\/xf>)/g)].map(x => x[0]);
+    const fonts = [...styles.match(/<fonts[\s\S]*?<\/fonts>/)[0].matchAll(/<font>[\s\S]*?<\/font>|<font\s*\/>/g)].map(x => x[0]);
+    const at = (addr) => {
+      const s = parseInt((sheet.match(new RegExp(`<c r="${addr}"[^>]*?\\bs="(\\d+)"`)) || [])[1], 10);
+      const fid = parseInt((xfs[s].match(/fontId="(\d+)"/) || [])[1], 10);
+      return {
+        sz: (fonts[fid].match(/<sz val="(\d+)"/) || [])[1],
+        h: (xfs[s].match(/horizontal="([^"]*)"/) || [])[1],
+      };
+    };
+    eq(at('A1').sz, '18'); eq(at('A2').sz, '14'); eq(at('C2').sz, '12'); eq(at('H3').sz, '12');
+    eq(at('A1').h, 'center'); eq(at('D2').h, 'center');
+    eq(at('B4').h, 'left');           // team-name column left
+    eq(at('D4').h, 'center');         // other lane columns centred
+    eq(at(`A${4 + lc}`).h, 'left');   // footnote/remarks left
+    eq(at(`A${4 + lc}`).sz, '12');
+    XLSX.read(b, { type: 'array' }); // corruption guard
   });
 
   test('applyHeaderBordersXlsx — header boxes get medium borders, counts consistent, re-parses', () => {
@@ -1018,6 +1049,17 @@ group('Export template polish (print layout + Arial font)', () => {
     const a1s = parseInt((sheet.match(/<c r="A1"[^>]*?\bs="(\d+)"/) || [])[1], 10);
     const a1b = parseInt((xfs[a1s].match(/borderId="(\d+)"/) || [])[1], 10);
     if (!/<left style="medium"/.test(borders[a1b])) throw new Error('A1 missing medium left border');
+    // Regression guard for the cellStyleXfs/cellXfs index bug: bordered header
+    // cells must KEEP their original fill (D3 = no fill), not inherit a random
+    // cellStyleXfs fill. A1 (odd race) must keep the parity amber fill.
+    const fills = [...styles.match(/<fills[\s\S]*?<\/fills>/)[0].matchAll(/<fill>[\s\S]*?<\/fill>|<fill\/>/g)].map(x => x[0]);
+    const fillOf = (addr) => {
+      const s = parseInt((sheet.match(new RegExp(`<c r="${addr}"[^>]*?\\bs="(\\d+)"`)) || [])[1], 10);
+      const fid = parseInt((xfs[s].match(/fillId="(\d+)"/) || [])[1], 10);
+      return fills[fid] || '';
+    };
+    if (/patternType="solid"/.test(fillOf('D3'))) throw new Error('D3 got a stray fill (cellStyleXfs offset bug)');
+    if (!/FFFFC000/.test(fillOf('A1'))) throw new Error('A1 lost its parity amber fill after bordering');
     XLSX.read(b, { type: 'array' }); // corruption guard
   });
 

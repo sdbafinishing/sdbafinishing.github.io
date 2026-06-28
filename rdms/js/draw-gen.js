@@ -29,8 +29,10 @@
 import {
   getConfig, getRace, getLaneResults, bulkSaveLaneResults, saveRace, getDivisionRounds,
 } from './db.js';
-import { writeToBoth, writeToSourceSubfolder, downloadFallback } from './file-access.js';
-import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx, setPrintLayoutXlsx, setContentFontArialXlsx, applyRaceParityHeaderStyle, applyHeaderBordersXlsx } from './xlsx-patcher.js';
+import { writeToBoth, downloadFallback } from './file-access.js';
+import { backupAfterNextRoundDraws } from './backup.js';
+import { buildRaceTitle } from './utils.js';
+import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx, setPrintLayoutXlsx, setContentFontArialXlsx, applyRaceParityHeaderStyle, applyHeaderBordersXlsx, applyTextFormatXlsx } from './xlsx-patcher.js';
 import { parsePlaceholder } from './placeholders.js';
 import { pooledTimeStandings, sumTimeStandings } from './time-standings.js';
 import raceTemplateUrl from '../templates/race-template.xlsx?url';
@@ -309,6 +311,14 @@ export async function generateNextRoundDraws(raceNumbers) {
     summaries.push(s);
     totalResolved += s.resolved;
   }
+  // Snapshot the DB once after the batch — the resolved teams are a material
+  // change worth a restore point (mirrors the draw-import auto-backup).
+  if (totalResolved > 0) {
+    try {
+      const resolvedRaces = summaries.filter(s => s.resolved > 0).map(s => s.raceNumber);
+      await backupAfterNextRoundDraws(resolvedRaces);
+    } catch { /* backup is best-effort — never block generation */ }
+  }
   return { summaries, totalResolved };
 }
 
@@ -353,7 +363,7 @@ async function renderDrawBlob(race, laneRows) {
   }
 
   const mods = [
-    { addr: 'A1', value: race.race_title_raw || race.race_title || `Race ${raceNumber}` },
+    { addr: 'A1', value: buildRaceTitle(race.race_title_raw || race.race_title, raceNumber) },
     { addr: 'D1', value: race.race_time || '' },
     { addr: `A${FOOTNOTE_ROW}`, value: (race.progression_text || '').trim() },
   ];
@@ -379,7 +389,8 @@ async function renderDrawBlob(race, laneRows) {
   // T4: title-row parity colour, same as the result sheet.
   templateBytes = applyRaceParityHeaderStyle(templateBytes, raceNumber);
   // Bold box borders (A1:C1, D1:I1, D2:H3) — after parity, before patch.
-  templateBytes = applyHeaderBordersXlsx(templateBytes);
+  templateBytes = applyHeaderBordersXlsx(templateBytes, laneCount);
+  templateBytes = applyTextFormatXlsx(templateBytes, laneCount);
   const patched = patchXlsxCells(templateBytes, mods);
   return new Blob([patched]);
 }
@@ -388,7 +399,11 @@ async function writeDrawFile(race, laneRows) {
   const config = await getConfig();
   const ref = config?.event_short_ref || 'RDMS';
   const raceNumber = race.race_number;
-  const filename = `${raceNumber}.xls`;
+  // Genuine xlsx content (patched from race-template.xlsx) → use the .xlsx
+  // extension so Excel opens it without the "format/extension mismatch" nag.
+  // These go to 13 + shared for humans/scoring; the draw IMPORTER reads 01,
+  // so this doesn't affect re-import.
+  const filename = `${raceNumber}.xlsx`;
 
   // Same bundled xlsx template the result export uses. Resize the lane
   // block to laneCount before patching, then footnote address shifts
@@ -398,7 +413,7 @@ async function writeDrawFile(race, laneRows) {
   const byLane = new Map(laneRows.map(l => [l.lane_number, l]));
 
   const mods = [
-    { addr: 'A1', value: race.race_title_raw || race.race_title || `Race ${raceNumber}` },
+    { addr: 'A1', value: buildRaceTitle(race.race_title_raw || race.race_title, raceNumber) },
     { addr: 'D1', value: race.race_time || '' },
     { addr: `A${FOOTNOTE_ROW}`, value: (race.progression_text || '').trim() },
   ];
@@ -426,23 +441,27 @@ async function writeDrawFile(race, laneRows) {
   // T4: title-row parity colour, same as the result sheet.
   templateBytes = applyRaceParityHeaderStyle(templateBytes, raceNumber);
   // Bold box borders (A1:C1, D1:I1, D2:H3) — after parity, before patch.
-  templateBytes = applyHeaderBordersXlsx(templateBytes);
+  templateBytes = applyHeaderBordersXlsx(templateBytes, laneCount);
+  templateBytes = applyTextFormatXlsx(templateBytes, laneCount);
   const patched = patchXlsxCells(templateBytes, mods);
-  const blob = new Blob([patched]);
+  const blob = new Blob([patched], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 
   // writeToBoth puts a local copy in 13 Output_Next Round Draws/ and a
   // mirror in 80 Shared/{ref}_Next_Round_Draws/. Either can be missing
   // (operator hasn't connected the folder yet); we fall back to a
   // browser download in that case so the file isn't lost.
+  // Resolved draws go to 13 (+ shared Drive) ONLY — never back to 01 Input_Draw.
+  // 01 stays the clean input source: it holds the operator's placeholder draws,
+  // so re-dropping a placeholder there (after a source race changes) restores
+  // the placeholders and lets the round be re-generated. Writing the resolved
+  // file back to 01 would clobber that placeholder and block re-generation.
+  // RDMS itself consumes the resolved draw from its DB (updated above), not from
+  // a file, so no 01 copy is needed for the app to pick it up.
   const { local, shared } = await writeToBoth(
     '13 Output_Next Round Draws', filename, blob,
     `80 Shared/${ref}_Next_Round_Draws`,
   );
-  // Also drop a copy into 01 Input_Draw/ so RDMS's draw importer (and the
-  // auto-poller) can consume the generated next-round draw exactly like an
-  // operator-supplied draw file — same filename convention ({race}.xls).
-  const inputDraw = await writeToSourceSubfolder('01 Input_Draw', filename, blob);
-  if (!local && !shared && !inputDraw) downloadFallback(filename, blob);
+  if (!local && !shared) downloadFallback(filename, blob);
 
   return filename;
 }

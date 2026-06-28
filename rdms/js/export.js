@@ -6,13 +6,13 @@
 import { getConfig, getRace, saveRace, getLaneResults, bulkSaveLaneResults, getAllRaces, getAllDivisions, getDivisionRounds, saveTimesheet, getTimesheet } from './db.js';
 import { computeRankings, computeDivisionScoring } from './race.js';
 import { computeDivisionStanding, computeTieredStanding } from './division-standing.js';
-import { timeToDisplay, msToTime, nowISO, isoToTime, showToast } from './utils.js';
+import { timeToDisplay, msToTime, nowISO, isoToTime, showToast, buildRaceTitle } from './utils.js';
 import { broadcastChange } from './app.js';
 import { backupAfterExport } from './backup.js';
 import { writeToBoth, writeToSourceSubfolder, downloadFallback } from './file-access.js';
 import { initDriveApi, isDriveApiConnected, writeDriveFileWithLink } from './drive-api.js';
 import { queueRaceSync } from './sync.js';
-import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx, setPrintLayoutXlsx, setContentFontArialXlsx, applyRaceParityHeaderStyle, applyHeaderBordersXlsx } from './xlsx-patcher.js';
+import { patchXlsxCells, resizeLaneRowsXlsx, setPageHeaderXlsx, setPrintLayoutXlsx, setContentFontArialXlsx, applyRaceParityHeaderStyle, applyHeaderBordersXlsx, applyTextFormatXlsx } from './xlsx-patcher.js';
 import raceTemplateUrl from '../templates/race-template.xlsx?url';
 
 // Single bundled xlsx template used for ALL race exports (results + next
@@ -237,7 +237,7 @@ export async function exportResults(raceNumber, options = {}) {
   // Header: race title (raw, exactly as it appeared in the imported
   // draw's A1) + start time. Fall back to the sanitised title if the
   // raw form is missing (e.g. races created before this field existed).
-  mods.push({ addr: 'A1', value: race.race_title_raw || race.race_title || `Race ${raceNumber}` });
+  mods.push({ addr: 'A1', value: buildRaceTitle(race.race_title_raw || race.race_title, raceNumber) });
   mods.push({ addr: 'D1', value: race.race_time || '' });
 
   // Cross-round scoring context — populates Score / Total Score / Total
@@ -286,10 +286,13 @@ export async function exportResults(raceNumber, options = {}) {
         const myRound = (rounds || []).find(r => (r.race_numbers || []).includes(raceNumber));
         raceIsFinal = !!(myRound && myRound.tier_order != null && myRound.tier_order > 0);
         // Only fill Total Score / Total Place on a FINAL sheet when that final
-        // is itself ranked by combined/sum time. A normal-finish final (default
-        // / points) is decided by the boat's own Place (col E) — no cumulative
-        // total to show, so leave G/H blank.
-        finalShowTotals = !!(myRound && (myRound.rank_method === 'time_combined' || myRound.rank_method === 'time_sum'));
+        // genuinely AGGREGATES more than one race by time (a real combined/sum
+        // final). A single-race final's "total" just echoes its own Time/Place
+        // (cols D/E) — redundant — and a normal-finish final has no total at
+        // all, so in both cases leave G/H blank.
+        finalShowTotals = !!(myRound
+          && (myRound.rank_method === 'time_combined' || myRound.rank_method === 'time_sum')
+          && (myRound.race_numbers || []).length > 1);
       } else if (method === 'points') {
         // Points divisions: untouched — exactly as before.
         scoreCtx = computeDivisionScoring(race, allRaces, lanesByRace, laneCount, timeMode);
@@ -486,7 +489,9 @@ export async function exportResults(raceNumber, options = {}) {
   templateBytes = applyRaceParityHeaderStyle(templateBytes, raceNumber);
   // Bold box borders on the header blocks (A1:C1, D1:I1, D2:H3). MUST run after
   // parity (clones the parity-coloured row-1 styles, adding borders).
-  templateBytes = applyHeaderBordersXlsx(templateBytes);
+  templateBytes = applyHeaderBordersXlsx(templateBytes, laneCount);
+  // Header font sizes + alignment (rows 1-3 centred, team-name/remarks left).
+  templateBytes = applyTextFormatXlsx(templateBytes, laneCount);
   const patched = patchXlsxCells(templateBytes, mods);
   const xlsBlob = new Blob([patched]);
   const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';

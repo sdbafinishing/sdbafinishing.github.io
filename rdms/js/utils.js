@@ -243,6 +243,35 @@ export function sanitiseTitle(raw) {
 }
 
 /**
+ * Build the canonical race-sheet title for export / draw A1, normalising
+ * spacing. Always emits "Race No. {n} --- {title} - 場次 Race {n}". Extracts the
+ * {title} from the raw A1 (between the "---" prefix and the 場次/Race suffix) so
+ * irregular source spacing — e.g. "Race No. 6 ---Gold Cup Final  - 場次 Race 6"
+ * — always comes out clean. Unlike sanitiseTitle this does NOT abbreviate words;
+ * the export keeps the full title.
+ * @param {string} raw - raw A1 text (race_title_raw / race_title)
+ * @param {number|string} n - race number
+ * @returns {string}
+ */
+export function buildRaceTitle(raw, n) {
+  let title = raw ? String(raw) : '';
+  const dashIdx = title.indexOf('---');
+  if (dashIdx !== -1) title = title.substring(dashIdx + 3);
+  else title = title.replace(/^\s*Race\s*No\.?\s*\d+\s*/i, ''); // no "---" → drop leading "Race No. N"
+  // Strip the trailing "場次 Race N" / "- Race N" suffix in any spacing variant.
+  const suffixMatch = title.match(/\s*-?\s*場次\s*Race\b.*$/i)
+    || title.match(/\s*-\s*Race\b.*$/i)
+    || title.match(/\s*\bRace\s*\d+\s*$/i);
+  if (suffixMatch) title = title.substring(0, suffixMatch.index);
+  // Normalise whitespace + trim stray edge dashes left by odd source formatting.
+  title = title.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+  title = title.replace(/^[-–—\s]+/, '').replace(/[-–—\s]+$/, '').trim();
+  return title
+    ? `Race No. ${n} --- ${title} - 場次 Race ${n}`
+    : `Race No. ${n} - 場次 Race ${n}`;
+}
+
+/**
  * Extract race number from draw filename.
  * "1.xls" → 1, "Second Round - 25.xls" → 25, "18 -raw sample.xls" → 18
  * @param {string} filename

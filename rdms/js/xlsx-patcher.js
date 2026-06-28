@@ -256,7 +256,11 @@ export function applyRaceParityHeaderStyle(xlsxBytes, raceNumber) {
   const sA = (sheet.match(/<c r="A1"[^>]*\bs="(\d+)"/) || [])[1];
   const sB = (sheet.match(/<c r="D1"[^>]*\bs="(\d+)"/) || [])[1];
   if (sA == null || sB == null) return xlsxBytes; // can't locate row 1 — bail
-  const xfs = [...styles.matchAll(/<xf\b[^>]*?(?:\/>|>[\s\S]*?<\/xf>)/g)].map(m => m[0]);
+  // s= indexes <cellXfs> only — scope the xf match to that block, not the whole
+  // styles.xml (which also has a leading <cellStyleXfs> block that would offset
+  // every index and clone the wrong source style).
+  const cellXfsBlock = (styles.match(/<cellXfs[\s\S]*?<\/cellXfs>/) || [])[0] || '';
+  const xfs = [...cellXfsBlock.matchAll(/<xf\b[^>]*?(?:\/>|>[\s\S]*?<\/xf>)/g)].map(m => m[0]);
   const xfA = xfs[+sA], xfB = xfs[+sB];
   if (!xfA || !xfB) return xlsxBytes;
   const fontIdOf = (xf) => { const m = xf.match(/fontId="(\d+)"/); return m ? +m[1] : 0; };
@@ -332,18 +336,24 @@ export function applyRaceParityHeaderStyle(xlsxBytes, raceNumber) {
 }
 
 /**
- * Draw medium ("bold") box borders around the three header blocks the bundled
- * template ships WITHOUT any border: A1:C1 (title), D1:I1 (time) and D2:H3 (the
- * "成績 Result" header block). Excel stores borders per-cell, so each box edge
- * is applied to its constituent cells. We clone each target cell's CURRENT
- * style — preserving its fill / font / alignment, including the parity colours,
- * since this MUST run AFTER applyRaceParityHeaderStyle — and only swap in a
- * borderId carrying the needed medium edges. Pure styles.xml + sheet1.xml edit;
- * re-parse-guarded. Apply BEFORE patchXlsxCells (which preserves s=).
+ * Draw medium ("bold") box borders around the header blocks the bundled
+ * template ships WITHOUT any border:
+ *   • A1:C1 (title) + D1:I1 (time) — outer box each.
+ *   • D2:H3 (the "成績 Result" header) — FULL grid (every inner cell bordered).
+ *   • I2:I3 (備註 Remarks header) — outer box.
+ *   • the remarks/footnote box below the lanes (its merged range) — outer box.
+ * Excel stores borders per-cell, so each box edge is applied to its constituent
+ * cells. We clone each target cell's CURRENT style — preserving its fill / font
+ * / alignment, including the parity colours, since this MUST run AFTER
+ * applyRaceParityHeaderStyle — and only swap in a borderId carrying the needed
+ * medium edges. Pure styles.xml + sheet1.xml edit; re-parse-guarded. Apply
+ * BEFORE patchXlsxCells (which preserves s=).
  *
+ * @param {Uint8Array} xlsxBytes
+ * @param {number} laneCount  used to locate the footnote/remarks box (row 4+laneCount)
  * @returns {Uint8Array} patched xlsx bytes
  */
-export function applyHeaderBordersXlsx(xlsxBytes) {
+export function applyHeaderBordersXlsx(xlsxBytes, laneCount = 6) {
   const input = xlsxBytes instanceof Uint8Array ? xlsxBytes : new Uint8Array(xlsxBytes);
   const files = unzipSync(input);
   const STYLES_PATH = 'xl/styles.xml';
@@ -370,11 +380,33 @@ export function applyHeaderBordersXlsx(xlsxBytes) {
       }
     }
   };
+  // Full grid: every cell in the range gets all four edges (inner borders too).
+  const grid = (cStart, cEnd, rStart, rEnd) => {
+    const c0 = COLS.indexOf(cStart), c1 = COLS.indexOf(cEnd);
+    for (let r = rStart; r <= rEnd; r++) {
+      for (let ci = c0; ci <= c1; ci++) {
+        const addr = `${COLS[ci]}${r}`;
+        addEdge(addr, 'top'); addEdge(addr, 'bottom');
+        addEdge(addr, 'left'); addEdge(addr, 'right');
+      }
+    }
+  };
   box('A', 'C', 1, 1);
   box('D', 'I', 1, 1);
-  box('D', 'H', 2, 3);
+  grid('D', 'H', 2, 3);   // result header — full inner grid
+  box('I', 'I', 2, 3);    // remarks header box
+  // Remarks / footnote box below the lanes — its merged range starts at the
+  // footnote row (4 + laneCount). Border the whole merged box.
+  const fnRow = 4 + laneCount;
+  const fnMerge = sheet.match(new RegExp(`<mergeCell ref="A${fnRow}:([A-Z]+)(\\d+)"`));
+  if (fnMerge) box('A', fnMerge[1], fnRow, parseInt(fnMerge[2], 10));
 
-  const xfs = [...styles.matchAll(/<xf\b[^>]*?(?:\/>|>[\s\S]*?<\/xf>)/g)].map(m => m[0]);
+  // A cell's s= indexes <cellXfs> ONLY, but styles.xml also has a <cellStyleXfs>
+  // block of <xf> elements first. Matching <xf> across the whole file would
+  // offset every index by the cellStyleXfs count → cloning the WRONG style
+  // (wrong fill: the random green/red/purple bug). Scope to the cellXfs block.
+  const cellXfsBlock = (styles.match(/<cellXfs[\s\S]*?<\/cellXfs>/) || [])[0] || '';
+  const xfs = [...cellXfsBlock.matchAll(/<xf\b[^>]*?(?:\/>|>[\s\S]*?<\/xf>)/g)].map(m => m[0]);
   const borderCount = parseInt((styles.match(/<borders count="(\d+)">/) || [])[1] || '0', 10);
   const xfCount = parseInt((styles.match(/<cellXfs count="(\d+)">/) || [])[1] || '0', 10);
   if (!xfs.length) return xlsxBytes;
@@ -415,6 +447,129 @@ export function applyHeaderBordersXlsx(xlsxBytes) {
   styles = styles
     .replace(/<borders count="\d+">/, `<borders count="${borderCount + newBorders.length}">`)
     .replace('</borders>', `${newBorders.join('')}</borders>`)
+    .replace(/<cellXfs count="\d+">/, `<cellXfs count="${xfCount + newXfs.length}">`)
+    .replace('</cellXfs>', `${newXfs.join('')}</cellXfs>`);
+  for (const { addr, newIdx } of repoint) {
+    sheet = sheet.replace(new RegExp(`(<c r="${addr}"[^>]*?\\b)s="\\d+"`), `$1s="${newIdx}"`);
+  }
+
+  files[STYLES_PATH] = strToU8(styles);
+  files[SHEET_PATH] = strToU8(sheet);
+  return zipSync(files);
+}
+
+/**
+ * Header font sizes + horizontal alignment for the result/draw sheet, per the
+ * scoring-team spec. Clones each target cell's CURRENT style (preserving fill,
+ * border, font NAME/colour/bold, vertical alignment) and changes only the font
+ * SIZE and the horizontal alignment, so it composes with parity + borders. Run
+ * AFTER setContentFontArialXlsx (names already Arial), parity and borders, and
+ * BEFORE patchXlsxCells.
+ *
+ *   Font sizes:  A1,D1 = 18 · A2,B2 = 14 · C2 + D2:I3 + footnote = 12
+ *   Alignment :  rows 1-3 centred · lane rows centred EXCEPT team-name (col B)
+ *                left · footnote/remarks (below the lanes) left
+ *
+ * @param {Uint8Array} xlsxBytes
+ * @param {number} laneCount
+ * @returns {Uint8Array} patched xlsx bytes
+ */
+export function applyTextFormatXlsx(xlsxBytes, laneCount = 6) {
+  const input = xlsxBytes instanceof Uint8Array ? xlsxBytes : new Uint8Array(xlsxBytes);
+  const files = unzipSync(input);
+  const STYLES_PATH = 'xl/styles.xml';
+  if (!files[STYLES_PATH] || !files[SHEET_PATH]) return xlsxBytes;
+  let styles = strFromU8(files[STYLES_PATH]);
+  let sheet = strFromU8(files[SHEET_PATH]);
+
+  // Build the per-cell spec: { addr -> { size?, halign } }.
+  const spec = new Map();
+  const put = (addr, halign, size) => spec.set(addr, { halign, size });
+  // Header (rows 1-3) — all centred.
+  put('A1', 'center', 18); put('D1', 'center', 18);
+  put('A2', 'center', 14); put('B2', 'center', 14); put('C2', 'center', 12);
+  for (const r of [2, 3]) for (const c of ['D', 'E', 'F', 'G', 'H', 'I']) put(`${c}${r}`, 'center', 12);
+  // Lane rows — team-name (B) left, every other column centred.
+  for (let lane = 1; lane <= laneCount; lane++) {
+    const r = 3 + lane;
+    put(`B${r}`, 'left');
+    for (const c of ['A', 'C', 'D', 'E', 'F', 'G', 'H', 'I']) put(`${c}${r}`, 'center');
+  }
+  // Footnote / remarks (below the lanes) — left, size 12.
+  put(`A${4 + laneCount}`, 'left', 12);
+
+  const cellXfsBlock = (styles.match(/<cellXfs[\s\S]*?<\/cellXfs>/) || [])[0] || '';
+  const xfs = [...cellXfsBlock.matchAll(/<xf\b[^>]*?(?:\/>|>[\s\S]*?<\/xf>)/g)].map(m => m[0]);
+  const fontsBlock = (styles.match(/<fonts[\s\S]*?<\/fonts>/) || [])[0] || '';
+  const fonts = [...fontsBlock.matchAll(/<font>[\s\S]*?<\/font>|<font\s*\/>/g)].map(m => m[0]);
+  const fontCount = parseInt((styles.match(/<fonts count="(\d+)"/) || [])[1] || '0', 10);
+  const xfCount = parseInt((styles.match(/<cellXfs count="(\d+)"/) || [])[1] || '0', 10);
+  if (!xfs.length) return xlsxBytes;
+
+  const fontIdOf = (xf) => { const m = xf.match(/fontId="(\d+)"/); return m ? +m[1] : 0; };
+  const styleOf = (addr) => {
+    const m = sheet.match(new RegExp(`<c r="${addr}"[^>]*?\\bs="(\\d+)"`));
+    return m ? +m[1] : null;
+  };
+  const xfSet = (xf, name, value) => (new RegExp(`\\b${name}="[^"]*"`).test(xf)
+    ? xf.replace(new RegExp(`\\b${name}="[^"]*"`), `${name}="${value}"`)
+    : xf.replace(/^<xf\b/, `<xf ${name}="${value}"`));
+  // Set <sz> on a <font>, preserving order (sz precedes color/name in CT_Font).
+  const setSz = (font, sz) => {
+    if (/<sz\b[^>]*\/>/.test(font)) return font.replace(/<sz\b[^>]*\/>/, `<sz val="${sz}"/>`);
+    if (/<color\b/.test(font)) return font.replace(/<color\b/, `<sz val="${sz}"/><color`);
+    if (/<name\b/.test(font)) return font.replace(/<name\b/, `<sz val="${sz}"/><name`);
+    return font.replace('</font>', `<sz val="${sz}"/></font>`);
+  };
+  // Set horizontal alignment on an <xf>, keeping vertical/wrap if present.
+  const setAlign = (xf, h) => {
+    let g = xf;
+    if (/<alignment\b[^>]*\/>/.test(g)) {
+      g = g.replace(/<alignment\b([^>]*)\/>/, (m, a) => `<alignment${/horizontal="[^"]*"/.test(a)
+        ? a.replace(/horizontal="[^"]*"/, `horizontal="${h}"`)
+        : ` horizontal="${h}"${a}`}/>`);
+    } else if (/<\/xf>/.test(g)) {
+      g = g.replace('</xf>', `<alignment horizontal="${h}" vertical="center"/></xf>`);
+    } else {
+      g = g.replace(/\/>\s*$/, `><alignment horizontal="${h}" vertical="center"/></xf>`);
+    }
+    if (!/applyAlignment="1"/.test(g)) g = g.replace(/^<xf\b/, '<xf applyAlignment="1"');
+    return g;
+  };
+
+  const newFonts = [], newXfs = [], repoint = [];
+  const fontDedupe = new Map();   // `${fontId}|${sz}` -> new fontId
+  const xfDedupe = new Map();     // `${s}|${sz||''}|${halign}` -> new xf index
+  for (const [addr, { halign, size }] of spec) {
+    const s = styleOf(addr);
+    if (s == null || !xfs[s]) continue;
+    const xfKey = `${s}|${size || ''}|${halign}`;
+    let idx = xfDedupe.get(xfKey);
+    if (idx == null) {
+      let xf = xfs[s];
+      if (size) {
+        const fId = fontIdOf(xf);
+        const fKey = `${fId}|${size}`;
+        let newFontId = fontDedupe.get(fKey);
+        if (newFontId == null) {
+          newFontId = fontCount + newFonts.length;
+          newFonts.push(setSz(fonts[fId] || '<font/>', size));
+          fontDedupe.set(fKey, newFontId);
+        }
+        xf = xfSet(xfSet(xf, 'fontId', newFontId), 'applyFont', '1');
+      }
+      xf = setAlign(xf, halign);
+      idx = xfCount + newXfs.length;
+      newXfs.push(xf);
+      xfDedupe.set(xfKey, idx);
+    }
+    repoint.push({ addr, newIdx: idx });
+  }
+  if (!newXfs.length) return xlsxBytes;
+
+  styles = styles
+    .replace(/<fonts count="\d+"/, `<fonts count="${fontCount + newFonts.length}"`)
+    .replace('</fonts>', `${newFonts.join('')}</fonts>`)
     .replace(/<cellXfs count="\d+">/, `<cellXfs count="${xfCount + newXfs.length}">`)
     .replace('</cellXfs>', `${newXfs.join('')}</cellXfs>`);
   for (const { addr, newIdx } of repoint) {

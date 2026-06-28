@@ -12,6 +12,7 @@ import { runFlowchartAudit } from '../flowchart-audit.js';
 let fcDivSelect = null;
 let fcTeamSelect = null;
 let fcRacesByTeamCode = null;
+let fcRefreshHandler = null;
 
 export async function mountFlowchartPage(container) {
   const divisions = await getAllDivisions();
@@ -134,6 +135,23 @@ export async function mountFlowchartPage(container) {
     renderFlowchart(divisions, races, raceMap);
   });
 
+  // Auto-refresh on draw import / race update / config change (re-mount to
+  // re-fetch divisions + races) so the progression graph + status colours stay
+  // current when the schedule or scoring config changes mid-event. Debounced.
+  if (fcRefreshHandler) {
+    window.removeEventListener('rdms-draw-imported', fcRefreshHandler);
+    window.removeEventListener('rdms-race-updated', fcRefreshHandler);
+    window.removeEventListener('rdms-config-updated', fcRefreshHandler);
+  }
+  let pending = null;
+  fcRefreshHandler = () => {
+    clearTimeout(pending);
+    pending = setTimeout(() => mountFlowchartPage(container).catch(() => {}), 250);
+  };
+  window.addEventListener('rdms-draw-imported', fcRefreshHandler);
+  window.addEventListener('rdms-race-updated', fcRefreshHandler);
+  window.addEventListener('rdms-config-updated', fcRefreshHandler);
+
   renderFlowchart(divisions, races, raceMap);
 }
 
@@ -141,6 +159,12 @@ export function unmountFlowchartPage() {
   if (fcDivSelect) { fcDivSelect.destroy(); fcDivSelect = null; }
   if (fcTeamSelect) { fcTeamSelect.destroy(); fcTeamSelect = null; }
   fcRacesByTeamCode = null;
+  if (fcRefreshHandler) {
+    window.removeEventListener('rdms-draw-imported', fcRefreshHandler);
+    window.removeEventListener('rdms-race-updated', fcRefreshHandler);
+    window.removeEventListener('rdms-config-updated', fcRefreshHandler);
+    fcRefreshHandler = null;
+  }
   delete window._fcRender;
 }
 
@@ -230,16 +254,40 @@ async function renderFlowchart(divisions, races, raceMap) {
     const colWidth = nodeW + gapX;
     const divLabelH = 30;
 
-    // Rows per column = number of TIERS in that column (no longer
-    // multiplied out by race count, because each tier collapses to a
-    // single node now).
+    // ── Combined-time seeding detection (drives the horizontal group layout) ──
+    // Non-tier rounds ranked by COMBINED TIME that feed the tier finals are laid
+    // out side-by-side (left→right) inside a "Combined time" box, then fan out
+    // to the tiers. Horizontal layout applies only when those rounds share ONE
+    // depth and occupy that depth alone (the common heats→cups shape); otherwise
+    // we fall back to the normal vertical column.
+    const roundById = new Map(rounds.map(r => [r.id, r]));
+    const isComb = (id) => { const r = roundById.get(id); return !!(r && r.rank_method === 'time_combined' && !(r.tier_order > 0)); };
+    const isTier = (id) => { const r = roundById.get(id); return !!(r && r.tier_order != null && r.tier_order > 0); };
+    const fanProgs = progs.filter(p => isComb(p.from_round_id) && isTier(p.to_round_id));
+    const groupIds = new Set(fanProgs.map(p => p.from_round_id));
+    const useGroup = groupIds.size > 0;
+    let combDepth = null, horizontal = false;
+    if (useGroup) {
+      const depths = new Set([...groupIds].map(id => depthByRoundId.get(id) ?? 0));
+      if (depths.size === 1) {
+        combDepth = [...depths][0];
+        horizontal = (roundGroups[combDepth] || []).every(r => groupIds.has(r.id));
+      }
+    }
+
+    // Per-column horizontal span (in colWidths) + rows. The combined-time column
+    // expands to hold its rounds side-by-side; later columns shift right.
+    const colSpanOf = (d) => (horizontal && Number(d) === Number(combDepth)) ? roundGroups[d].length : 1;
+    const colRowsOf = (d) => (horizontal && Number(d) === Number(combDepth)) ? 1 : roundGroups[d].length;
+    const colX = {};
+    let _cursor = 20;
+    roundNums.forEach((d) => { colX[d] = _cursor; _cursor += colSpanOf(d) * colWidth; });
+
     let maxRows = 0;
-    roundNums.forEach(rn => {
-      maxRows = Math.max(maxRows, roundGroups[rn].length);
-    });
+    roundNums.forEach((d) => { maxRows = Math.max(maxRows, colRowsOf(d)); });
 
     const divHeight = divLabelH + maxRows * (nodeH + gapY) + 20;
-    const divWidth = roundNums.length * colWidth + 40;
+    const divWidth = _cursor + 20; // _cursor already past the right-most column
     if (divWidth > svgMaxWidth) svgMaxWidth = divWidth;
 
     // Division header
@@ -252,23 +300,29 @@ async function renderFlowchart(divisions, races, raceMap) {
     // belonging to that tier, matching the printed bracket diagram.
     const tierPositions = {}; // key: round.id → { x (right edge), y (centre), lx (left edge) }
 
-    roundNums.forEach((depth, colIdx) => {
+    roundNums.forEach((depth) => {
       const tiers = roundGroups[depth];
-      const x = 20 + colIdx * colWidth;
+      const baseX = colX[depth];
+      const horiz = horizontal && Number(depth) === Number(combDepth);
 
-      // Vertically centre when this column has fewer tiers than the
-      // tallest one — mirrors the centred look of a printed bracket
-      // where the final-round box sits across from the middle of the
-      // semi-final column.
-      const colRows = tiers.length;
+      // Vertically centre when this column has fewer rows than the tallest one.
+      const colRows = colRowsOf(depth);
       const colTopPad = ((maxRows - colRows) * (nodeH + gapY)) / 2;
 
-      // Column header reads "Round N" where N is depth+1 (1-indexed
-      // for the operator).
-      svgContent += `<text x="${x + nodeW / 2}" y="${divLabelH + 10}" font-size="10" fill="var(--text-tertiary)" text-anchor="middle" font-weight="500">Round ${Number(depth) + 1}</text>`;
+      // Column header "Round N" (depth+1, 1-indexed) centred over the column's
+      // node span (wider for the horizontal combined-time column).
+      const headerCx = horiz
+        ? baseX + ((tiers.length - 1) * colWidth + nodeW) / 2
+        : baseX + nodeW / 2;
+      svgContent += `<text x="${headerCx}" y="${divLabelH + 10}" font-size="10" fill="var(--text-tertiary)" text-anchor="middle" font-weight="500">Round ${Number(depth) + 1}</text>`;
 
       tiers.forEach((tier, tierIdx) => {
-        const y = divLabelH + 20 + colTopPad + tierIdx * (nodeH + gapY);
+        // Horizontal group → one row, x advances per round. Else → one column,
+        // y advances per tier.
+        const x = horiz ? baseX + tierIdx * colWidth : baseX;
+        const y = horiz
+          ? divLabelH + 20 + colTopPad
+          : divLabelH + 20 + colTopPad + tierIdx * (nodeH + gapY);
         const tierRaceNums = tier.race_numbers || [];
 
         // Per-tier status — derived from the rolled-up race statuses.
@@ -331,34 +385,73 @@ async function renderFlowchart(divisions, races, raceMap) {
       });
     });
 
-    // Render progression arrows — one per (from_tier → to_tier).
-    // Arrows now connect TIER boxes, not individual race nodes, so the
-    // chart looks like a real bracket diagram.
+    const strokeCol = 'var(--text-tertiary)';
+    const arrowHead = (toX, toY) => `<polygon points="${toX},${toY} ${toX - 7},${toY - 5} ${toX - 7},${toY + 5}" fill="${strokeCol}"/>`;
+
+    // Combined-time fan-out edges (detected above): grouped→tier progressions
+    // get a single "Combined time" box + fan-out instead of N crossing edges.
+    const fanSet = new Set(fanProgs.filter(p => tierPositions[p.from_round_id] && tierPositions[p.to_round_id]));
+
+    const labelChip = (lx, ly, txt, italic) => {
+      const w = txt.length * 5.6 + 6;
+      return `<rect x="${(lx - w / 2).toFixed(1)}" y="${(ly - 9).toFixed(1)}" width="${w.toFixed(1)}" height="12" rx="2" fill="var(--bg-card,#fff)" opacity="0.82"/>`
+        + `<text x="${lx.toFixed(1)}" y="${ly.toFixed(1)}" font-size="${italic ? 9 : 10}" fill="var(--text-tertiary)" text-anchor="middle" font-weight="500"${italic ? ' font-style="italic"' : ''}>${escapeXml(txt)}</text>`;
+    };
+
+    // Generic progression arrows — one per (from_tier → to_tier), skipping the
+    // edges the combined-time fan-out replaces.
     for (const prog of progs) {
+      if (useGroup && fanSet.has(prog)) continue;
       const from = tierPositions[prog.from_round_id];
       const to   = tierPositions[prog.to_round_id];
       if (!from || !to) continue;
-
-      const strokeCol = 'var(--text-tertiary)';
       const midX = from.x + (to.lx - from.x) / 2;
-
       if (prog.is_scored) {
-        // Double line (====) for scored progressions.
         svgContent += `<path d="M${from.x},${from.y - 2} C${midX},${from.y - 2} ${midX},${to.y - 2} ${to.lx},${to.y - 2}" fill="none" stroke="${strokeCol}" stroke-width="1.5"/>`;
         svgContent += `<path d="M${from.x},${from.y + 2} C${midX},${from.y + 2} ${midX},${to.y + 2} ${to.lx},${to.y + 2}" fill="none" stroke="${strokeCol}" stroke-width="1.5"/>`;
       } else {
         svgContent += `<path d="M${from.x},${from.y} C${midX},${from.y} ${midX},${to.y} ${to.lx},${to.y}" fill="none" stroke="${strokeCol}" stroke-width="1.2"/>`;
       }
-
-      // Arrow head at the destination tier's left edge.
-      svgContent += `<polygon points="${to.lx},${to.y} ${to.lx - 7},${to.y - 5} ${to.lx - 7},${to.y + 5}" fill="${strokeCol}"/>`;
-
-      // Position-range label at the curve midpoint.
+      svgContent += arrowHead(to.lx, to.y);
+      // Position-range label near the SOURCE (so crossing edges separate by their
+      // source row); "scored" tag near the DESTINATION.
       if (prog.position_range && prog.position_range !== 'all') {
-        svgContent += `<text x="${midX}" y="${(from.y + to.y) / 2 - 5}" font-size="10" fill="var(--text-tertiary)" text-anchor="middle" font-weight="500">${escapeXml(prog.position_range)}</text>`;
+        svgContent += labelChip(from.x + (to.lx - from.x) * 0.28, from.y + (to.y - from.y) * 0.28 - 3, prog.position_range, false);
       }
       if (prog.is_scored) {
-        svgContent += `<text x="${midX}" y="${(from.y + to.y) / 2 + 12}" font-size="9" fill="var(--text-tertiary)" text-anchor="middle" font-style="italic">scored</text>`;
+        svgContent += labelChip(from.x + (to.lx - from.x) * 0.72, from.y + (to.y - from.y) * 0.72 - 3, 'scored', true);
+      }
+    }
+
+    // Combined-time grouping box + fan-out to each tier.
+    if (useGroup) {
+      const boxes = [...groupIds].map(id => tierPositions[id]).filter(Boolean);
+      const left = Math.min(...boxes.map(b => b.lx));
+      const right = Math.max(...boxes.map(b => b.x));
+      const top = Math.min(...boxes.map(b => b.y - nodeH / 2));
+      const bottom = Math.max(...boxes.map(b => b.y + nodeH / 2));
+      const pad = 9;
+      const gx = left - pad, gy = top - pad - 13, gw = (right - left) + pad * 2, gh = (bottom - top) + pad * 2 + 13;
+      svgContent += `<rect x="${gx.toFixed(1)}" y="${gy.toFixed(1)}" width="${gw.toFixed(1)}" height="${gh.toFixed(1)}" rx="8" fill="none" stroke="var(--accent)" stroke-width="1.3" stroke-dasharray="5 3" opacity="0.85"/>`;
+      svgContent += `<text x="${(gx + 8).toFixed(1)}" y="${(gy + 13).toFixed(1)}" font-size="10" font-weight="700" fill="var(--accent)">Combined time</text>`;
+
+      const mergeX = right + pad;
+      const mergeY = (top + bottom) / 2;
+      // One fan-out edge per target tier (dedup the position-range labels).
+      const byTier = new Map();
+      for (const p of fanProgs) {
+        if (!byTier.has(p.to_round_id)) byTier.set(p.to_round_id, { to: tierPositions[p.to_round_id], ranges: new Set() });
+        if (p.position_range && p.position_range !== 'all') byTier.get(p.to_round_id).ranges.add(p.position_range);
+      }
+      // Trunk from the box right edge to the merge point.
+      svgContent += `<path d="M${right.toFixed(1)},${mergeY.toFixed(1)} L${mergeX.toFixed(1)},${mergeY.toFixed(1)}" stroke="${strokeCol}" stroke-width="1.3" fill="none"/>`;
+      for (const { to, ranges } of byTier.values()) {
+        if (!to) continue;
+        const cx = mergeX + (to.lx - mergeX) / 2;
+        svgContent += `<path d="M${mergeX.toFixed(1)},${mergeY.toFixed(1)} C${cx.toFixed(1)},${mergeY.toFixed(1)} ${cx.toFixed(1)},${to.y} ${to.lx},${to.y}" fill="none" stroke="${strokeCol}" stroke-width="1.3"/>`;
+        svgContent += arrowHead(to.lx, to.y);
+        const txt = [...ranges].join(', ');
+        if (txt) svgContent += labelChip(mergeX + (to.lx - mergeX) * 0.5, mergeY + (to.y - mergeY) * 0.5 - 3, txt, false);
       }
     }
 
